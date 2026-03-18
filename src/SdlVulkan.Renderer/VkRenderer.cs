@@ -14,12 +14,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // Push constant data: mat4 (16 floats) + vec4 (4 floats) = 80 bytes
     private readonly float[] _pushConstants = new float[20];
 
-    public VkRenderer(VulkanContext ctx, IGlyphRasterizer glyphRasterizer, uint width, uint height) : base(ctx)
+    public VkRenderer(VulkanContext ctx, uint width, uint height) : base(ctx)
     {
         _width = width;
         _height = height;
         _pipelines = VkPipelineSet.Create(ctx);
-        _fontAtlas = new VkFontAtlas(ctx, glyphRasterizer);
+        _fontAtlas = new VkFontAtlas(ctx);
         UpdateProjection();
     }
 
@@ -185,17 +185,36 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             var line = lines[lineIdx];
             if (string.IsNullOrEmpty(line)) continue;
 
-            var textWidth = 0f;
+            // Compute visual text metrics
+            var advanceSum = 0f;
+            var firstBearingX = 0;
+            var lastRightEdge = 0f;
+            var maxAscent = 0;  // max BearingY (above baseline)
+            var maxDescent = 0; // max (Height - BearingY) (below baseline)
+            var first = true;
             foreach (var mc in line)
-                textWidth += _fontAtlas.GetGlyph(fontFamily, fontSize, mc).AdvanceX;
+            {
+                var g = _fontAtlas.GetGlyph(fontFamily, fontSize, mc);
+                if (first && g.Width > 0) { firstBearingX = g.BearingX; first = false; }
+                if (g.Width > 0) { lastRightEdge = advanceSum + g.BearingX + g.Width; }
+                if (g.BearingY > maxAscent) maxAscent = g.BearingY;
+                var descent = g.Height - g.BearingY;
+                if (descent > maxDescent) maxDescent = descent;
+                advanceSum += g.AdvanceX;
+            }
+            var visualWidth = first ? advanceSum : lastRightEdge - firstBearingX;
+            var visualHeight = maxAscent + maxDescent;
 
             var penX = horizAlignment switch
             {
-                TextAlign.Center => layoutX + (layoutW - textWidth) / 2f,
-                TextAlign.Far => layoutX + layoutW - textWidth,
+                TextAlign.Center => layoutX + (layoutW - visualWidth) / 2f - firstBearingX,
+                TextAlign.Far => layoutX + layoutW - visualWidth - firstBearingX,
                 _ => layoutX
             };
             var penY = startY + lineIdx * lineHeight;
+
+            // Place baseline so the visual bounds (ascent + descent) are centered in the line
+            var baseline = penY + (lineHeight + maxAscent - maxDescent) / 2f;
 
             foreach (var ch in line)
             {
@@ -206,8 +225,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
                     continue;
                 }
 
-                var gx0 = penX;
-                var gy0 = penY + (lineHeight - glyph.Height) / 2f;
+                var gx0 = penX + glyph.BearingX;
+                var gy0 = baseline - glyph.BearingY;
                 var gx1 = gx0 + glyph.Width;
                 var gy1 = gy0 + glyph.Height;
 

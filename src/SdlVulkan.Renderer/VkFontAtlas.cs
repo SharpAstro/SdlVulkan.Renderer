@@ -8,10 +8,10 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 {
     private readonly record struct GlyphKey(string Font, float Size, char Character);
 
-    internal readonly record struct GlyphInfo(float U0, float V0, float U1, float V1, int Width, int Height, float AdvanceX);
+    internal readonly record struct GlyphInfo(float U0, float V0, float U1, float V1, int Width, int Height, float AdvanceX, int BearingX, int BearingY);
 
     private readonly VulkanContext _ctx;
-    private readonly IGlyphRasterizer _rasterizer;
+    private readonly FreeTypeGlyphRasterizer _rasterizer = new();
     private readonly Dictionary<GlyphKey, GlyphInfo> _glyphs = new();
 
     private const int MaxAtlasSize = 2048;
@@ -38,10 +38,9 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     public VkImageView ImageView => _imageView;
     public VkSampler Sampler => _sampler;
 
-    public VkFontAtlas(VulkanContext ctx, IGlyphRasterizer rasterizer, int initialWidth = 512, int initialHeight = 512)
+    public VkFontAtlas(VulkanContext ctx, int initialWidth = 512, int initialHeight = 512)
     {
         _ctx = ctx;
-        _rasterizer = rasterizer;
         _atlasWidth = initialWidth;
         _atlasHeight = initialHeight;
         _staging = new byte[initialWidth * initialHeight * 4];
@@ -110,6 +109,8 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     public void Dispose()
     {
+        _rasterizer.Dispose();
+
         var api = _ctx.DeviceApi;
 
         if (_uploadBuffer != VkBuffer.Null)
@@ -129,7 +130,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         if (char.IsWhiteSpace(key.Character))
         {
             var refGlyph = GetGlyph(key.Font, key.Size, 'n');
-            var info = new GlyphInfo(0, 0, 0, 0, 0, 0, refGlyph.AdvanceX);
+            var info = new GlyphInfo(0, 0, 0, 0, 0, 0, refGlyph.AdvanceX, 0, 0);
             _glyphs[key] = info;
             return info;
         }
@@ -182,7 +183,9 @@ internal sealed unsafe class VkFontAtlas : IDisposable
             V1: (_cursorY + glyphHeight) / (float)_atlasHeight,
             Width: glyphWidth,
             Height: glyphHeight,
-            AdvanceX: glyphWidth);
+            AdvanceX: bitmap.AdvanceX,
+            BearingX: bitmap.BearingX,
+            BearingY: bitmap.BearingY);
 
         _glyphs[key] = glyphInfo;
         _cursorX += glyphWidth + 1;
