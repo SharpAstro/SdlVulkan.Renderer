@@ -1,3 +1,4 @@
+using System.Text;
 using DIR.Lib;
 using Vortice.Vulkan;
 using static Vortice.Vulkan.Vulkan;
@@ -135,7 +136,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
             return info;
         }
 
-        var bitmap = _rasterizer.RasterizeGlyph(key.Font, key.Size, key.Character);
+        var bitmap = _rasterizer.RasterizeGlyph(key.Font, key.Size, new Rune(key.Character));
         var glyphWidth = bitmap.Width;
         var glyphHeight = bitmap.Height;
 
