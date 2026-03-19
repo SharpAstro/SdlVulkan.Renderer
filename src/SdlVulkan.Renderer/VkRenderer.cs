@@ -30,6 +30,30 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public bool FontAtlasDirty => _fontAtlas?.IsDirty == true;
 
     /// <summary>
+    /// The active command buffer for the current frame. Only valid between BeginFrame and EndFrame.
+    /// Allows side-car pipelines to record custom draw commands within the same render pass.
+    /// </summary>
+    public VkCommandBuffer CurrentCommandBuffer => _currentCmd;
+
+    /// <summary>
+    /// Measures the width of the given text in pixels at the specified font size.
+    /// Sums advance widths across all characters, rasterizing glyphs on-miss.
+    /// </summary>
+    public float MeasureText(ReadOnlySpan<char> text, string fontFamily, float fontSize)
+    {
+        if (_fontAtlas is null || text.IsEmpty)
+            return 0f;
+
+        var width = 0f;
+        foreach (var ch in text)
+        {
+            var glyph = _fontAtlas.GetGlyph(fontFamily, fontSize, ch);
+            width += glyph.AdvanceX;
+        }
+        return width;
+    }
+
+    /// <summary>
     /// Begins a new frame. Must be called before any draw calls.
     /// Returns false if the swapchain needs recreation (caller should resize and retry).
     /// </summary>
