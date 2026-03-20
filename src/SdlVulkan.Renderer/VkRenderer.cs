@@ -36,21 +36,26 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public VkCommandBuffer CurrentCommandBuffer => _currentCmd;
 
     /// <summary>
-    /// Measures the width of the given text in pixels at the specified font size.
-    /// Sums advance widths across all characters, rasterizing glyphs on-miss.
+    /// Measures the size of the given text in pixels at the specified font size.
+    /// Returns (width, height) where height is ascent + descent.
     /// </summary>
-    public float MeasureText(ReadOnlySpan<char> text, string fontFamily, float fontSize)
+    public override (float Width, float Height) MeasureText(ReadOnlySpan<char> text, string fontFamily, float fontSize)
     {
         if (_fontAtlas is null || text.IsEmpty)
-            return 0f;
+            return (0f, 0f);
 
         var width = 0f;
-        foreach (var ch in text)
+        var maxAscent = 0;
+        var maxDescent = 0;
+        foreach (var ch in text.EnumerateRunes())
         {
             var glyph = _fontAtlas.GetGlyph(fontFamily, fontSize, ch);
             width += glyph.AdvanceX;
+            if (glyph.BearingY > maxAscent) maxAscent = glyph.BearingY;
+            var descent = glyph.Height - glyph.BearingY;
+            if (descent > maxDescent) maxDescent = descent;
         }
-        return width;
+        return (width, maxAscent + maxDescent);
     }
 
     /// <summary>
@@ -216,7 +221,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             var maxAscent = 0;  // max BearingY (above baseline)
             var maxDescent = 0; // max (Height - BearingY) (below baseline)
             var first = true;
-            foreach (var mc in line)
+            foreach (var mc in line.EnumerateRunes())
             {
                 var g = _fontAtlas.GetGlyph(fontFamily, fontSize, mc);
                 if (first && g.Width > 0) { firstBearingX = g.BearingX; first = false; }
@@ -240,7 +245,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             // Place baseline so the visual bounds (ascent + descent) are centered in the line
             var baseline = penY + (lineHeight + maxAscent - maxDescent) / 2f;
 
-            foreach (var ch in line)
+            foreach (var ch in line.EnumerateRunes())
             {
                 var glyph = _fontAtlas.GetGlyph(fontFamily, fontSize, ch);
                 if (glyph.Width == 0)

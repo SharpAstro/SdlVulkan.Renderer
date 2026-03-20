@@ -45,6 +45,19 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
 
     public void GetSizeInPixels(out int w, out int h) => GetWindowSizeInPixels(Handle, out w, out h);
 
+    /// <summary>
+    /// Returns the DPI display scale factor for this window (e.g. 1.5 for 150% scaling).
+    /// Uses SDL3's <c>GetWindowDisplayScale</c> which correctly handles per-monitor DPI.
+    /// </summary>
+    public float DisplayScale
+    {
+        get
+        {
+            var scale = GetWindowDisplayScale(Handle);
+            return scale > 0f ? scale : 1f;
+        }
+    }
+
     public void ToggleFullscreen()
     {
         var flags = GetWindowFlags(Handle);

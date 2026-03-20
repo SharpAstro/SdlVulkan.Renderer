@@ -7,7 +7,7 @@ namespace SdlVulkan.Renderer;
 
 internal sealed unsafe class VkFontAtlas : IDisposable
 {
-    private readonly record struct GlyphKey(string Font, float Size, char Character);
+    private readonly record struct GlyphKey(string Font, float Size, Rune Character);
 
     internal readonly record struct GlyphInfo(float U0, float V0, float U1, float V1, int Width, int Height, float AdvanceX, int BearingX, int BearingY);
 
@@ -52,7 +52,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         ctx.UpdateDescriptorSet(_imageView, _sampler);
     }
 
-    public GlyphInfo GetGlyph(string fontPath, float fontSize, char character)
+    public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character)
     {
         fontSize = MathF.Round(fontSize);
         var key = new GlyphKey(fontPath, fontSize, character);
@@ -128,15 +128,15 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     private GlyphInfo RasterizeGlyph(GlyphKey key, bool retrying = false)
     {
-        if (char.IsWhiteSpace(key.Character))
+        if (Rune.IsWhiteSpace(key.Character))
         {
-            var refGlyph = GetGlyph(key.Font, key.Size, 'n');
+            var refGlyph = GetGlyph(key.Font, key.Size, new Rune('n'));
             var info = new GlyphInfo(0, 0, 0, 0, 0, 0, refGlyph.AdvanceX, 0, 0);
             _glyphs[key] = info;
             return info;
         }
 
-        var bitmap = _rasterizer.RasterizeGlyph(key.Font, key.Size, new Rune(key.Character));
+        var bitmap = _rasterizer.RasterizeGlyph(key.Font, key.Size, key.Character);
         var glyphWidth = bitmap.Width;
         var glyphHeight = bitmap.Height;
 
