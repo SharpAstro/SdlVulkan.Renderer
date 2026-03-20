@@ -86,6 +86,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     public override void Resize(uint width, uint height)
     {
+        Console.Error.WriteLine($"[VkRenderer] Resize: {_width}x{_height} -> {width}x{height}");
         _width = width;
         _height = height;
         Surface.RecreateSwapchain(width, height);

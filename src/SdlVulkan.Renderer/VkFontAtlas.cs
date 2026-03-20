@@ -61,6 +61,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     {
         if (_needsEviction)
         {
+            Console.Error.WriteLine($"[FontAtlas] BeginFrame: deferred eviction triggered, atlas {_atlasWidth}x{_atlasHeight}, {_glyphs.Count} glyphs");
             EvictAll();
             _needsEviction = false;
         }
@@ -84,6 +85,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         var regionW = _dirtyX1 - _dirtyX0;
         var regionH = _dirtyY1 - _dirtyY0;
+        Console.Error.WriteLine($"[FontAtlas] Flush: uploading dirty region ({_dirtyX0},{_dirtyY0})-({_dirtyX1},{_dirtyY1}) = {regionW}x{regionH} px, atlas {_atlasWidth}x{_atlasHeight}");
         var pixelCount = regionW * regionH;
 
         // Extract the dirty region into a contiguous buffer
@@ -171,6 +173,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
                 return RasterizeGlyph(key);
             }
             // Defer eviction to next frame start to avoid stale UVs in current batch
+            Console.Error.WriteLine($"[FontAtlas] RasterizeGlyph: atlas full at max {_atlasWidth}x{_atlasHeight}, deferring eviction. Glyph: '{key.Character}' font={key.Font} size={key.Size}");
             _needsEviction = true;
             return default;
         }
@@ -212,6 +215,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         _atlasWidth = Math.Min(_atlasWidth * 2, MaxAtlasSize);
         _atlasHeight = Math.Min(_atlasHeight * 2, MaxAtlasSize);
+        Console.Error.WriteLine($"[FontAtlas] Grow: {oldWidth}x{oldHeight} -> {_atlasWidth}x{_atlasHeight}, {_glyphs.Count} glyphs, cursor ({_cursorX},{_cursorY})");
 
         var newStaging = new byte[_atlasWidth * _atlasHeight * 4];
         // Copy old rows into the wider buffer
@@ -246,6 +250,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     private void EvictAll()
     {
+        Console.Error.WriteLine($"[FontAtlas] EvictAll: clearing {_glyphs.Count} glyphs, atlas {_atlasWidth}x{_atlasHeight}, cursor ({_cursorX},{_cursorY})");
         _glyphs.Clear();
         _cursorX = 0; _cursorY = 0; _rowHeight = 0;
         _staging = new byte[_atlasWidth * _atlasHeight * 4];
