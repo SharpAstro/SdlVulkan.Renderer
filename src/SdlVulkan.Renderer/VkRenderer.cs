@@ -68,7 +68,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (resized || _currentCmd == VkCommandBuffer.Null)
             return false;
 
-        // Flush font atlas changes before render pass
+        // Handle deferred eviction, then flush font atlas changes before render pass
+        _fontAtlas?.BeginFrame();
         _fontAtlas?.Flush(_currentCmd);
 
         Surface.BeginRenderPass(_currentCmd, clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f);

@@ -26,6 +26,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     private byte[] _staging;
 
     private int _dirtyX0, _dirtyY0, _dirtyX1, _dirtyY1;
+    private bool _needsEviction;
 
     private VkImage _image;
     private VkDeviceMemory _imageMemory;
@@ -52,6 +53,19 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         ctx.UpdateDescriptorSet(_imageView, _sampler);
     }
 
+    /// <summary>
+    /// Call at the start of each frame to handle deferred eviction.
+    /// This ensures no stale UV coordinates exist in the current frame's batch.
+    /// </summary>
+    public void BeginFrame()
+    {
+        if (_needsEviction)
+        {
+            EvictAll();
+            _needsEviction = false;
+        }
+    }
+
     public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character)
     {
         fontSize = MathF.Round(fontSize);
@@ -61,7 +75,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         return RasterizeGlyph(key);
     }
 
-    public bool IsDirty => _dirtyX0 < _dirtyX1 && _dirtyY0 < _dirtyY1;
+    public bool IsDirty => _needsEviction || (_dirtyX0 < _dirtyX1 && _dirtyY0 < _dirtyY1);
 
     public void Flush(VkCommandBuffer cmd)
     {
@@ -126,7 +140,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkFreeMemory(_imageMemory);
     }
 
-    private GlyphInfo RasterizeGlyph(GlyphKey key, bool retrying = false)
+    private GlyphInfo RasterizeGlyph(GlyphKey key)
     {
         if (Rune.IsWhiteSpace(key.Character))
         {
@@ -156,11 +170,8 @@ internal sealed unsafe class VkFontAtlas : IDisposable
                 Grow();
                 return RasterizeGlyph(key);
             }
-            if (!retrying)
-            {
-                EvictAll();
-                return RasterizeGlyph(key, retrying: true);
-            }
+            // Defer eviction to next frame start to avoid stale UVs in current batch
+            _needsEviction = true;
             return default;
         }
 
