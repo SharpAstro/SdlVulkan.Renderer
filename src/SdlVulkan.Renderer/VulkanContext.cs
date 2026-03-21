@@ -157,12 +157,12 @@ public sealed unsafe class VulkanContext : IDisposable
         VkDescriptorSet descriptorSet;
         deviceApi.vkAllocateDescriptorSets(&dsAI, &descriptorSet).CheckResult();
 
-        // Pipeline layout with push constants (80 bytes: mat4 + vec4) + 1 descriptor set
+        // Pipeline layout with push constants (84 bytes: mat4 + vec4 + float innerRadius) + 1 descriptor set
         VkPushConstantRange pushRange = new()
         {
             stageFlags = VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment,
             offset = 0,
-            size = 80
+            size = 84
         };
         VkPipelineLayoutCreateInfo plCI = new()
         {

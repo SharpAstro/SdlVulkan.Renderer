@@ -75,11 +75,13 @@ internal sealed unsafe class VkPipelineSet : IDisposable
     private const string EllipseFragmentSource = """
         #version 450
         layout(location = 0) in vec2 vLocal;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; } pc;
+        layout(push_constant) uniform PC { mat4 proj; vec4 color; float innerRadius; } pc;
         layout(location = 0) out vec4 FragColor;
         void main() {
             float dist = dot(vLocal, vLocal);
             if (dist > 1.0) discard;
+            // Ring mode: discard pixels inside the inner radius (when innerRadius > 0)
+            if (pc.innerRadius > 0.0 && dist < pc.innerRadius * pc.innerRadius) discard;
             FragColor = pc.color;
         }
         """;

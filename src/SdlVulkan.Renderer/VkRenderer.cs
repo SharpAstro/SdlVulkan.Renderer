@@ -11,8 +11,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     private uint _height;
     private VkCommandBuffer _currentCmd;
 
-    // Push constant data: mat4 (16 floats) + vec4 (4 floats) = 80 bytes
-    private readonly float[] _pushConstants = new float[20];
+    // Push constant data: mat4 (16 floats) + vec4 color (4 floats) + float innerRadius (1 float) = 84 bytes
+    private readonly float[] _pushConstants = new float[21];
 
     public VkRenderer(VulkanContext ctx, uint width, uint height) : base(ctx)
     {
@@ -115,7 +115,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.FlatPipeline);
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
-                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 80, pPC);
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
 
         var buffer = Surface.VertexBuffer;
         var vkOffset = (ulong)offset;
@@ -164,12 +164,55 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         ];
 
         SetColor(fillColor);
+        _pushConstants[20] = 0f; // innerRadius = 0 → filled
         var offset = Surface.WriteVertices(vertices);
 
         api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.EllipsePipeline);
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
-                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 80, pPC);
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
+    }
+
+    /// <summary>
+    /// Draws an ellipse outline (ring) with the given stroke width in pixels.
+    /// </summary>
+    public void DrawEllipseOutline(in RectInt rect, DIR.Lib.RGBAColor32 strokeColor, float strokeWidth)
+    {
+        if (_pipelines is null) return;
+
+        var api = Surface.DeviceApi;
+        var x0 = (float)rect.UpperLeft.X;
+        var y0 = (float)rect.UpperLeft.Y;
+        var x1 = (float)rect.LowerRight.X;
+        var y1 = (float)rect.LowerRight.Y;
+
+        // Compute inner radius in normalized [-1,1] space
+        var radiusPixels = Math.Max(Math.Abs(x1 - x0), Math.Abs(y1 - y0)) / 2f;
+        var innerRadius = radiusPixels > 0 ? Math.Max(0f, (radiusPixels - strokeWidth) / radiusPixels) : 0f;
+
+        ReadOnlySpan<float> vertices =
+        [
+            x0, y0, -1f, -1f,
+            x1, y0,  1f, -1f,
+            x1, y1,  1f,  1f,
+            x0, y0, -1f, -1f,
+            x1, y1,  1f,  1f,
+            x0, y1, -1f,  1f
+        ];
+
+        SetColor(strokeColor);
+        _pushConstants[20] = innerRadius; // ring mode
+        var offset = Surface.WriteVertices(vertices);
+
+        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.EllipsePipeline);
+        fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
 
         var buffer = Surface.VertexBuffer;
         var vkOffset = (ulong)offset;
@@ -276,7 +319,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
                 fixed (float* pPC = _pushConstants)
                     api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
-                        VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 80, pPC);
+                        VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
 
                 var buffer = Surface.VertexBuffer;
                 var vkOffset = (ulong)vertOffset;
