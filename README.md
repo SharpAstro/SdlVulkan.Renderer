@@ -4,11 +4,23 @@ SDL3 + Vortice.Vulkan rendering library built on [DIR.Lib](https://github.com/Sh
 
 ## Types
 
-- **`SdlVulkanWindow`** — SDL3 window with Vulkan instance and surface lifecycle
-- **`VulkanContext`** — Vulkan device, swapchain, command buffers, and sync management
-- **`VkRenderer`** — `Renderer<VulkanContext>` implementation with FillRectangle, DrawRectangle, FillEllipse, DrawText
+- **`SdlVulkanWindow`** — SDL3 window with Vulkan instance and surface lifecycle. Creates maximized, resizable windows with Vulkan surface.
+- **`VulkanContext`** — Vulkan device, swapchain, command buffers, sync management. `MaxFramesInFlight = 2` with per-frame vertex buffers.
+- **`VkRenderer`** — `Renderer<VulkanContext>` implementation with FillRectangle, DrawRectangle, FillEllipse, DrawText. Exposes `FontAtlasDirty` for callers to trigger redraws after glyph rasterization.
 - **`VkPipelineSet`** — GLSL 450 shader compilation and Vulkan pipeline creation (flat, textured, ellipse)
-- **`VkFontAtlas`** — Dynamic glyph atlas with FreeType2 rasterization and Vulkan texture upload
+- **`VkFontAtlas`** — Dynamic glyph atlas with FreeType2 rasterization and Vulkan texture upload. Supports grow (512→2048), deferred eviction, and `skipUnflushed` to prevent sampling stale GPU texture data.
+
+## Font Atlas Lifecycle
+
+Per frame:
+1. `BeginFrame()` — handles deferred eviction if atlas was full last frame
+2. `Flush(cmd)` — uploads dirty staging region to GPU via `vkCmdCopyBufferToImage`
+3. `DrawText(...)` → `GetGlyph(...)` — cache hit returns UV coords; miss rasterizes into staging
+4. `GetGlyph(..., skipUnflushed: true)` — in draw loops, returns zero-width for glyphs not yet uploaded
+
+**Thread safety**: `vkDeviceWaitIdle()` before reusing the shared upload buffer (prevents race with `MaxFramesInFlight = 2`).
+
+**Diagnostic logging** (`Console.Error`): `[FontAtlas]` / `[VkRenderer]` prefixed lines for Flush, Grow, EvictAll, cache miss, Resize. Capture with `2>stderr.log`.
 
 ## Usage
 
@@ -21,7 +33,14 @@ window.GetSizeInPixels(out var w, out var h);
 var ctx = VulkanContext.Create(window.Instance, window.Surface, (uint)w, (uint)h);
 var renderer = new VkRenderer(ctx, (uint)w, (uint)h);
 
-// Use renderer.FillRectangle, DrawText, etc.
+while (running)
+{
+    if (!renderer.BeginFrame(bgColor)) { renderer.Resize(w, h); continue; }
+    renderer.FillRectangle(rect, color);
+    renderer.DrawText("Hello", fontPath, 14f, white, layout);
+    renderer.EndFrame();
+    if (renderer.FontAtlasDirty) needsRedraw = true;
+}
 ```
 
 ## Dependencies
