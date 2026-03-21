@@ -249,7 +249,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
             foreach (var ch in line.EnumerateRunes())
             {
-                var glyph = _fontAtlas.GetGlyph(fontFamily, fontSize, ch);
+                // skipUnflushed: true — skip quads for glyphs not yet uploaded to GPU
+                var glyph = _fontAtlas.GetGlyph(fontFamily, fontSize, ch, skipUnflushed: true);
                 if (glyph.Width == 0)
                 {
                     penX += glyph.AdvanceX;

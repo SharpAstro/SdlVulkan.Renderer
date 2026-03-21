@@ -29,9 +29,12 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
         vkInitialize().CheckResult();
 
         var window = CreateWindow(title, width, height,
-            WindowFlags.Vulkan | WindowFlags.Resizable);
+            WindowFlags.Vulkan | WindowFlags.Resizable | WindowFlags.Maximized);
         if (window == nint.Zero)
             throw new InvalidOperationException($"SDL_CreateWindow failed: {GetError()}");
+
+        // Pump events so the window manager processes the maximize before we read pixel size
+        PumpEvents();
 
         var instance = CreateVulkanInstance();
 

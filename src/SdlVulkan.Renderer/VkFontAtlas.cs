@@ -14,6 +14,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     private readonly VulkanContext _ctx;
     private readonly FreeTypeGlyphRasterizer _rasterizer = new();
     private readonly Dictionary<GlyphKey, GlyphInfo> _glyphs = new();
+    private readonly HashSet<GlyphKey> _unflushedGlyphs = new();
 
     private const int MaxAtlasSize = 2048;
 
@@ -67,13 +68,32 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         }
     }
 
-    public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character)
+    /// <summary>
+    /// Gets glyph info, rasterizing into the staging buffer if needed.
+    /// Use <paramref name="skipUnflushed"/> in draw loops to avoid sampling stale GPU texture data.
+    /// </summary>
+    public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character, bool skipUnflushed = false)
     {
         fontSize = MathF.Round(fontSize);
         var key = new GlyphKey(fontPath, fontSize, character);
         if (_glyphs.TryGetValue(key, out var existing))
+        {
+            // Cache hit — safe to draw only if this glyph has been flushed to GPU
+            if (skipUnflushed && _unflushedGlyphs.Contains(key))
+            {
+                Console.Error.WriteLine($"[FontAtlas] Skip unflushed (hit): '{character}' size={fontSize}");
+                return existing with { Width = 0 }; // metrics preserved for advance, but skip quad
+            }
             return existing;
-        return RasterizeGlyph(key);
+        }
+        Console.Error.WriteLine($"[FontAtlas] Cache miss: '{character}' size={fontSize} cursor=({_cursorX},{_cursorY}) glyphs={_glyphs.Count}");
+        var result = RasterizeGlyph(key);
+        if (skipUnflushed && result.Width > 0)
+        {
+            Console.Error.WriteLine($"[FontAtlas] Skip unflushed (new): '{character}' size={fontSize}");
+            return result with { Width = 0 }; // just rasterized, not flushed yet — skip quad
+        }
+        return result;
     }
 
     public bool IsDirty => _needsEviction || (_dirtyX0 < _dirtyX1 && _dirtyY0 < _dirtyY1);
@@ -98,6 +118,12 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         }
 
         var bufferSize = (ulong)(pixelCount * 4);
+
+        // Wait for any in-flight command buffers to finish reading the upload buffer
+        // before overwriting it. With MaxFramesInFlight=2, the previous frame's
+        // vkCmdCopyBufferToImage may still be reading the shared upload buffer.
+        _ctx.DeviceApi.vkDeviceWaitIdle();
+
         EnsureUploadBuffer(bufferSize);
 
         void* mapped;
@@ -122,6 +148,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         TransitionImageLayout(cmd, _image, VkImageLayout.TransferDstOptimal, VkImageLayout.ShaderReadOnlyOptimal);
 
         ResetDirtyRegion();
+        _unflushedGlyphs.Clear();
     }
 
     public void Dispose()
@@ -203,6 +230,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
             BearingY: bitmap.BearingY);
 
         _glyphs[key] = glyphInfo;
+        _unflushedGlyphs.Add(key);
         _cursorX += glyphWidth + 1;
         _rowHeight = Math.Max(_rowHeight, glyphHeight);
         return glyphInfo;
