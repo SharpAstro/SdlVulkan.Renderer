@@ -123,7 +123,15 @@ public class VkMenuWidget : IWidget
     }
 
     /// <inheritdoc/>
-    public bool HandleKeyDown(InputKey key, InputModifier modifiers)
+    public bool HandleInput(InputEvent evt) => evt switch
+    {
+        InputEvent.KeyDown(var key, _) => HandleKeyDown(key),
+        InputEvent.MouseDown(var x, var y, _, _, _) => HandleMouseDown(x, y),
+        _ => false
+    };
+
+    /// <summary>Handles keyboard navigation. Returns true if consumed.</summary>
+    public bool HandleKeyDown(InputKey key)
     {
         if (IsConfirmed || _items.Length == 0) return false;
 
@@ -162,7 +170,7 @@ public class VkMenuWidget : IWidget
         }
     }
 
-    /// <inheritdoc/>
+    /// <summary>Handles mouse click on menu items. Returns true if consumed.</summary>
     public bool HandleMouseDown(float x, float y)
     {
         if (IsConfirmed || _lastWidth == 0 || _items.Length == 0) return false;

@@ -32,6 +32,13 @@ public static class SdlInputMapping
             >= Scancode.F1 and <= Scancode.F12 => (InputKey)((int)InputKey.F1 + (scancode - Scancode.F1)),
             Scancode.Equals => InputKey.Plus,
             Scancode.Minus => InputKey.Minus,
+            Scancode.Period => InputKey.Period,
+            Scancode.Comma => InputKey.Comma,
+            Scancode.Slash => InputKey.Slash,
+            Scancode.Backslash => InputKey.Backslash,
+            Scancode.Semicolon => InputKey.Semicolon,
+            Scancode.Apostrophe => InputKey.Quote,
+            Scancode.Grave => InputKey.Grave,
             _ => InputKey.None,
         };
     }

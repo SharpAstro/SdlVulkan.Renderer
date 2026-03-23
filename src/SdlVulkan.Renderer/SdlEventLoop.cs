@@ -8,13 +8,14 @@ namespace SdlVulkan.Renderer;
 /// and font atlas dirty handling. Provides typed callbacks for input events.
 /// <para>
 /// Handles internally: quit, window resize (calls <see cref="VkRenderer.Resize"/>),
-/// window expose, F11 fullscreen toggle, font atlas dirty scheduling.
+/// window expose, font atlas dirty scheduling.
 /// </para>
 /// </summary>
 public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
 {
     private bool _needsRedraw = true;
     private bool _running;
+    private float _mouseX, _mouseY;
 
     /// <summary>Background color used for <see cref="VkRenderer.BeginFrame"/>.</summary>
     public RGBAColor32 BackgroundColor { get; set; } = new(0x1a, 0x1a, 0x2e, 0xff);
@@ -28,20 +29,23 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
     /// <summary>Called on key down. Parameters are the mapped InputKey and InputModifier. Return true if consumed.</summary>
     public Func<InputKey, InputModifier, bool>? OnKeyDown { get; set; }
 
-    /// <summary>Called on left mouse button down. Parameters are pixel coordinates. Return true if consumed.</summary>
-    public Func<float, float, bool>? OnMouseDown { get; set; }
+    /// <summary>Called on mouse button down. Parameters are button (1=left, 2=middle, 3=right), pixel X, pixel Y, click count. Return true if consumed.</summary>
+    public Func<byte, float, float, byte, DIR.Lib.InputModifier, bool>? OnMouseDown { get; set; }
 
     /// <summary>Called on mouse motion. Parameters are pixel coordinates.</summary>
     public Action<float, float>? OnMouseMove { get; set; }
 
-    /// <summary>Called on mouse button up.</summary>
-    public Action? OnMouseUp { get; set; }
+    /// <summary>Called on mouse button up. Parameter is button (1=left, 2=middle, 3=right).</summary>
+    public Action<byte>? OnMouseUp { get; set; }
 
     /// <summary>Called on mouse wheel. Parameters are scrollY, mouseX, mouseY. Return true if consumed.</summary>
     public Func<float, float, float, bool>? OnMouseWheel { get; set; }
 
     /// <summary>Called on SDL TextInput event. Parameter is the UTF-8 text string.</summary>
     public Action<string>? OnTextInput { get; set; }
+
+    /// <summary>Called when a file is dropped onto the window. Parameter is the file path.</summary>
+    public Action<string>? OnDropFile { get; set; }
 
     /// <summary>
     /// Called each iteration before checking <c>needsRedraw</c>. Return true to force a redraw.
@@ -99,39 +103,28 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
                             break;
 
                         case EventType.KeyDown:
-                            var inputKey = evt.Key.Scancode.ToInputKey;
-                            var inputMod = evt.Key.Mod.ToInputModifier;
-
-                            if (inputKey == InputKey.F11)
-                            {
-                                window.ToggleFullscreen();
-                            }
-                            else
-                            {
-                                OnKeyDown?.Invoke(inputKey, inputMod);
-                            }
+                            OnKeyDown?.Invoke(evt.Key.Scancode.ToInputKey, evt.Key.Mod.ToInputModifier);
                             _needsRedraw = true;
                             break;
 
                         case EventType.MouseButtonDown:
-                            if (evt.Button.Button == 1)
-                            {
-                                OnMouseDown?.Invoke(evt.Button.X, evt.Button.Y);
-                                _needsRedraw = true;
-                            }
+                            OnMouseDown?.Invoke(evt.Button.Button, evt.Button.X, evt.Button.Y, evt.Button.Clicks, GetModState().ToInputModifier);
+                            _needsRedraw = true;
                             break;
 
                         case EventType.MouseButtonUp:
-                            OnMouseUp?.Invoke();
+                            OnMouseUp?.Invoke(evt.Button.Button);
                             break;
 
                         case EventType.MouseMotion:
-                            OnMouseMove?.Invoke(evt.Motion.X, evt.Motion.Y);
+                            _mouseX = evt.Motion.X;
+                            _mouseY = evt.Motion.Y;
+                            OnMouseMove?.Invoke(_mouseX, _mouseY);
                             _needsRedraw = true;
                             break;
 
                         case EventType.MouseWheel:
-                            OnMouseWheel?.Invoke(evt.Wheel.Y, 0, 0);
+                            OnMouseWheel?.Invoke(evt.Wheel.Y, _mouseX, _mouseY);
                             _needsRedraw = true;
                             break;
 
@@ -142,6 +135,18 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
                                 if (text is not null)
                                 {
                                     OnTextInput(text);
+                                    _needsRedraw = true;
+                                }
+                            }
+                            break;
+
+                        case EventType.DropFile:
+                            if (OnDropFile is not null)
+                            {
+                                var path = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(evt.Drop.Data);
+                                if (path is not null)
+                                {
+                                    OnDropFile(path);
                                     _needsRedraw = true;
                                 }
                             }
