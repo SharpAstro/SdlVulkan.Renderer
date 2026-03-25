@@ -48,6 +48,13 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
     public Action<string>? OnDropFile { get; set; }
 
     /// <summary>
+    /// Called when the window close button is clicked (SDL Quit event).
+    /// Return true to intercept and prevent immediate exit (e.g. for graceful shutdown).
+    /// If null or returns false, the loop stops immediately.
+    /// </summary>
+    public Func<bool>? OnQuit { get; set; }
+
+    /// <summary>
     /// Called each iteration before checking <c>needsRedraw</c>. Return true to force a redraw.
     /// Use for external state changes (e.g., game display updates, background task completions, cursor blink).
     /// </summary>
@@ -84,7 +91,10 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
                     switch ((EventType)evt.Type)
                     {
                         case EventType.Quit:
-                            _running = false;
+                            if (OnQuit?.Invoke() != true)
+                            {
+                                _running = false;
+                            }
                             break;
 
                         case EventType.WindowResized:
