@@ -16,6 +16,8 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
     private bool _needsRedraw = true;
     private bool _running;
     private float _mouseX, _mouseY;
+    private long _lastMouseRedrawTimestamp;
+    private static readonly long MouseRedrawInterval = System.Diagnostics.Stopwatch.Frequency / 30; // ~30fps
 
     /// <summary>Background color used for <see cref="VkRenderer.BeginFrame"/>.</summary>
     public RGBAColor32 BackgroundColor { get; set; } = new(0x1a, 0x1a, 0x2e, 0xff);
@@ -32,8 +34,8 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
     /// <summary>Called on mouse button down. Parameters are button (1=left, 2=middle, 3=right), pixel X, pixel Y, click count. Return true if consumed.</summary>
     public Func<byte, float, float, byte, DIR.Lib.InputModifier, bool>? OnMouseDown { get; set; }
 
-    /// <summary>Called on mouse motion. Parameters are pixel coordinates.</summary>
-    public Action<float, float>? OnMouseMove { get; set; }
+    /// <summary>Called on mouse motion. Parameters are pixel coordinates. Return true to trigger a redraw.</summary>
+    public Func<float, float, bool>? OnMouseMove { get; set; }
 
     /// <summary>Called on mouse button up. Parameter is button (1=left, 2=middle, 3=right).</summary>
     public Action<byte>? OnMouseUp { get; set; }
@@ -127,10 +129,23 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
                             break;
 
                         case EventType.MouseMotion:
-                            _mouseX = evt.Motion.X;
-                            _mouseY = evt.Motion.Y;
-                            OnMouseMove?.Invoke(_mouseX, _mouseY);
-                            _needsRedraw = true;
+                            var newMx = evt.Motion.X;
+                            var newMy = evt.Motion.Y;
+                            if (newMx != _mouseX || newMy != _mouseY)
+                            {
+                                _mouseX = newMx;
+                                _mouseY = newMy;
+                                if (OnMouseMove?.Invoke(_mouseX, _mouseY) == true)
+                                {
+                                    // Throttle mouse-driven redraws to ~30fps
+                                    var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                                    if (now - _lastMouseRedrawTimestamp >= MouseRedrawInterval)
+                                    {
+                                        _lastMouseRedrawTimestamp = now;
+                                        _needsRedraw = true;
+                                    }
+                                }
+                            }
                             break;
 
                         case EventType.MouseWheel:
