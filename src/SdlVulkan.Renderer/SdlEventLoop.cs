@@ -16,8 +16,8 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
     private bool _needsRedraw = true;
     private bool _running;
     private float _mouseX, _mouseY;
-    private long _lastMouseRedrawTimestamp;
-    private static readonly long MouseRedrawInterval = System.Diagnostics.Stopwatch.Frequency / 30; // ~30fps
+    private ulong _lastMouseRedrawCounter;
+    private static readonly ulong MouseRedrawInterval = GetPerformanceFrequency() / 30; // ~30fps
 
     /// <summary>Background color used for <see cref="VkRenderer.BeginFrame"/>.</summary>
     public RGBAColor32 BackgroundColor { get; set; } = new(0x1a, 0x1a, 0x2e, 0xff);
@@ -138,10 +138,10 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
                                 if (OnMouseMove?.Invoke(_mouseX, _mouseY) == true)
                                 {
                                     // Throttle mouse-driven redraws to ~30fps
-                                    var now = System.Diagnostics.Stopwatch.GetTimestamp();
-                                    if (now - _lastMouseRedrawTimestamp >= MouseRedrawInterval)
+                                    var now = GetPerformanceCounter();
+                                    if (now - _lastMouseRedrawCounter >= MouseRedrawInterval)
                                     {
-                                        _lastMouseRedrawTimestamp = now;
+                                        _lastMouseRedrawCounter = now;
                                         _needsRedraw = true;
                                     }
                                 }
