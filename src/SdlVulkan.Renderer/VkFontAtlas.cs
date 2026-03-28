@@ -7,16 +7,18 @@ namespace SdlVulkan.Renderer;
 
 internal sealed unsafe class VkFontAtlas : IDisposable
 {
-    private readonly record struct GlyphKey(string Font, float Size, Rune Character);
+    // CharCode is included in the key for CID subset fonts where the same Unicode
+    // character may need different glyph indices. For non-CID fonts, charCode is -1.
+    private readonly record struct GlyphKey(string Font, float Size, Rune Character, int CharCode);
 
     internal readonly record struct GlyphInfo(float U0, float V0, float U1, float V1, int Width, int Height, float AdvanceX, int BearingX, int BearingY);
 
     private readonly VulkanContext _ctx;
-    private readonly FreeTypeGlyphRasterizer _rasterizer = new();
+    internal readonly FreeTypeGlyphRasterizer Rasterizer = new();
     private readonly Dictionary<GlyphKey, GlyphInfo> _glyphs = new();
     private readonly HashSet<GlyphKey> _unflushedGlyphs = new();
 
-    private const int MaxAtlasSize = 2048;
+    private const int MaxAtlasSize = 4096;
 
     private int _atlasWidth;
     private int _atlasHeight;
@@ -51,7 +53,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         CreateImage(initialWidth, initialHeight);
         CreateSampler();
-        ctx.UpdateDescriptorSet(_imageView, _sampler);
+        ctx.UpdateDescriptorSet(ctx.DescriptorSet, _imageView, _sampler);
     }
 
     /// <summary>
@@ -62,38 +64,60 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     {
         if (_needsEviction)
         {
-            Console.Error.WriteLine($"[FontAtlas] BeginFrame: deferred eviction triggered, atlas {_atlasWidth}x{_atlasHeight}, {_glyphs.Count} glyphs");
             EvictAll();
             _needsEviction = false;
         }
     }
 
     /// <summary>
+    /// Returns the scale factor between the requested fontSize and the actual rasterized size.
+    /// Callers must scale glyph metrics (Width, Height, BearingX, BearingY) by this factor.
+    /// </summary>
+    public static float GetGlyphScale(float requestedFontSize)
+    {
+        var quantized = QuantizeFontSize(requestedFontSize);
+        return requestedFontSize / quantized;
+    }
+
+    /// <summary>
     /// Gets glyph info, rasterizing into the staging buffer if needed.
     /// Use <paramref name="skipUnflushed"/> in draw loops to avoid sampling stale GPU texture data.
     /// </summary>
-    public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character, bool skipUnflushed = false)
+    public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character, bool skipUnflushed = false, int charCode = -1)
     {
-        fontSize = MathF.Round(fontSize);
-        var key = new GlyphKey(fontPath, fontSize, character);
+        fontSize = QuantizeFontSize(fontSize);
+        var key = new GlyphKey(fontPath, fontSize, character, charCode);
         if (_glyphs.TryGetValue(key, out var existing))
         {
             // Cache hit — safe to draw only if this glyph has been flushed to GPU
             if (skipUnflushed && _unflushedGlyphs.Contains(key))
-            {
-                Console.Error.WriteLine($"[FontAtlas] Skip unflushed (hit): '{character}' size={fontSize}");
                 return existing with { Width = 0 }; // metrics preserved for advance, but skip quad
-            }
             return existing;
         }
-        Console.Error.WriteLine($"[FontAtlas] Cache miss: '{character}' size={fontSize} cursor=({_cursorX},{_cursorY}) glyphs={_glyphs.Count}");
-        var result = RasterizeGlyph(key);
+        var result = RasterizeGlyph(key, charCode);
         if (skipUnflushed && result.Width > 0)
-        {
-            Console.Error.WriteLine($"[FontAtlas] Skip unflushed (new): '{character}' size={fontSize}");
             return result with { Width = 0 }; // just rasterized, not flushed yet — skip quad
-        }
         return result;
+    }
+
+    /// <summary>
+    /// Max rasterization size in pixels. Larger glyphs are rasterized at this size
+    /// and the textured quad is scaled up by the GPU — avoids atlas overflow at high zoom.
+    /// </summary>
+    private const float MaxRasterSize = 128f;
+
+    /// <summary>
+    /// Snaps font sizes to coarser steps at larger sizes to reduce atlas churn during zoom.
+    /// Small text (≤16pt): 1pt steps. Medium (≤48pt): 2pt steps. Large: 4pt steps.
+    /// Capped at MaxRasterSize — the GPU scales the quad for anything larger.
+    /// </summary>
+    private static float QuantizeFontSize(float size)
+    {
+        if (size < 4f) return 4f;
+        if (size <= 16f) return MathF.Ceiling(size);
+        if (size <= 48f) return MathF.Ceiling(size / 2f) * 2f;
+        if (size <= MaxRasterSize) return MathF.Ceiling(size / 4f) * 4f;
+        return MaxRasterSize;
     }
 
     public bool IsDirty => _needsEviction || (_dirtyX0 < _dirtyX1 && _dirtyY0 < _dirtyY1);
@@ -105,7 +129,6 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         var regionW = _dirtyX1 - _dirtyX0;
         var regionH = _dirtyY1 - _dirtyY0;
-        Console.Error.WriteLine($"[FontAtlas] Flush: uploading dirty region ({_dirtyX0},{_dirtyY0})-({_dirtyX1},{_dirtyY1}) = {regionW}x{regionH} px, atlas {_atlasWidth}x{_atlasHeight}");
         var pixelCount = regionW * regionH;
 
         // Extract the dirty region into a contiguous buffer
@@ -132,7 +155,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
             Buffer.MemoryCopy(pRgba, mapped, bufferSize, bufferSize);
         _ctx.DeviceApi.vkUnmapMemory(_uploadMemory);
 
-        TransitionImageLayout(cmd, _image, VkImageLayout.ShaderReadOnlyOptimal, VkImageLayout.TransferDstOptimal);
+        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, VkImageLayout.ShaderReadOnlyOptimal, VkImageLayout.TransferDstOptimal);
 
         VkBufferImageCopy region = new()
         {
@@ -145,7 +168,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         };
         _ctx.DeviceApi.vkCmdCopyBufferToImage(cmd, _uploadBuffer, _image, VkImageLayout.TransferDstOptimal, 1, &region);
 
-        TransitionImageLayout(cmd, _image, VkImageLayout.TransferDstOptimal, VkImageLayout.ShaderReadOnlyOptimal);
+        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, VkImageLayout.TransferDstOptimal, VkImageLayout.ShaderReadOnlyOptimal);
 
         ResetDirtyRegion();
         _unflushedGlyphs.Clear();
@@ -153,7 +176,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     public void Dispose()
     {
-        _rasterizer.Dispose();
+        Rasterizer.Dispose();
 
         var api = _ctx.DeviceApi;
 
@@ -169,7 +192,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkFreeMemory(_imageMemory);
     }
 
-    private GlyphInfo RasterizeGlyph(GlyphKey key)
+    private GlyphInfo RasterizeGlyph(GlyphKey key, int charCode = -1)
     {
         if (Rune.IsWhiteSpace(key.Character))
         {
@@ -179,7 +202,13 @@ internal sealed unsafe class VkFontAtlas : IDisposable
             return info;
         }
 
-        var bitmap = _rasterizer.RasterizeGlyph(key.Font, key.Size, key.Character);
+        // For memory-loaded CID subset fonts, use charCode-aware lookup
+        // since the font's cmap may not map Unicode codepoints correctly
+        GlyphBitmap bitmap;
+        if (charCode >= 0 && key.Font.StartsWith("mem:"))
+            bitmap = Rasterizer.RasterizeGlyphWithCharCode(key.Font, key.Size, key.Character, (uint)charCode);
+        else
+            bitmap = Rasterizer.RasterizeGlyph(key.Font, key.Size, key.Character);
         var glyphWidth = bitmap.Width;
         var glyphHeight = bitmap.Height;
 
@@ -200,7 +229,6 @@ internal sealed unsafe class VkFontAtlas : IDisposable
                 return RasterizeGlyph(key);
             }
             // Defer eviction to next frame start to avoid stale UVs in current batch
-            Console.Error.WriteLine($"[FontAtlas] RasterizeGlyph: atlas full at max {_atlasWidth}x{_atlasHeight}, deferring eviction. Glyph: '{key.Character}' font={key.Font} size={key.Size}");
             _needsEviction = true;
             return default;
         }
@@ -243,7 +271,6 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         _atlasWidth = Math.Min(_atlasWidth * 2, MaxAtlasSize);
         _atlasHeight = Math.Min(_atlasHeight * 2, MaxAtlasSize);
-        Console.Error.WriteLine($"[FontAtlas] Grow: {oldWidth}x{oldHeight} -> {_atlasWidth}x{_atlasHeight}, {_glyphs.Count} glyphs, cursor ({_cursorX},{_cursorY})");
 
         var newStaging = new byte[_atlasWidth * _atlasHeight * 4];
         // Copy old rows into the wider buffer
@@ -270,7 +297,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkDestroyImage(_image);
         api.vkFreeMemory(_imageMemory);
         CreateImage(_atlasWidth, _atlasHeight);
-        _ctx.UpdateDescriptorSet(_imageView, _sampler);
+        _ctx.UpdateDescriptorSet(_ctx.DescriptorSet, _imageView, _sampler);
 
         _dirtyX0 = 0; _dirtyY0 = 0;
         _dirtyX1 = _atlasWidth; _dirtyY1 = _atlasHeight;
@@ -278,7 +305,6 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     private void EvictAll()
     {
-        Console.Error.WriteLine($"[FontAtlas] EvictAll: clearing {_glyphs.Count} glyphs, atlas {_atlasWidth}x{_atlasHeight}, cursor ({_cursorX},{_cursorY})");
         _glyphs.Clear();
         _cursorX = 0; _cursorY = 0; _rowHeight = 0;
         _staging = new byte[_atlasWidth * _atlasHeight * 4];
@@ -315,7 +341,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkBindImageMemory(_image, _imageMemory, 0);
 
         _ctx.ExecuteOneShot(cmd =>
-            TransitionImageLayout(cmd, _image, VkImageLayout.Undefined, VkImageLayout.ShaderReadOnlyOptimal));
+            VulkanHelpers.TransitionImageLayout(api, cmd, _image, VkImageLayout.Undefined, VkImageLayout.ShaderReadOnlyOptimal));
 
         var viewCI = new VkImageViewCreateInfo(
             _image, VkImageViewType.Image2D, VkFormat.R8G8B8A8Unorm,
@@ -370,58 +396,6 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkAllocateMemory(&allocInfo, null, out _uploadMemory).CheckResult();
         api.vkBindBufferMemory(_uploadBuffer, _uploadMemory, 0);
         _uploadBufferSize = size;
-    }
-
-    private void TransitionImageLayout(VkCommandBuffer cmd, VkImage image,
-        VkImageLayout oldLayout, VkImageLayout newLayout)
-    {
-        VkImageMemoryBarrier barrier = new()
-        {
-            oldLayout = oldLayout,
-            newLayout = newLayout,
-            srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            image = image,
-            subresourceRange = new VkImageSubresourceRange(VkImageAspectFlags.Color, 0, 1, 0, 1)
-        };
-
-        VkPipelineStageFlags srcStage, dstStage;
-
-        if (oldLayout == VkImageLayout.Undefined && newLayout == VkImageLayout.TransferDstOptimal)
-        {
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VkAccessFlags.TransferWrite;
-            srcStage = VkPipelineStageFlags.TopOfPipe;
-            dstStage = VkPipelineStageFlags.Transfer;
-        }
-        else if (oldLayout == VkImageLayout.TransferDstOptimal && newLayout == VkImageLayout.ShaderReadOnlyOptimal)
-        {
-            barrier.srcAccessMask = VkAccessFlags.TransferWrite;
-            barrier.dstAccessMask = VkAccessFlags.ShaderRead;
-            srcStage = VkPipelineStageFlags.Transfer;
-            dstStage = VkPipelineStageFlags.FragmentShader;
-        }
-        else if (oldLayout == VkImageLayout.ShaderReadOnlyOptimal && newLayout == VkImageLayout.TransferDstOptimal)
-        {
-            barrier.srcAccessMask = VkAccessFlags.ShaderRead;
-            barrier.dstAccessMask = VkAccessFlags.TransferWrite;
-            srcStage = VkPipelineStageFlags.FragmentShader;
-            dstStage = VkPipelineStageFlags.Transfer;
-        }
-        else if (oldLayout == VkImageLayout.Undefined && newLayout == VkImageLayout.ShaderReadOnlyOptimal)
-        {
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VkAccessFlags.ShaderRead;
-            srcStage = VkPipelineStageFlags.TopOfPipe;
-            dstStage = VkPipelineStageFlags.FragmentShader;
-        }
-        else
-        {
-            throw new ArgumentException($"Unsupported layout transition: {oldLayout} -> {newLayout}");
-        }
-
-        _ctx.DeviceApi.vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0,
-            0, null, 0, null, 1, &barrier);
     }
 
     private void ResetDirtyRegion()

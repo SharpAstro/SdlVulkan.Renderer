@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Vortice.Vulkan;
 using static Vortice.Vulkan.Vulkan;
@@ -8,6 +9,7 @@ public sealed unsafe class VulkanContext : IDisposable
 {
     private const uint VertexBufferSize = 4 * 1024 * 1024; // 4MB
     private const int MaxFramesInFlight = 2;
+    private const uint MaxDescriptorSets = 512; // font atlas + textures
 
     public VkInstance Instance { get; }
     public VkInstanceApi InstanceApi { get; }
@@ -118,15 +120,17 @@ public sealed unsafe class VulkanContext : IDisposable
         // Render pass
         var renderPass = CreateRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm);
 
-        // Descriptor pool & layout
+        // Descriptor pool — large enough for font atlas + textures
+        // FreeDescriptorSet flag allows individual sets to be freed when textures are evicted
         VkDescriptorPoolSize poolSize = new()
         {
             type = VkDescriptorType.CombinedImageSampler,
-            descriptorCount = 1
+            descriptorCount = MaxDescriptorSets
         };
         VkDescriptorPoolCreateInfo dpCI = new()
         {
-            maxSets = 1,
+            flags = VkDescriptorPoolCreateFlags.FreeDescriptorSet,
+            maxSets = MaxDescriptorSets,
             poolSizeCount = 1,
             pPoolSizes = &poolSize
         };
@@ -146,7 +150,7 @@ public sealed unsafe class VulkanContext : IDisposable
         };
         deviceApi.vkCreateDescriptorSetLayout(&dslCI, null, out var descriptorSetLayout).CheckResult();
 
-        // Allocate descriptor set
+        // Allocate the font atlas descriptor set
         var setLayout = descriptorSetLayout;
         VkDescriptorSetAllocateInfo dsAI = new()
         {
@@ -184,6 +188,64 @@ public sealed unsafe class VulkanContext : IDisposable
         ctx.CreateSwapchain(width, height);
 
         return ctx;
+    }
+
+    /// <summary>
+    /// Allocates a new descriptor set from the pool with the shared layout.
+    /// Used by VkTexture to get its own descriptor set for texture binding.
+    /// </summary>
+    // Descriptor pool operations need external synchronization for multi-threaded access
+    private readonly Lock _descriptorPoolLock = new();
+
+    public VkDescriptorSet AllocateDescriptorSet()
+    {
+        lock (_descriptorPoolLock)
+        {
+            var layout = DescriptorSetLayout;
+            VkDescriptorSetAllocateInfo dsAI = new()
+            {
+                descriptorPool = DescriptorPool,
+                descriptorSetCount = 1,
+                pSetLayouts = &layout
+            };
+            VkDescriptorSet set;
+            DeviceApi.vkAllocateDescriptorSets(&dsAI, &set).CheckResult();
+            return set;
+        }
+    }
+
+    /// <summary>
+    /// Frees a descriptor set back to the pool.
+    /// </summary>
+    public void FreeDescriptorSet(VkDescriptorSet set)
+    {
+        lock (_descriptorPoolLock)
+        {
+            DeviceApi.vkFreeDescriptorSets(DescriptorPool, 1, &set);
+        }
+    }
+
+    /// <summary>
+    /// Updates any descriptor set to point to the given image view and sampler.
+    /// </summary>
+    public void UpdateDescriptorSet(VkDescriptorSet targetSet, VkImageView imageView, VkSampler sampler)
+    {
+        VkDescriptorImageInfo imageInfo = new()
+        {
+            imageLayout = VkImageLayout.ShaderReadOnlyOptimal,
+            imageView = imageView,
+            sampler = sampler
+        };
+        VkWriteDescriptorSet write = new()
+        {
+            dstSet = targetSet,
+            dstBinding = 0,
+            dstArrayElement = 0,
+            descriptorType = VkDescriptorType.CombinedImageSampler,
+            descriptorCount = 1,
+            pImageInfo = &imageInfo
+        };
+        DeviceApi.vkUpdateDescriptorSets(1, &write, 0, null);
     }
 
     public void RecreateSwapchain(uint width, uint height)
@@ -285,8 +347,23 @@ public sealed unsafe class VulkanContext : IDisposable
         _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
     }
 
+    [Conditional("DEBUG")]
+    private static void DebugLogBufferFull(int vertexOffset, int requestLength)
+    {
+        var usedMB = (vertexOffset * sizeof(float)) / (1024f * 1024f);
+        var requestKB = (requestLength * sizeof(float)) / 1024f;
+        Console.Error.WriteLine($"[VkBuffer] FULL at {usedMB:F1}MB, rejected {requestKB:F0}KB write");
+    }
+
     public uint WriteVertices(ReadOnlySpan<float> data)
     {
+        var maxFloats = (int)(VertexBufferSize / sizeof(float));
+        if (_vertexOffset + data.Length > maxFloats)
+        {
+            DebugLogBufferFull(_vertexOffset, data.Length);
+            return uint.MaxValue;
+        }
+
         var byteOffset = (uint)(_vertexOffset * sizeof(float));
         data.CopyTo(new Span<float>(_vertexMapped[_currentFrame] + _vertexOffset, data.Length));
         _vertexOffset += data.Length;
@@ -294,26 +371,6 @@ public sealed unsafe class VulkanContext : IDisposable
     }
 
     public VkBuffer VertexBuffer => _vertexBuffers[_currentFrame];
-
-    public void UpdateDescriptorSet(VkImageView imageView, VkSampler sampler)
-    {
-        VkDescriptorImageInfo imageInfo = new()
-        {
-            imageLayout = VkImageLayout.ShaderReadOnlyOptimal,
-            imageView = imageView,
-            sampler = sampler
-        };
-        VkWriteDescriptorSet write = new()
-        {
-            dstSet = DescriptorSet,
-            dstBinding = 0,
-            dstArrayElement = 0,
-            descriptorType = VkDescriptorType.CombinedImageSampler,
-            descriptorCount = 1,
-            pImageInfo = &imageInfo
-        };
-        DeviceApi.vkUpdateDescriptorSets(1, &write, 0, null);
-    }
 
     public void ExecuteOneShot(Action<VkCommandBuffer> action)
     {
@@ -347,6 +404,47 @@ public sealed unsafe class VulkanContext : IDisposable
                 return i;
         }
         throw new InvalidOperationException("Failed to find suitable memory type");
+    }
+
+    /// <summary>
+    /// Creates a persistent vertex buffer with the given data. The buffer lives until explicitly destroyed.
+    /// Thread-safe — can be called from background tessellation tasks.
+    /// </summary>
+    public (VkBuffer Buffer, VkDeviceMemory Memory) CreatePersistentVertexBuffer(ReadOnlySpan<float> data)
+    {
+        var size = (ulong)(data.Length * sizeof(float));
+
+        VkBufferCreateInfo bufCI = new()
+        {
+            size = size,
+            usage = VkBufferUsageFlags.VertexBuffer,
+            sharingMode = VkSharingMode.Exclusive
+        };
+        DeviceApi.vkCreateBuffer(&bufCI, null, out var buffer).CheckResult();
+
+        DeviceApi.vkGetBufferMemoryRequirements(buffer, out var memReqs);
+        VkMemoryAllocateInfo allocInfo = new()
+        {
+            allocationSize = memReqs.size,
+            memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits,
+                VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent)
+        };
+        DeviceApi.vkAllocateMemory(&allocInfo, null, out var memory).CheckResult();
+        DeviceApi.vkBindBufferMemory(buffer, memory, 0);
+
+        void* mapped;
+        DeviceApi.vkMapMemory(memory, 0, size, 0, &mapped);
+        fixed (float* pData = data)
+            System.Buffer.MemoryCopy(pData, mapped, (long)size, (long)size);
+        DeviceApi.vkUnmapMemory(memory);
+
+        return (buffer, memory);
+    }
+
+    public void DestroyBuffer(VkBuffer buffer, VkDeviceMemory memory)
+    {
+        DeviceApi.vkDestroyBuffer(buffer);
+        DeviceApi.vkFreeMemory(memory);
     }
 
     public void Dispose()
