@@ -26,6 +26,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public override uint Width => _width;
     public override uint Height => _height;
 
+    public VkPipelineSet? Pipelines => _pipelines;
     internal VkFontAtlas? FontAtlas => _fontAtlas;
     public FreeTypeGlyphRasterizer? GlyphRasterizer => _fontAtlas?.Rasterizer;
     public bool FontAtlasDirty => _fontAtlas?.IsDirty == true;
@@ -165,6 +166,159 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.FlatPipeline);
         fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, vertexCount, 1, 0, 0);
+    }
+
+    /// <summary>
+    /// Draws triangles with a custom origin and scale (e.g. for tiled/paged rendering).
+    /// Builds a combined projection so vertices stay in their original coordinate space.
+    /// </summary>
+    public void DrawTrianglesTransformed(ReadOnlySpan<float> vertices, DIR.Lib.RGBAColor32 color,
+        float originX, float originY, float scale)
+    {
+        if (_pipelines is null || vertices.Length < 6) return;
+
+        var api = Surface.DeviceApi;
+        var vertexCount = (uint)(vertices.Length / 2);
+
+        var offset = Surface.WriteVertices(vertices);
+        if (offset == uint.MaxValue) return;
+
+        Span<float> pc = stackalloc float[21];
+        var w = (float)_width;
+        var h = (float)_height;
+        pc[0]  = 2f * scale / w;
+        pc[5]  = 2f * scale / h;
+        pc[10] = -1f;
+        pc[12] = 2f * originX / w - 1f;
+        pc[13] = 2f * originY / h - 1f;
+        pc[15] = 1f;
+        pc[16] = color.Red / 255f;
+        pc[17] = color.Green / 255f;
+        pc[18] = color.Blue / 255f;
+        pc[19] = color.Alpha / 255f;
+
+        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.FlatPipeline);
+        fixed (float* pPC = pc)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, vertexCount, 1, 0, 0);
+    }
+
+    /// <summary>
+    /// Draws triangles from a persistent GPU buffer with a custom origin and scale.
+    /// No frame-allocator usage — the buffer is pre-uploaded and reused across frames.
+    /// </summary>
+    public void DrawPersistentTriangles(Vortice.Vulkan.VkBuffer buffer, uint byteOffset, uint vertexCount,
+        DIR.Lib.RGBAColor32 color, float originX, float originY, float scale,
+        VkPipeline? pipelineOverride = null)
+    {
+        if (_pipelines is null || vertexCount < 3) return;
+
+        var api = Surface.DeviceApi;
+
+        Span<float> pc = stackalloc float[21];
+        var w = (float)_width;
+        var h = (float)_height;
+        pc[0]  = 2f * scale / w;
+        pc[5]  = 2f * scale / h;
+        pc[10] = -1f;
+        pc[12] = 2f * originX / w - 1f;
+        pc[13] = 2f * originY / h - 1f;
+        pc[15] = 1f;
+        pc[16] = color.Red / 255f;
+        pc[17] = color.Green / 255f;
+        pc[18] = color.Blue / 255f;
+        pc[19] = color.Alpha / 255f;
+
+        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, pipelineOverride ?? _pipelines.FlatPipeline);
+        fixed (float* pPC = pc)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        var vkOffset = (ulong)byteOffset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, vertexCount, 1, 0, 0);
+    }
+
+    /// <summary>
+    /// Draws stroke segments from a persistent GPU buffer with a custom origin and scale.
+    /// No frame-allocator usage — the buffer is pre-uploaded and reused across frames.
+    /// </summary>
+    public void DrawPersistentStrokes(Vortice.Vulkan.VkBuffer buffer, uint byteOffset, uint vertexCount,
+        DIR.Lib.RGBAColor32 color, float originX, float originY, float scale, float halfWidth)
+    {
+        if (_pipelines is null || vertexCount < 6) return;
+
+        var api = Surface.DeviceApi;
+
+        Span<float> pc = stackalloc float[21];
+        var w = (float)_width;
+        var h = (float)_height;
+        pc[0]  = 2f * scale / w;
+        pc[5]  = 2f * scale / h;
+        pc[10] = -1f;
+        pc[12] = 2f * originX / w - 1f;
+        pc[13] = 2f * originY / h - 1f;
+        pc[15] = 1f;
+        pc[16] = color.Red / 255f;
+        pc[17] = color.Green / 255f;
+        pc[18] = color.Blue / 255f;
+        pc[19] = color.Alpha / 255f;
+        pc[20] = halfWidth;
+
+        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.StrokePipeline);
+        fixed (float* pPC = pc)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        var vkOffset = (ulong)byteOffset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, vertexCount, 1, 0, 0);
+    }
+
+    /// <summary>
+    /// Draws stroke segments via the StrokePipeline with a custom origin and scale.
+    /// Vertices are 6 floats each (P0, P1, side/end params), 6 vertices per line segment.
+    /// </summary>
+    public void DrawStrokeSegments(ReadOnlySpan<float> segmentVertices, DIR.Lib.RGBAColor32 color,
+        float originX, float originY, float scale, float halfWidth)
+    {
+        if (_pipelines is null || segmentVertices.Length < 36) return;
+
+        var api = Surface.DeviceApi;
+        var vertexCount = (uint)(segmentVertices.Length / 6);
+
+        var offset = Surface.WriteVertices(segmentVertices);
+        if (offset == uint.MaxValue) return;
+
+        Span<float> pc = stackalloc float[21];
+        var w = (float)_width;
+        var h = (float)_height;
+        pc[0]  = 2f * scale / w;
+        pc[5]  = 2f * scale / h;
+        pc[10] = -1f;
+        pc[12] = 2f * originX / w - 1f;
+        pc[13] = 2f * originY / h - 1f;
+        pc[15] = 1f;
+        pc[16] = color.Red / 255f;
+        pc[17] = color.Green / 255f;
+        pc[18] = color.Blue / 255f;
+        pc[19] = color.Alpha / 255f;
+        pc[20] = halfWidth;
+
+        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.StrokePipeline);
+        fixed (float* pPC = pc)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
 

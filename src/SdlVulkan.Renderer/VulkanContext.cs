@@ -7,7 +7,7 @@ namespace SdlVulkan.Renderer;
 
 public sealed unsafe class VulkanContext : IDisposable
 {
-    private const uint VertexBufferSize = 4 * 1024 * 1024; // 4MB
+    private readonly uint _vertexBufferSize;
     private const int MaxFramesInFlight = 2;
     private const uint MaxDescriptorSets = 512; // font atlas + textures
 
@@ -60,8 +60,10 @@ public sealed unsafe class VulkanContext : IDisposable
         VkQueue graphicsQueue, uint graphicsQueueFamily,
         VkCommandPool commandPool, VkRenderPass renderPass,
         VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
-        VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout)
+        VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout,
+        uint vertexBufferSize)
     {
+        _vertexBufferSize = vertexBufferSize;
         Instance = instance;
         InstanceApi = instanceApi;
         _surface = surface;
@@ -78,7 +80,8 @@ public sealed unsafe class VulkanContext : IDisposable
         PipelineLayout = pipelineLayout;
     }
 
-    public static VulkanContext Create(VkInstance instance, VkSurfaceKHR surface, uint width, uint height)
+    public static VulkanContext Create(VkInstance instance, VkSurfaceKHR surface, uint width, uint height,
+        uint vertexBufferSize = 4 * 1024 * 1024)
     {
         var instanceApi = GetApi(instance);
 
@@ -180,7 +183,8 @@ public sealed unsafe class VulkanContext : IDisposable
         var ctx = new VulkanContext(
             instance, instanceApi, surface, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, commandPool, renderPass,
-            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout);
+            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout,
+            vertexBufferSize);
 
         ctx.CreateSyncObjects();
         ctx.AllocateCommandBuffers();
@@ -357,7 +361,7 @@ public sealed unsafe class VulkanContext : IDisposable
 
     public uint WriteVertices(ReadOnlySpan<float> data)
     {
-        var maxFloats = (int)(VertexBufferSize / sizeof(float));
+        var maxFloats = (int)(_vertexBufferSize / sizeof(float));
         if (_vertexOffset + data.Length > maxFloats)
         {
             DebugLogBufferFull(_vertexOffset, data.Length);
@@ -695,7 +699,7 @@ public sealed unsafe class VulkanContext : IDisposable
         {
             VkBufferCreateInfo bufCI = new()
             {
-                size = VertexBufferSize,
+                size = _vertexBufferSize,
                 usage = VkBufferUsageFlags.VertexBuffer,
                 sharingMode = VkSharingMode.Exclusive
             };
@@ -712,7 +716,7 @@ public sealed unsafe class VulkanContext : IDisposable
             DeviceApi.vkBindBufferMemory(_vertexBuffers[i], _vertexMemories[i], 0);
 
             void* mapped;
-            DeviceApi.vkMapMemory(_vertexMemories[i], 0, VertexBufferSize, 0, &mapped);
+            DeviceApi.vkMapMemory(_vertexMemories[i], 0, _vertexBufferSize, 0, &mapped);
             _vertexMapped[i] = (float*)mapped;
         }
     }

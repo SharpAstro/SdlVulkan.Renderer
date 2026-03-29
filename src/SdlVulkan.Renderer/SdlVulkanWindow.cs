@@ -48,6 +48,8 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
 
     public void GetSizeInPixels(out int w, out int h) => GetWindowSizeInPixels(Handle, out w, out h);
 
+    public void SetTitle(string title) => SDL3.SDL.SetWindowTitle(Handle, title);
+
     /// <summary>
     /// Returns the DPI display scale factor for this window (e.g. 1.5 for 150% scaling).
     /// Uses SDL3's <c>GetWindowDisplayScale</c> which correctly handles per-monitor DPI.

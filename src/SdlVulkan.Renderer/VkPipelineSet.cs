@@ -4,13 +4,19 @@ using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer;
 
-internal sealed unsafe class VkPipelineSet : IDisposable
+public sealed unsafe class VkPipelineSet : IDisposable
 {
     public VkPipeline FlatPipeline { get; }
     public VkPipeline TexturedPipeline { get; }
     public VkPipeline EllipsePipeline { get; }
     public VkPipeline PagePipeline { get; }
     public VkPipeline StrokePipeline { get; }
+
+    // Blend mode variants of FlatPipeline
+    public VkPipeline FlatMultiplyPipeline { get; }
+    public VkPipeline FlatScreenPipeline { get; }
+    public VkPipeline FlatDarkenPipeline { get; }
+    public VkPipeline FlatLightenPipeline { get; }
 
     private readonly VkDeviceApi _deviceApi;
 
@@ -130,7 +136,8 @@ internal sealed unsafe class VkPipelineSet : IDisposable
 
     #endregion
 
-    private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke)
+    private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
+        VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten)
     {
         _deviceApi = deviceApi;
         FlatPipeline = flat;
@@ -138,6 +145,10 @@ internal sealed unsafe class VkPipelineSet : IDisposable
         EllipsePipeline = ellipse;
         PagePipeline = page;
         StrokePipeline = stroke;
+        FlatMultiplyPipeline = flatMultiply;
+        FlatScreenPipeline = flatScreen;
+        FlatDarkenPipeline = flatDarken;
+        FlatLightenPipeline = flatLighten;
     }
 
     public static VkPipelineSet Create(VulkanContext ctx)
@@ -194,7 +205,18 @@ internal sealed unsafe class VkPipelineSet : IDisposable
             var stroke = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, strokeVert, strokeFrag,
                 &strokeBinding, 1, strokeAttrs, 3);
 
-            return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke);
+            // Blend mode variants of the flat pipeline
+            var flatMultiply = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
+                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.DstColor, VkBlendFactor.OneMinusSrcAlpha);
+            var flatScreen = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
+                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.OneMinusSrcColor);
+            var flatDarken = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
+                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Min);
+            var flatLighten = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
+                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Max);
+
+            return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke,
+                flatMultiply, flatScreen, flatDarken, flatLighten);
         }
         finally
         {
@@ -213,6 +235,10 @@ internal sealed unsafe class VkPipelineSet : IDisposable
     public void Dispose()
     {
         _deviceApi.vkDestroyPipeline(FlatPipeline);
+        _deviceApi.vkDestroyPipeline(FlatMultiplyPipeline);
+        _deviceApi.vkDestroyPipeline(FlatScreenPipeline);
+        _deviceApi.vkDestroyPipeline(FlatDarkenPipeline);
+        _deviceApi.vkDestroyPipeline(FlatLightenPipeline);
         _deviceApi.vkDestroyPipeline(TexturedPipeline);
         _deviceApi.vkDestroyPipeline(EllipsePipeline);
         _deviceApi.vkDestroyPipeline(PagePipeline);
@@ -223,7 +249,10 @@ internal sealed unsafe class VkPipelineSet : IDisposable
         VkDeviceApi deviceApi, VkRenderPass renderPass, VkPipelineLayout layout,
         VkShaderModule vertModule, VkShaderModule fragModule,
         VkVertexInputBindingDescription* bindings, uint bindingCount,
-        VkVertexInputAttributeDescription* attributes, uint attributeCount)
+        VkVertexInputAttributeDescription* attributes, uint attributeCount,
+        VkBlendFactor srcColorFactor = VkBlendFactor.SrcAlpha,
+        VkBlendFactor dstColorFactor = VkBlendFactor.OneMinusSrcAlpha,
+        VkBlendOp blendOp = VkBlendOp.Add)
     {
         VkUtf8ReadOnlyString entryPoint = "main"u8;
 
@@ -266,9 +295,9 @@ internal sealed unsafe class VkPipelineSet : IDisposable
         {
             colorWriteMask = VkColorComponentFlags.All,
             blendEnable = true,
-            srcColorBlendFactor = VkBlendFactor.SrcAlpha,
-            dstColorBlendFactor = VkBlendFactor.OneMinusSrcAlpha,
-            colorBlendOp = VkBlendOp.Add,
+            srcColorBlendFactor = srcColorFactor,
+            dstColorBlendFactor = dstColorFactor,
+            colorBlendOp = blendOp,
             srcAlphaBlendFactor = VkBlendFactor.One,
             dstAlphaBlendFactor = VkBlendFactor.OneMinusSrcAlpha,
             alphaBlendOp = VkBlendOp.Add
