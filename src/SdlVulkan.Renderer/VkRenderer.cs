@@ -490,6 +490,27 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// Draw a glyph positioned at the text baseline (not ink-top).
+    /// Computes ink-top from baseline using the glyph's FreeType bearing.
+    /// Use this when the caller provides baseline coordinates (e.g., PDF.Lib parser).
+    /// </summary>
+    public void DrawGlyphAtBaseline(string fontPath, float fontSize, System.Text.Rune character,
+        int charCode, DIR.Lib.RGBAColor32 color, float baselineX, float baselineY,
+        float rotation = 0f)
+    {
+        if (_pipelines is null || _fontAtlas is null) return;
+
+        var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode);
+        if (glyph.Width == 0) return;
+
+        var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
+        var inkX = baselineX + glyph.BearingX * glyphScale;
+        var inkY = baselineY - glyph.BearingY * glyphScale;
+
+        DrawSingleGlyph(fontPath, fontSize, character, charCode, color, inkX, inkY, rotation);
+    }
+
+    /// <summary>
     /// Creates a persistent vertex buffer. The buffer lives until explicitly destroyed.
     /// </summary>
     public (Vortice.Vulkan.VkBuffer Buffer, Vortice.Vulkan.VkDeviceMemory Memory) CreatePersistentVertexBuffer(ReadOnlySpan<float> data)
