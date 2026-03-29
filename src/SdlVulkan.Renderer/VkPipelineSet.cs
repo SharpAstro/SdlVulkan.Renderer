@@ -173,8 +173,9 @@ public sealed unsafe class VkPipelineSet : IDisposable
             // Flat pipeline: vec2 pos only
             VkVertexInputBindingDescription flatBinding = new(2 * sizeof(float));
             VkVertexInputAttributeDescription flatAttr = new(0, VkFormat.R32G32Sfloat, 0);
+            var msaa = ctx.MsaaSamples;
             var flat = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
-                &flatBinding, 1, &flatAttr, 1);
+                &flatBinding, 1, &flatAttr, 1, msaaSamples: msaa);
 
             // Textured pipeline: vec2 pos + vec2 uv (for font atlas glyphs)
             VkVertexInputBindingDescription texBinding = new(4 * sizeof(float));
@@ -182,11 +183,11 @@ public sealed unsafe class VkPipelineSet : IDisposable
             texAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);
             texAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));
             var textured = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, texVert, texFrag,
-                &texBinding, 1, texAttrs, 2);
+                &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
 
             // Page pipeline: same vertex layout as textured, but pass-through fragment shader
             var page = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, texVert, pageFrag,
-                &texBinding, 1, texAttrs, 2);
+                &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
 
             // Ellipse pipeline: vec2 pos + vec2 local
             VkVertexInputBindingDescription ellipseBinding = new(4 * sizeof(float));
@@ -194,7 +195,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             ellipseAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);
             ellipseAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));
             var ellipse = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, ellipseVert, ellipseFrag,
-                &ellipseBinding, 1, ellipseAttrs, 2);
+                &ellipseBinding, 1, ellipseAttrs, 2, msaaSamples: msaa);
 
             // Stroke pipeline: vec2 P0 + vec2 P1 + vec2 params (side, end)
             VkVertexInputBindingDescription strokeBinding = new(6 * sizeof(float));
@@ -203,17 +204,17 @@ public sealed unsafe class VkPipelineSet : IDisposable
             strokeAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));  // aP1
             strokeAttrs[2] = new(2, VkFormat.R32G32Sfloat, 4 * sizeof(float));  // aParams
             var stroke = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, strokeVert, strokeFrag,
-                &strokeBinding, 1, strokeAttrs, 3);
+                &strokeBinding, 1, strokeAttrs, 3, msaaSamples: msaa);
 
             // Blend mode variants of the flat pipeline
             var flatMultiply = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
-                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.DstColor, VkBlendFactor.OneMinusSrcAlpha);
+                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.DstColor, VkBlendFactor.OneMinusSrcAlpha, msaaSamples: msaa);
             var flatScreen = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
-                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.OneMinusSrcColor);
+                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.OneMinusSrcColor, msaaSamples: msaa);
             var flatDarken = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
-                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Min);
+                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Min, msaa);
             var flatLighten = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
-                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Max);
+                &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Max, msaa);
 
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke,
                 flatMultiply, flatScreen, flatDarken, flatLighten);
@@ -252,7 +253,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
         VkVertexInputAttributeDescription* attributes, uint attributeCount,
         VkBlendFactor srcColorFactor = VkBlendFactor.SrcAlpha,
         VkBlendFactor dstColorFactor = VkBlendFactor.OneMinusSrcAlpha,
-        VkBlendOp blendOp = VkBlendOp.Add)
+        VkBlendOp blendOp = VkBlendOp.Add,
+        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
     {
         VkUtf8ReadOnlyString entryPoint = "main"u8;
 
@@ -289,7 +291,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
             frontFace = VkFrontFace.Clockwise
         };
 
-        VkPipelineMultisampleStateCreateInfo multisample = VkPipelineMultisampleStateCreateInfo.Default;
+        VkPipelineMultisampleStateCreateInfo multisample = new()
+        {
+            rasterizationSamples = msaaSamples
+        };
 
         VkPipelineColorBlendAttachmentState blendAttachment = new()
         {

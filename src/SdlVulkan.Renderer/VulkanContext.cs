@@ -31,9 +31,17 @@ public sealed unsafe class VulkanContext : IDisposable
     public uint SwapchainWidth { get; private set; }
     public uint SwapchainHeight { get; private set; }
 
+    /// <summary>MSAA sample count (Count1 = no MSAA).</summary>
+    public VkSampleCountFlags MsaaSamples { get; }
+
     private VkImage[] _swapchainImages = [];
     private VkImageView[] _swapchainImageViews = [];
     private VkFramebuffer[] _framebuffers = [];
+
+    // MSAA resolve target (only when MsaaSamples > Count1)
+    private VkImage _msaaImage;
+    private VkDeviceMemory _msaaMemory;
+    private VkImageView _msaaImageView;
 
     // Per-frame sync
     private readonly VkSemaphore[] _imageAvailableSemaphores = new VkSemaphore[MaxFramesInFlight];
@@ -61,9 +69,11 @@ public sealed unsafe class VulkanContext : IDisposable
         VkCommandPool commandPool, VkRenderPass renderPass,
         VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
         VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout,
-        uint vertexBufferSize)
+        uint vertexBufferSize,
+        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
     {
         _vertexBufferSize = vertexBufferSize;
+        MsaaSamples = msaaSamples;
         Instance = instance;
         InstanceApi = instanceApi;
         _surface = surface;
@@ -81,7 +91,7 @@ public sealed unsafe class VulkanContext : IDisposable
     }
 
     public static VulkanContext Create(VkInstance instance, VkSurfaceKHR surface, uint width, uint height,
-        uint vertexBufferSize = 4 * 1024 * 1024)
+        uint vertexBufferSize = 4 * 1024 * 1024, VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
     {
         var instanceApi = GetApi(instance);
 
@@ -121,7 +131,7 @@ public sealed unsafe class VulkanContext : IDisposable
         deviceApi.vkCreateCommandPool(&poolCI, null, out var commandPool).CheckResult();
 
         // Render pass
-        var renderPass = CreateRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm);
+        var renderPass = CreateRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm, msaaSamples);
 
         // Descriptor pool — large enough for font atlas + textures
         // FreeDescriptorSet flag allows individual sets to be freed when textures are evicted
@@ -184,7 +194,7 @@ public sealed unsafe class VulkanContext : IDisposable
             instance, instanceApi, surface, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, commandPool, renderPass,
             descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout,
-            vertexBufferSize);
+            vertexBufferSize, msaaSamples);
 
         ctx.CreateSyncObjects();
         ctx.AllocateCommandBuffers();
@@ -532,13 +542,70 @@ public sealed unsafe class VulkanContext : IDisposable
         return false;
     }
 
-    private static VkRenderPass CreateRenderPass(VkDeviceApi deviceApi, VkFormat format)
+    private static VkRenderPass CreateRenderPass(VkDeviceApi deviceApi, VkFormat format,
+        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
     {
-        VkAttachmentDescription colorAttachment = new()
+        if (msaaSamples == VkSampleCountFlags.Count1)
+        {
+            // No MSAA — single color attachment
+            VkAttachmentDescription colorAttachment = new()
+            {
+                format = format,
+                samples = VkSampleCountFlags.Count1,
+                loadOp = VkAttachmentLoadOp.Clear,
+                storeOp = VkAttachmentStoreOp.Store,
+                stencilLoadOp = VkAttachmentLoadOp.DontCare,
+                stencilStoreOp = VkAttachmentStoreOp.DontCare,
+                initialLayout = VkImageLayout.Undefined,
+                finalLayout = VkImageLayout.PresentSrcKHR
+            };
+
+            VkAttachmentReference colorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
+
+            VkSubpassDescription subpass = new()
+            {
+                pipelineBindPoint = VkPipelineBindPoint.Graphics,
+                colorAttachmentCount = 1,
+                pColorAttachments = &colorRef
+            };
+
+            VkSubpassDependency dependency = new()
+            {
+                srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
+                srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput, srcAccessMask = 0,
+                dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
+                dstAccessMask = VkAccessFlags.ColorAttachmentWrite
+            };
+
+            VkRenderPassCreateInfo rpCI = new()
+            {
+                attachmentCount = 1, pAttachments = &colorAttachment,
+                subpassCount = 1, pSubpasses = &subpass,
+                dependencyCount = 1, pDependencies = &dependency
+            };
+
+            deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
+            return rp;
+        }
+
+        // MSAA — multisample color attachment (0) + resolve to swapchain (1)
+        Span<VkAttachmentDescription> attachments = stackalloc VkAttachmentDescription[2];
+        attachments[0] = new() // multisample color
+        {
+            format = format,
+            samples = msaaSamples,
+            loadOp = VkAttachmentLoadOp.Clear,
+            storeOp = VkAttachmentStoreOp.DontCare, // resolved, no need to store
+            stencilLoadOp = VkAttachmentLoadOp.DontCare,
+            stencilStoreOp = VkAttachmentStoreOp.DontCare,
+            initialLayout = VkImageLayout.Undefined,
+            finalLayout = VkImageLayout.ColorAttachmentOptimal
+        };
+        attachments[1] = new() // resolve target (swapchain image)
         {
             format = format,
             samples = VkSampleCountFlags.Count1,
-            loadOp = VkAttachmentLoadOp.Clear,
+            loadOp = VkAttachmentLoadOp.DontCare,
             storeOp = VkAttachmentStoreOp.Store,
             stencilLoadOp = VkAttachmentLoadOp.DontCare,
             stencilStoreOp = VkAttachmentStoreOp.DontCare,
@@ -546,41 +613,37 @@ public sealed unsafe class VulkanContext : IDisposable
             finalLayout = VkImageLayout.PresentSrcKHR
         };
 
-        VkAttachmentReference colorRef = new()
-        {
-            attachment = 0,
-            layout = VkImageLayout.ColorAttachmentOptimal
-        };
+        VkAttachmentReference msaaColorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
+        VkAttachmentReference resolveRef = new() { attachment = 1, layout = VkImageLayout.ColorAttachmentOptimal };
 
-        VkSubpassDescription subpass = new()
+        VkSubpassDescription msaaSubpass = new()
         {
             pipelineBindPoint = VkPipelineBindPoint.Graphics,
             colorAttachmentCount = 1,
-            pColorAttachments = &colorRef
+            pColorAttachments = &msaaColorRef,
+            pResolveAttachments = &resolveRef
         };
 
-        VkSubpassDependency dependency = new()
+        VkSubpassDependency msaaDep = new()
         {
-            srcSubpass = VK_SUBPASS_EXTERNAL,
-            dstSubpass = 0,
-            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-            srcAccessMask = 0,
+            srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
+            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput, srcAccessMask = 0,
             dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
             dstAccessMask = VkAccessFlags.ColorAttachmentWrite
         };
 
-        VkRenderPassCreateInfo rpCI = new()
+        fixed (VkAttachmentDescription* pAttachments = attachments)
         {
-            attachmentCount = 1,
-            pAttachments = &colorAttachment,
-            subpassCount = 1,
-            pSubpasses = &subpass,
-            dependencyCount = 1,
-            pDependencies = &dependency
-        };
+            VkRenderPassCreateInfo msaaRpCI = new()
+            {
+                attachmentCount = 2, pAttachments = pAttachments,
+                subpassCount = 1, pSubpasses = &msaaSubpass,
+                dependencyCount = 1, pDependencies = &msaaDep
+            };
 
-        deviceApi.vkCreateRenderPass(&rpCI, null, out var renderPass).CheckResult();
-        return renderPass;
+            deviceApi.vkCreateRenderPass(&msaaRpCI, null, out var renderPass).CheckResult();
+            return renderPass;
+        }
     }
 
     private void CreateSwapchain(uint width, uint height)
@@ -642,21 +705,78 @@ public sealed unsafe class VulkanContext : IDisposable
             DeviceApi.vkCreateImageView(&viewCI, null, out _swapchainImageViews[i]).CheckResult();
         }
 
+        // Create MSAA color image if needed
+        if (MsaaSamples != VkSampleCountFlags.Count1)
+        {
+            VkImageCreateInfo msaaImageCI = new()
+            {
+                imageType = VkImageType.Image2D,
+                format = format,
+                extent = new VkExtent3D(extent.width, extent.height, 1),
+                mipLevels = 1,
+                arrayLayers = 1,
+                samples = MsaaSamples,
+                tiling = VkImageTiling.Optimal,
+                usage = VkImageUsageFlags.ColorAttachment | VkImageUsageFlags.TransientAttachment,
+                sharingMode = VkSharingMode.Exclusive
+            };
+            DeviceApi.vkCreateImage(&msaaImageCI, null, out _msaaImage).CheckResult();
+
+            DeviceApi.vkGetImageMemoryRequirements(_msaaImage, out var memReqs);
+            VkMemoryAllocateInfo allocInfo = new()
+            {
+                allocationSize = memReqs.size,
+                memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits, VkMemoryPropertyFlags.DeviceLocal)
+            };
+            DeviceApi.vkAllocateMemory(&allocInfo, null, out _msaaMemory).CheckResult();
+            DeviceApi.vkBindImageMemory(_msaaImage, _msaaMemory, 0).CheckResult();
+
+            var msaaViewCI = new VkImageViewCreateInfo(
+                _msaaImage, VkImageViewType.Image2D, format,
+                VkComponentMapping.Rgba,
+                new VkImageSubresourceRange(VkImageAspectFlags.Color, 0, 1, 0, 1));
+            DeviceApi.vkCreateImageView(&msaaViewCI, null, out _msaaImageView).CheckResult();
+        }
+
         // Create framebuffers
         _framebuffers = new VkFramebuffer[imgCount];
         for (var i = 0; i < imgCount; i++)
         {
-            var attachment = _swapchainImageViews[i];
-            VkFramebufferCreateInfo fbCI = new()
+            VkFramebufferCreateInfo fbCI;
+            if (MsaaSamples != VkSampleCountFlags.Count1)
             {
-                renderPass = RenderPass,
-                attachmentCount = 1,
-                pAttachments = &attachment,
-                width = extent.width,
-                height = extent.height,
-                layers = 1
-            };
-            DeviceApi.vkCreateFramebuffer(&fbCI, null, out _framebuffers[i]).CheckResult();
+                // MSAA: attachment 0 = multisample, attachment 1 = resolve (swapchain)
+                Span<VkImageView> msaaAttachments = stackalloc VkImageView[2];
+                msaaAttachments[0] = _msaaImageView;
+                msaaAttachments[1] = _swapchainImageViews[i];
+                fixed (VkImageView* pAtt = msaaAttachments)
+                {
+                    fbCI = new()
+                    {
+                        renderPass = RenderPass,
+                        attachmentCount = 2,
+                        pAttachments = pAtt,
+                        width = extent.width,
+                        height = extent.height,
+                        layers = 1
+                    };
+                    DeviceApi.vkCreateFramebuffer(&fbCI, null, out _framebuffers[i]).CheckResult();
+                }
+            }
+            else
+            {
+                var attachment = _swapchainImageViews[i];
+                fbCI = new()
+                {
+                    renderPass = RenderPass,
+                    attachmentCount = 1,
+                    pAttachments = &attachment,
+                    width = extent.width,
+                    height = extent.height,
+                    layers = 1
+                };
+                DeviceApi.vkCreateFramebuffer(&fbCI, null, out _framebuffers[i]).CheckResult();
+            }
         }
     }
 
@@ -666,6 +786,24 @@ public sealed unsafe class VulkanContext : IDisposable
             DeviceApi.vkDestroyFramebuffer(fb);
         foreach (var iv in _swapchainImageViews)
             DeviceApi.vkDestroyImageView(iv);
+
+        // Cleanup MSAA resources
+        if (_msaaImageView != VkImageView.Null)
+        {
+            DeviceApi.vkDestroyImageView(_msaaImageView);
+            _msaaImageView = VkImageView.Null;
+        }
+        if (_msaaImage != VkImage.Null)
+        {
+            DeviceApi.vkDestroyImage(_msaaImage);
+            _msaaImage = VkImage.Null;
+        }
+        if (_msaaMemory != VkDeviceMemory.Null)
+        {
+            DeviceApi.vkFreeMemory(_msaaMemory);
+            _msaaMemory = VkDeviceMemory.Null;
+        }
+
         if (Swapchain != VkSwapchainKHR.Null)
             DeviceApi.vkDestroySwapchainKHR(Swapchain);
 
