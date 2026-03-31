@@ -338,6 +338,51 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// Draws a texture mapped to an arbitrary quad defined by 4 corners.
+    /// Corners are: (x0,y0)=image origin, (x1,y1)=right edge, (x2,y2)=bottom edge, (x3,y3)=far corner.
+    /// UV mapping: (0,0) at (x0,y0), (1,0) at (x1,y1), (0,1) at (x2,y2), (1,1) at (x3,y3).
+    /// </summary>
+    public void DrawTexturedQuad(VkDescriptorSet textureSet,
+        float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3)
+    {
+        if (_pipelines is null) return;
+
+        var api = Surface.DeviceApi;
+
+        ReadOnlySpan<float> vertices =
+        [
+            x0, y0, 0f, 0f,  // image origin (UV 0,0)
+            x1, y1, 1f, 0f,  // right edge   (UV 1,0)
+            x3, y3, 1f, 1f,  // far corner    (UV 1,1)
+            x0, y0, 0f, 0f,  // image origin  (UV 0,0)
+            x3, y3, 1f, 1f,  // far corner    (UV 1,1)
+            x2, y2, 0f, 1f   // bottom edge   (UV 0,1)
+        ];
+
+        _pushConstants[16] = 1f;
+        _pushConstants[17] = 1f;
+        _pushConstants[18] = 1f;
+        _pushConstants[19] = 1f;
+
+        var offset = Surface.WriteVertices(vertices);
+        if (offset == uint.MaxValue) return;
+
+        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.PagePipeline);
+
+        fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
+            Surface.PipelineLayout, 0, 1, &textureSet, 0, null);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
+    }
+
+    /// <summary>
     /// Draws a sub-region of a texture using the PagePipeline.
     /// UV coordinates specify which part of the texture to sample.
     /// </summary>
