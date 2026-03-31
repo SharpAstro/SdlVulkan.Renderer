@@ -409,9 +409,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// Pre-warms a glyph in the font atlas so it's available in the current frame's flush.
     /// Call this from OnPreFlush to avoid 1-frame text flicker when font sizes change.
     /// </summary>
-    public void PreWarmGlyph(string fontPath, float fontSize, System.Text.Rune character, int charCode = -1)
+    public void PreWarmGlyph(string fontPath, float fontSize, System.Text.Rune character, int charCode = -1, bool isCidFont = false)
     {
-        _fontAtlas?.GetGlyph(fontPath, fontSize, character, charCode: charCode);
+        _fontAtlas?.GetGlyph(fontPath, fontSize, character, charCode: charCode, isCidFont: isCidFont);
     }
 
     /// <summary>
@@ -420,11 +420,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public void DrawSingleGlyph(string fontPath, float fontSize, System.Text.Rune character,
         int charCode, DIR.Lib.RGBAColor32 color, float inkX, float inkY,
-        float rotation = 0f)
+        float rotation = 0f, bool isCidFont = false)
     {
         if (_pipelines is null || _fontAtlas is null) return;
 
-        var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode);
+        var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode, isCidFont: isCidFont);
         if (glyph.Width == 0) return;
 
         var api = Surface.DeviceApi;
@@ -496,18 +496,18 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public void DrawGlyphAtBaseline(string fontPath, float fontSize, System.Text.Rune character,
         int charCode, DIR.Lib.RGBAColor32 color, float baselineX, float baselineY,
-        float rotation = 0f)
+        float rotation = 0f, bool isCidFont = false)
     {
         if (_pipelines is null || _fontAtlas is null) return;
 
-        var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode);
+        var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode, isCidFont: isCidFont);
         if (glyph.Width == 0) return;
 
         var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
         var inkX = baselineX + glyph.BearingX * glyphScale;
         var inkY = baselineY - glyph.BearingY * glyphScale;
 
-        DrawSingleGlyph(fontPath, fontSize, character, charCode, color, inkX, inkY, rotation);
+        DrawSingleGlyph(fontPath, fontSize, character, charCode, color, inkX, inkY, rotation, isCidFont);
     }
 
     /// <summary>

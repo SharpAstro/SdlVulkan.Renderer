@@ -83,7 +83,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     /// Gets glyph info, rasterizing into the staging buffer if needed.
     /// Use <paramref name="skipUnflushed"/> in draw loops to avoid sampling stale GPU texture data.
     /// </summary>
-    public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character, bool skipUnflushed = false, int charCode = -1)
+    public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character, bool skipUnflushed = false, int charCode = -1, bool isCidFont = false)
     {
         fontSize = QuantizeFontSize(fontSize);
         var key = new GlyphKey(fontPath, fontSize, character, charCode);
@@ -94,7 +94,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
                 return existing with { Width = 0 }; // metrics preserved for advance, but skip quad
             return existing;
         }
-        var result = RasterizeGlyph(key, charCode);
+        var result = RasterizeGlyph(key, charCode, isCidFont);
         if (skipUnflushed && result.Width > 0)
             return result with { Width = 0 }; // just rasterized, not flushed yet — skip quad
         return result;
@@ -192,7 +192,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkFreeMemory(_imageMemory);
     }
 
-    private GlyphInfo RasterizeGlyph(GlyphKey key, int charCode = -1)
+    private GlyphInfo RasterizeGlyph(GlyphKey key, int charCode = -1, bool isCidFont = false)
     {
         if (Rune.IsWhiteSpace(key.Character))
         {
@@ -206,7 +206,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         // since the font's cmap may not map Unicode codepoints correctly
         GlyphBitmap bitmap;
         if (charCode >= 0 && key.Font.StartsWith("mem:"))
-            bitmap = Rasterizer.RasterizeGlyphWithCharCode(key.Font, key.Size, key.Character, (uint)charCode);
+            bitmap = Rasterizer.RasterizeGlyphWithCharCode(key.Font, key.Size, key.Character, (uint)charCode, isCidFont);
         else
             bitmap = Rasterizer.RasterizeGlyph(key.Font, key.Size, key.Character);
         var glyphWidth = bitmap.Width;
