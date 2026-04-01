@@ -740,13 +740,13 @@ public sealed unsafe class VulkanContext : IDisposable
 
         // Create framebuffers
         _framebuffers = new VkFramebuffer[imgCount];
+        Span<VkImageView> msaaAttachments = stackalloc VkImageView[2];
         for (var i = 0; i < imgCount; i++)
         {
             VkFramebufferCreateInfo fbCI;
             if (MsaaSamples != VkSampleCountFlags.Count1)
             {
                 // MSAA: attachment 0 = multisample, attachment 1 = resolve (swapchain)
-                Span<VkImageView> msaaAttachments = stackalloc VkImageView[2];
                 msaaAttachments[0] = _msaaImageView;
                 msaaAttachments[1] = _swapchainImageViews[i];
                 fixed (VkImageView* pAtt = msaaAttachments)
