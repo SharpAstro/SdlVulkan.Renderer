@@ -195,6 +195,7 @@ public sealed unsafe class VkTexture : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        IsUploaded = false; // prevent use-after-free via stale references
         CleanupStaging();
         var api = _ctx.DeviceApi;
         _ctx.FreeDescriptorSet(DescriptorSet);
