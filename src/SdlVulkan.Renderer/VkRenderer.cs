@@ -14,6 +14,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // Push constant data: mat4 (16 floats) + vec4 color (4 floats) + float innerRadius (1 float) = 84 bytes
     private readonly float[] _pushConstants = new float[21];
 
+    // Glyph batching state — accumulates contiguous glyph quads for a single draw call
+    private uint _glyphBatchStartOffset = uint.MaxValue;
+    private int _glyphBatchVertexCount;
+    private bool _glyphBatchActive;
+
     public VkRenderer(VulkanContext ctx, uint width, uint height) : base(ctx)
     {
         _width = width;
@@ -553,6 +558,120 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var inkY = baselineY - glyph.BearingY * glyphScale;
 
         DrawSingleGlyph(fontPath, fontSize, character, charCode, color, inkX, inkY, rotation, hint);
+    }
+
+    /// <summary>
+    /// Begins a glyph batch. All subsequent AddBatchedGlyph/AddBatchedGlyphAtBaseline calls
+    /// accumulate vertex data contiguously. Call EndGlyphBatch to issue a single draw call.
+    /// </summary>
+    public void BeginGlyphBatch(DIR.Lib.RGBAColor32 color)
+    {
+        _glyphBatchActive = true;
+        _glyphBatchStartOffset = uint.MaxValue;
+        _glyphBatchVertexCount = 0;
+        SetColor(color);
+    }
+
+    /// <summary>
+    /// Adds a glyph to the current batch at the exact ink position (no draw call issued).
+    /// </summary>
+    public void AddBatchedGlyph(string fontPath, float fontSize, System.Text.Rune character,
+        int charCode, float inkX, float inkY,
+        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+    {
+        if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
+
+        var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode, hint: hint);
+        if (glyph.Width == 0) return;
+
+        var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
+        var w = glyph.Width * glyphScale;
+        var h = glyph.Height * glyphScale;
+
+        Span<float> verts = stackalloc float[24];
+        if (MathF.Abs(rotation) < 0.01f)
+        {
+            var gx1 = inkX + w;
+            var gy1 = inkY + h;
+            verts[0] = inkX; verts[1] = inkY; verts[2] = glyph.U0; verts[3] = glyph.V0;
+            verts[4] = gx1;  verts[5] = inkY; verts[6] = glyph.U1; verts[7] = glyph.V0;
+            verts[8] = gx1;  verts[9] = gy1;  verts[10] = glyph.U1; verts[11] = glyph.V1;
+            verts[12] = inkX; verts[13] = inkY; verts[14] = glyph.U0; verts[15] = glyph.V0;
+            verts[16] = gx1;  verts[17] = gy1;  verts[18] = glyph.U1; verts[19] = glyph.V1;
+            verts[20] = inkX; verts[21] = gy1;  verts[22] = glyph.U0; verts[23] = glyph.V1;
+        }
+        else
+        {
+            var cosA = MathF.Cos(rotation);
+            var sinA = MathF.Sin(rotation);
+            var rx = cosA * w;  var ry = sinA * w;
+            var ddx = -sinA * h; var ddy = cosA * h;
+            var trx = inkX + rx;      var try_ = inkY + ry;
+            var blx = inkX + ddx;     var bly = inkY + ddy;
+            var brx = inkX + rx + ddx; var bry = inkY + ry + ddy;
+
+            verts[0] = inkX; verts[1] = inkY; verts[2] = glyph.U0; verts[3] = glyph.V0;
+            verts[4] = trx;  verts[5] = try_; verts[6] = glyph.U1; verts[7] = glyph.V0;
+            verts[8] = brx;  verts[9] = bry;  verts[10] = glyph.U1; verts[11] = glyph.V1;
+            verts[12] = inkX; verts[13] = inkY; verts[14] = glyph.U0; verts[15] = glyph.V0;
+            verts[16] = brx;  verts[17] = bry;  verts[18] = glyph.U1; verts[19] = glyph.V1;
+            verts[20] = blx;  verts[21] = bly;  verts[22] = glyph.U0; verts[23] = glyph.V1;
+        }
+        ReadOnlySpan<float> vertices = verts;
+
+        var vertOffset = Surface.WriteVertices(vertices);
+        if (vertOffset == uint.MaxValue) return;
+
+        if (_glyphBatchStartOffset == uint.MaxValue)
+            _glyphBatchStartOffset = vertOffset;
+        _glyphBatchVertexCount += 6;
+    }
+
+    /// <summary>
+    /// Adds a glyph to the current batch at the text baseline position (no draw call issued).
+    /// Computes ink-top from baseline using FreeType bearings.
+    /// </summary>
+    public void AddBatchedGlyphAtBaseline(string fontPath, float fontSize, System.Text.Rune character,
+        int charCode, float baselineX, float baselineY,
+        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+    {
+        if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
+
+        var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode, hint: hint);
+        if (glyph.Width == 0) return;
+
+        var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
+        var inkX = baselineX + glyph.BearingX * glyphScale;
+        var inkY = baselineY - glyph.BearingY * glyphScale;
+
+        AddBatchedGlyph(fontPath, fontSize, character, charCode, inkX, inkY, rotation, hint);
+    }
+
+    /// <summary>
+    /// Ends the current glyph batch and issues a single draw call for all accumulated glyphs.
+    /// </summary>
+    public void EndGlyphBatch()
+    {
+        if (!_glyphBatchActive) return;
+        _glyphBatchActive = false;
+
+        if (_glyphBatchVertexCount == 0 || _glyphBatchStartOffset == uint.MaxValue) return;
+
+        var api = Surface.DeviceApi;
+        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines!.TexturedPipeline);
+
+        var descriptorSet = Surface.DescriptorSet;
+        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
+            Surface.PipelineLayout, 0, 1, &descriptorSet, 0, null);
+
+        fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)_glyphBatchStartOffset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, (uint)_glyphBatchVertexCount, 1, 0, 0);
     }
 
     /// <summary>
