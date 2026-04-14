@@ -14,7 +14,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     internal readonly record struct GlyphInfo(float U0, float V0, float U1, float V1, int Width, int Height, float AdvanceX, int BearingX, int BearingY);
 
     private readonly VulkanContext _ctx;
-    internal readonly FreeTypeGlyphRasterizer Rasterizer = new();
+    internal readonly ManagedFontRasterizer Rasterizer = new();
     private readonly Dictionary<GlyphKey, GlyphInfo> _glyphs = new();
     private readonly HashSet<GlyphKey> _unflushedGlyphs = new();
 

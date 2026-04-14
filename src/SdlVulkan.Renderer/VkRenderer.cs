@@ -33,7 +33,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     public VkPipelineSet? Pipelines => _pipelines;
     internal VkFontAtlas? FontAtlas => _fontAtlas;
-    public FreeTypeGlyphRasterizer? GlyphRasterizer => _fontAtlas?.Rasterizer;
+    public ManagedFontRasterizer? GlyphRasterizer => _fontAtlas?.Rasterizer;
     public bool FontAtlasDirty => _fontAtlas?.IsDirty == true;
 
     public VulkanContext Context => Surface;
