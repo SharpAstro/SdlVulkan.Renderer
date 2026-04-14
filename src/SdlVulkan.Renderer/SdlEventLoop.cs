@@ -19,6 +19,11 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
     private ulong _lastMouseRedrawCounter;
     private static readonly ulong MouseRedrawInterval = GetPerformanceFrequency() / 30; // ~30fps
 
+    // Touch/finger tracking for pinch-to-zoom
+    private readonly Dictionary<long, (float X, float Y)> _activeFingers = new();
+    private float _pinchStartDist;
+    private float _pinchStartFov; // stash initial value at pinch start
+
     /// <summary>Background color used for <see cref="VkRenderer.BeginFrame"/>.</summary>
     public RGBAColor32 BackgroundColor { get; set; } = new(0x1a, 0x1a, 0x2e, 0xff);
 
@@ -42,6 +47,12 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
 
     /// <summary>Called on mouse wheel. Parameters are scrollY, mouseX, mouseY. Return true if consumed.</summary>
     public Func<float, float, float, bool>? OnMouseWheel { get; set; }
+
+    /// <summary>Called on trackpad/touch pinch gesture. Parameters are scale (absolute since start), centerX, centerY in pixels.</summary>
+    public Action<float, float, float>? OnPinch { get; set; }
+
+    /// <summary>Called when a pinch gesture ends (fingers lifted).</summary>
+    public Action? OnPinchEnd { get; set; }
 
     /// <summary>Called on SDL TextInput event. Parameter is the UTF-8 text string.</summary>
     public Action<string>? OnTextInput { get; set; }
@@ -153,6 +164,49 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
                             _needsRedraw = true;
                             break;
 
+                        case EventType.FingerDown:
+                        case EventType.FingerUp:
+                        case EventType.FingerMotion:
+                        {
+                            // SDL3-CS Event union doesn't expose a TouchFingerEvent field directly.
+                            // Reinterpret the raw event as TouchFingerEvent via Unsafe.As.
+                            ref var tfe = ref System.Runtime.CompilerServices.Unsafe.As<Event, TouchFingerEvent>(ref evt);
+                            var fid = (long)tfe.FingerID;
+
+                            if ((EventType)evt.Type == EventType.FingerUp)
+                            {
+                                var wasPinching = _activeFingers.Count >= 2;
+                                _activeFingers.Remove(fid);
+                                if (wasPinching && _activeFingers.Count < 2)
+                                {
+                                    OnPinchEnd?.Invoke();
+                                }
+                                break;
+                            }
+
+                            var fx = tfe.X * renderer.Width;
+                            var fy = tfe.Y * renderer.Height;
+                            _activeFingers[fid] = (fx, fy);
+
+                            if ((EventType)evt.Type == EventType.FingerDown && _activeFingers.Count == 2)
+                            {
+                                _pinchStartDist = GetFingerDistance();
+                            }
+
+                            if (_activeFingers.Count >= 2 && _pinchStartDist > 1f
+                                && (EventType)evt.Type == EventType.FingerMotion)
+                            {
+                                var dist = GetFingerDistance();
+                                // Absolute scale since pinch began (not relative per-frame)
+                                var scale = dist / _pinchStartDist;
+                                var (cx, cy) = GetFingerCenter();
+                                OnPinch?.Invoke(scale, cx, cy);
+                                _pinchStartDist = dist; // relative per-frame for scroll conversion
+                                _needsRedraw = true;
+                            }
+                            break;
+                        }
+
                         case EventType.TextInput:
                             if (OnTextInput is not null)
                             {
@@ -208,5 +262,28 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
 
             OnPostFrame?.Invoke();
         }
+    }
+
+    /// <summary>Number of active touch fingers. Use to suppress mouse drag during pinch.</summary>
+    public int ActiveFingerCount => _activeFingers.Count;
+
+    private float GetFingerDistance()
+    {
+        if (_activeFingers.Count < 2) return 0f;
+        using var e = _activeFingers.Values.GetEnumerator();
+        e.MoveNext(); var a = e.Current;
+        e.MoveNext(); var b = e.Current;
+        var dx = b.X - a.X;
+        var dy = b.Y - a.Y;
+        return MathF.Sqrt(dx * dx + dy * dy);
+    }
+
+    private (float cx, float cy) GetFingerCenter()
+    {
+        if (_activeFingers.Count < 2) return (_mouseX, _mouseY);
+        using var e = _activeFingers.Values.GetEnumerator();
+        e.MoveNext(); var a = e.Current;
+        e.MoveNext(); var b = e.Current;
+        return ((a.X + b.X) * 0.5f, (a.Y + b.Y) * 0.5f);
     }
 }
