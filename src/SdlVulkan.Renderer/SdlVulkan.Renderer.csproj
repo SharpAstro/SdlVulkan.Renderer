@@ -24,8 +24,23 @@
     <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
-  <ItemGroup>
+  <!--
+    DIR.Lib (rendering primitives + font rasterization) is referenced via
+    ProjectReference when a sibling working copy exists, so iteration can
+    happen in-tree. CI / package builds without the sibling fall through
+    to PackageReference automatically.
+  -->
+  <PropertyGroup>
+    <UseLocalDirLib Condition="'$(UseLocalDirLib)' == '' AND Exists('..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj')">true</UseLocalDirLib>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(UseLocalDirLib)' == 'true'">
+    <ProjectReference Include="..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalDirLib)' != 'true'">
     <PackageReference Include="DIR.Lib" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="SDL3-CS" />
     <PackageReference Include="Vortice.Vulkan" />
     <PackageReference Include="Vortice.ShaderCompiler" />

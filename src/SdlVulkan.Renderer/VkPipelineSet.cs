@@ -11,6 +11,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
     public VkPipeline EllipsePipeline { get; }
     public VkPipeline PagePipeline { get; }
     public VkPipeline StrokePipeline { get; }
+    public VkPipeline SdfPipeline { get; }
 
     // Blend mode variants of FlatPipeline
     public VkPipeline FlatMultiplyPipeline { get; }
@@ -134,9 +135,29 @@ public sealed unsafe class VkPipelineSet : IDisposable
         }
         """;
 
+    // SDF text pipeline: samples a signed distance field atlas. The distance value
+    // is smoothstepped in the fragment shader to produce resolution-independent
+    // anti-aliased text edges. Uses the same vertex layout as TexturedPipeline.
+    // The extra push constant float (offset 80) carries the SDF edge softness.
+    private const string SdfFragmentSource = """
+        #version 450
+        layout(location = 0) in vec2 vTexCoord;
+        layout(push_constant) uniform PC { mat4 proj; vec4 color; float sdfEdge; } pc;
+        layout(set = 0, binding = 0) uniform sampler2D uTexture;
+        layout(location = 0) out vec4 FragColor;
+        void main() {
+            float dist = texture(uTexture, vTexCoord).r;
+            float edge = pc.sdfEdge > 0.0 ? pc.sdfEdge : 0.1;
+            float alpha = smoothstep(0.5 - edge, 0.5 + edge, dist);
+            if (alpha < 0.005) discard;
+            FragColor = vec4(pc.color.rgb, pc.color.a * alpha);
+        }
+        """;
+
     #endregion
 
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
+        VkPipeline sdf,
         VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten)
     {
         _deviceApi = deviceApi;
@@ -145,6 +166,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         EllipsePipeline = ellipse;
         PagePipeline = page;
         StrokePipeline = stroke;
+        SdfPipeline = sdf;
         FlatMultiplyPipeline = flatMultiply;
         FlatScreenPipeline = flatScreen;
         FlatDarkenPipeline = flatDarken;
@@ -167,6 +189,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         var ellipseFrag = CompileAndCreateModule(deviceApi, compiler, EllipseFragmentSource, "ellipse.frag", ShaderKind.FragmentShader);
         var strokeVert = CompileAndCreateModule(deviceApi, compiler, StrokeVertexSource, "stroke.vert", ShaderKind.VertexShader);
         var strokeFrag = CompileAndCreateModule(deviceApi, compiler, StrokeFragmentSource, "stroke.frag", ShaderKind.FragmentShader);
+        var sdfFrag = CompileAndCreateModule(deviceApi, compiler, SdfFragmentSource, "sdf.frag", ShaderKind.FragmentShader);
 
         try
         {
@@ -206,6 +229,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var stroke = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, strokeVert, strokeFrag,
                 &strokeBinding, 1, strokeAttrs, 3, msaaSamples: msaa);
 
+            // SDF pipeline: same vertex layout as textured, SDF fragment shader
+            var sdf = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, texVert, sdfFrag,
+                &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
+
             // Blend mode variants of the flat pipeline
             var flatMultiply = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.DstColor, VkBlendFactor.OneMinusSrcAlpha, msaaSamples: msaa);
@@ -216,7 +243,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var flatLighten = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Max, msaa);
 
-            return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke,
+            return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf,
                 flatMultiply, flatScreen, flatDarken, flatLighten);
         }
         finally
@@ -230,6 +257,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             deviceApi.vkDestroyShaderModule(ellipseFrag);
             deviceApi.vkDestroyShaderModule(strokeVert);
             deviceApi.vkDestroyShaderModule(strokeFrag);
+            deviceApi.vkDestroyShaderModule(sdfFrag);
         }
     }
 
@@ -244,6 +272,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(EllipsePipeline);
         _deviceApi.vkDestroyPipeline(PagePipeline);
         _deviceApi.vkDestroyPipeline(StrokePipeline);
+        _deviceApi.vkDestroyPipeline(SdfPipeline);
     }
 
     private static VkPipeline CreatePipeline(
