@@ -45,6 +45,22 @@ The `.csproj` uses a conditional ProjectReference: when `../DIR.Lib/` exists loc
 - **Font atlas lifecycle** — `VkFontAtlas` manages a growable glyph atlas (up to 4096x4096) with dirty-region staging upload; eviction is deferred one frame to prevent stale UV sampling; `skipUnflushed` guards draw loops from sampling unuploaded glyphs
 - **Idle-suppressing event loop** — `SdlEventLoop` uses `WaitEventTimeout` when idle, throttles mouse-motion redraws to ~30 fps
 
+**Side-car (custom) pipeline pattern:**
+Consumer projects (e.g., TianWen) can create their own Vulkan pipelines that render within
+the same render pass. Two proven examples: `VkFitsImagePipeline` (image stretch + WCS grid)
+and `VkSkyMapPipeline` (3D star/constellation rendering with stereographic projection).
+
+To create a side-car pipeline:
+1. Create your own `VkDescriptorSetLayout` + `VkPipelineLayout` (with your UBO/push constants)
+2. Create `VkPipeline` using `ctx.RenderPass` and `ctx.MsaaSamples` (must match)
+3. Compile GLSL 450 → SPIR-V at runtime using `Vortice.ShaderCompiler.Compiler`
+4. Record draw commands via `renderer.CurrentCommandBuffer` between `BeginFrame`/`EndFrame`
+5. Use `ctx.WriteVertices()` for per-frame geometry or `ctx.CreatePersistentVertexBuffer()`
+   for static geometry. Instancing is supported — just call `vkCmdDraw(vertexCount, instanceCount, ...)`
+
+The 84-byte push constant block is only a constraint if you use `ctx.PipelineLayout`.
+Side-car pipelines with their own `VkPipelineLayout` can define any push constant layout.
+
 **Key files:**
 - `VkRenderer.cs` — high-level draw API, extends `Renderer<VulkanContext>` from DIR.Lib
 - `VulkanContext.cs` — Vulkan device/swapchain/sync lifecycle
