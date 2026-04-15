@@ -22,6 +22,12 @@ Published as a NuGet package. CI/CD (`.github/workflows/dotnet.yml`) builds on p
 
 Central package versioning via `src/SdlVulkan.Renderer/Directory.Packages.props`. All package versions are pinned there — update versions in that file, not in the `.csproj`.
 
+## Versioning
+
+The package version is `Major.Minor.RunNumber` where `RunNumber` is the CI build number. Two places must stay in sync when bumping:
+- `VersionPrefix` in `src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj` — used for local builds (`Major.Minor.0`)
+- `VERSION_PREFIX` in `.github/workflows/dotnet.yml` — used for CI builds (`Major.Minor.${{ github.run_number }}`)
+
 ## DIR.Lib Dependency
 
 DIR.Lib provides the rendering primitives, font rasterization, and widget interfaces that this library builds on. It is published via NuGet but its source lives in a sibling directory (`../DIR.Lib`). When fixing bugs or adding features, always prefer pushing changes upstream to DIR.Lib rather than working around its limitations in this repo.
