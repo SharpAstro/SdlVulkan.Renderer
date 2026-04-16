@@ -707,6 +707,40 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void DestroyBuffer(Vortice.Vulkan.VkBuffer buffer, Vortice.Vulkan.VkDeviceMemory memory)
         => Surface.DestroyBuffer(buffer, memory);
 
+    /// <summary>
+    /// GPU-efficient line drawing: computes a rotated quad (2 triangles) from the
+    /// line endpoints and submits via the FlatPipeline in a single draw call.
+    /// </summary>
+    public override void DrawLine(float x0, float y0, float x1, float y1, DIR.Lib.RGBAColor32 color, int thickness = 1)
+    {
+        if (_pipelines is null) return;
+
+        var dx = x1 - x0;
+        var dy = y1 - y0;
+        var len = MathF.Sqrt(dx * dx + dy * dy);
+        if (len < 0.001f) return;
+
+        // Perpendicular normal scaled to half-thickness
+        var hw = Math.Max(thickness, 1) * 0.5f;
+        var nx = -dy / len * hw;
+        var ny = dx / len * hw;
+
+        // 4 corners of the rotated quad
+        var ax = x0 + nx; var ay = y0 + ny;
+        var bx = x0 - nx; var by = y0 - ny;
+        var cx = x1 - nx; var cy = y1 - ny;
+        var ex = x1 + nx; var ey = y1 + ny;
+
+        // 2 triangles (6 vertices, 2 floats each)
+        ReadOnlySpan<float> vertices =
+        [
+            ax, ay, bx, by, cx, cy,
+            ax, ay, cx, cy, ex, ey
+        ];
+
+        DrawTriangles(vertices, color);
+    }
+
     public override void DrawRectangle(in RectInt rect, DIR.Lib.RGBAColor32 strokeColor, int strokeWidth)
     {
         var x0 = (float)rect.UpperLeft.X;
@@ -756,6 +790,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
         api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
     }
+
+    /// <summary>
+    /// GPU-efficient ellipse outline via the EllipsePipeline ring shader.
+    /// </summary>
+    public override void DrawEllipse(in RectInt rect, DIR.Lib.RGBAColor32 strokeColor, float strokeWidth)
+        => DrawEllipseOutline(rect, strokeColor, strokeWidth);
 
     /// <summary>
     /// Draws an ellipse outline (ring) with the given stroke width in pixels.
