@@ -51,6 +51,14 @@ public sealed unsafe class VulkanContext : IDisposable
     private int _currentFrame;
     private uint _currentImageIndex;
 
+    /// <summary>
+    /// Index of the current frame-in-flight (0 or 1 for double-buffered).
+    /// Consumers that need per-frame GPU resources (UBO copies, staging buffers)
+    /// use this to select the correct slot, guaranteed safe to write after
+    /// <see cref="BeginFrame"/> returns (the fence for this slot was waited on).
+    /// </summary>
+    public int CurrentFrame => _currentFrame;
+
     // Per-frame vertex staging buffers (avoids race between in-flight frames)
     private readonly VkBuffer[] _vertexBuffers = new VkBuffer[MaxFramesInFlight];
     private readonly VkDeviceMemory[] _vertexMemories = new VkDeviceMemory[MaxFramesInFlight];
