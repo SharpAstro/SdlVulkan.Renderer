@@ -138,7 +138,14 @@ public sealed unsafe class VkPipelineSet : IDisposable
     // SDF text pipeline: samples a signed distance field atlas. The distance value
     // is smoothstepped in the fragment shader to produce resolution-independent
     // anti-aliased text edges. Uses the same vertex layout as TexturedPipeline.
-    // The extra push constant float (offset 80) carries the SDF edge softness.
+    //
+    // Edge softness is driven by fwidth(dist) — the screen-space derivative of the
+    // distance value — which automatically adapts the smoothstep band to ±0.5 screen
+    // pixels at any zoom/font size. This is the canonical SDF AA technique and is
+    // much sharper than a single fixed edge constant, especially at small sizes.
+    //
+    // The sdfEdge push-constant slot is retained for push-constant layout compatibility
+    // but is currently ignored by the shader.
     private const string SdfFragmentSource = """
         #version 450
         layout(location = 0) in vec2 vTexCoord;
@@ -147,8 +154,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
         layout(location = 0) out vec4 FragColor;
         void main() {
             float dist = texture(uTexture, vTexCoord).r;
-            float edge = pc.sdfEdge > 0.0 ? pc.sdfEdge : 0.1;
-            float alpha = smoothstep(0.5 - edge, 0.5 + edge, dist);
+            // Half-width of the smoothstep band in distance units = half a screen pixel.
+            // fwidth(dist) is the per-fragment rate of change of dist per screen pixel.
+            float w = fwidth(dist) * 0.5 + 1e-4;
+            float alpha = smoothstep(0.5 - w, 0.5 + w, dist);
             if (alpha < 0.005) discard;
             FragColor = vec4(pc.color.rgb, pc.color.a * alpha);
         }

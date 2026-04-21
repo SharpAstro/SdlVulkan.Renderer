@@ -12,7 +12,9 @@ namespace SdlVulkan.Renderer;
 /// </summary>
 internal sealed unsafe class VkSdfFontAtlas : IDisposable
 {
-    private readonly record struct GlyphKey(string Font, float Size, Rune Character);
+    // CharCode is included in the key for CID subset fonts where the same Unicode
+    // character may need different glyph indices. For non-CID fonts, charCode is -1.
+    private readonly record struct GlyphKey(string Font, float Size, Rune Character, int CharCode);
 
     internal readonly record struct GlyphInfo(float U0, float V0, float U1, float V1,
         int Width, int Height, float AdvanceX, int BearingX, int BearingY, float Spread);
@@ -28,9 +30,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     /// <summary>
     /// SDF glyphs are rasterized at this fixed size. The GPU scales the quad
     /// for any requested display size. Because SDF encodes distance, not pixels,
-    /// a single rasterization looks sharp at all display sizes.
+    /// a single rasterization looks sharp at all display sizes. Raising this size
+    /// gives more sub-pixel fidelity when glyphs are displayed smaller than the
+    /// raster size, at the cost of atlas memory (quadratic).
     /// </summary>
-    private const float SdfRasterSize = 48f;
+    private const float SdfRasterSize = 64f;
 
     private int _atlasWidth;
     private int _atlasHeight;
@@ -90,17 +94,18 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     /// </summary>
     public static float GetGlyphScale(float requestedFontSize) => requestedFontSize / SdfRasterSize;
 
-    public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character, bool skipUnflushed = false)
+    public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character,
+        bool skipUnflushed = false, int charCode = -1, GlyphMapHint hint = GlyphMapHint.Auto)
     {
         // All SDF glyphs are rasterized at SdfRasterSize; the caller scales the quad
-        var key = new GlyphKey(fontPath, SdfRasterSize, character);
+        var key = new GlyphKey(fontPath, SdfRasterSize, character, charCode);
         if (_glyphs.TryGetValue(key, out var existing))
         {
             if (skipUnflushed && _unflushedGlyphs.Contains(key))
                 return existing with { Width = 0 };
             return existing;
         }
-        var result = RasterizeGlyph(key);
+        var result = RasterizeGlyph(key, charCode, hint);
         if (skipUnflushed && result.Width > 0)
             return result with { Width = 0 };
         return result;
@@ -172,7 +177,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         api.vkFreeMemory(_imageMemory);
     }
 
-    private GlyphInfo RasterizeGlyph(GlyphKey key)
+    private GlyphInfo RasterizeGlyph(GlyphKey key, int charCode = -1, GlyphMapHint hint = GlyphMapHint.Auto)
     {
         if (Rune.IsWhiteSpace(key.Character))
         {
@@ -182,7 +187,12 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             return info;
         }
 
-        var bitmap = _rasterizer.RasterizeGlyphSdf(key.Font, key.Size, key.Character, SdfSpread);
+        // Use WithCharCode variant for CID/embedded-subset fonts whose Unicode cmap
+        // may be absent or unreliable. RasterizeGlyphSdfWithCharCode supports
+        // multiple cmap strategies via GlyphMapHint.
+        var bitmap = charCode >= 0
+            ? _rasterizer.RasterizeGlyphSdfWithCharCode(key.Font, key.Size, key.Character, (uint)charCode, hint, SdfSpread)
+            : _rasterizer.RasterizeGlyphSdf(key.Font, key.Size, key.Character, SdfSpread);
         var glyphWidth = bitmap.Width;
         var glyphHeight = bitmap.Height;
 
