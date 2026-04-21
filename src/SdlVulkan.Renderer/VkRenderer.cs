@@ -706,7 +706,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     /// <summary>
     /// Adds a glyph to the current batch at the text baseline position (no draw call issued).
-    /// Computes ink-top from baseline using FreeType bearings.
+    /// Computes ink-top from baseline using FreeType bearings, accounting for rotation —
+    /// for rotated text the baseline-to-ink-top offset must follow the rotated text frame,
+    /// not the screen axes, or every rotated glyph lands at the wrong screen position.
     /// </summary>
     public void AddBatchedGlyphAtBaseline(string fontPath, float fontSize, System.Text.Rune character,
         int charCode, float baselineX, float baselineY,
@@ -718,8 +720,26 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (glyph.Width == 0) return;
 
         var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
-        var inkX = baselineX + glyph.BearingX * glyphScale;
-        var inkY = baselineY - glyph.BearingY * glyphScale;
+        var bx = glyph.BearingX * glyphScale;
+        var by = glyph.BearingY * glyphScale;
+        float inkX, inkY;
+        if (MathF.Abs(rotation) < 0.001f)
+        {
+            // Hot path for horizontal text — same as the old formula.
+            inkX = baselineX + bx;
+            inkY = baselineY - by;
+        }
+        else
+        {
+            // Rotate the (bearingX along baseline, -bearingY perpendicular) offset into
+            // screen coords. Baseline direction = (cos R, sin R) in Y-down; the "above
+            // baseline" perpendicular is (sin R, -cos R) so the ink-top offset is
+            // bx * baseline_dir + (-by) * up_dir.
+            var cosR = MathF.Cos(rotation);
+            var sinR = MathF.Sin(rotation);
+            inkX = baselineX + bx * cosR + by * sinR;
+            inkY = baselineY + bx * sinR - by * cosR;
+        }
 
         AddBatchedGlyph(fontPath, fontSize, character, charCode, inkX, inkY, rotation, hint);
     }
@@ -818,8 +838,23 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         //   ink_bearing_X = texture_bearing_X + spread (ink is spread pixels right of texture left)
         //   ink_bearing_Y = texture_bearing_Y - spread (ink is spread pixels below texture top)
         var glyphScale = VkSdfFontAtlas.GetGlyphScale(_glyphBatchFontSize);
-        var inkX = baselineX + (glyph.BearingX + glyph.Spread) * glyphScale;
-        var inkY = baselineY - (glyph.BearingY - glyph.Spread) * glyphScale;
+        var bx = (glyph.BearingX + glyph.Spread) * glyphScale;
+        var by = (glyph.BearingY - glyph.Spread) * glyphScale;
+        float inkX, inkY;
+        if (MathF.Abs(rotation) < 0.001f)
+        {
+            inkX = baselineX + bx;
+            inkY = baselineY - by;
+        }
+        else
+        {
+            // Same rotated-bearing transform as the bitmap AddBatchedGlyphAtBaseline — see
+            // the comment there for the derivation.
+            var cosR = MathF.Cos(rotation);
+            var sinR = MathF.Sin(rotation);
+            inkX = baselineX + bx * cosR + by * sinR;
+            inkY = baselineY + bx * sinR - by * cosR;
+        }
 
         AddBatchedSdfGlyph(fontPath, character, charCode, inkX, inkY, rotation, hint);
     }
