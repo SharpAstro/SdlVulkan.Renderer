@@ -22,7 +22,6 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
     // Touch/finger tracking for pinch-to-zoom
     private readonly Dictionary<long, (float X, float Y)> _activeFingers = new();
     private float _pinchStartDist;
-    private float _pinchStartFov; // stash initial value at pinch start
 
     /// <summary>Background color used for <see cref="VkRenderer.BeginFrame"/>.</summary>
     public RGBAColor32 BackgroundColor { get; set; } = new(0x1a, 0x1a, 0x2e, 0xff);

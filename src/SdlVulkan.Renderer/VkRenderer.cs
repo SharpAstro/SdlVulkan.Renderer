@@ -659,6 +659,20 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
 
         var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode, hint: hint);
+        AddBatchedGlyph(glyph, fontSize, inkX, inkY, rotation);
+    }
+
+    /// <summary>
+    /// Assembly-internal overload that accepts a pre-resolved <see cref="VkFontAtlas.GlyphInfo"/>
+    /// directly — skips the atlas dictionary lookup that the <c>fontPath</c> overload performs
+    /// internally. Used by <see cref="DrawText"/> which already holds the <c>GlyphInfo</c> from
+    /// its metrics pass and would otherwise pay for a second lookup. Passed by <c>in</c> to
+    /// avoid copying the ~36-byte record struct on the per-glyph hot path.
+    /// </summary>
+    internal void AddBatchedGlyph(in VkFontAtlas.GlyphInfo glyph, float fontSize,
+        float inkX, float inkY, float rotation = 0f)
+    {
+        if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
         if (glyph.Width == 0) return;
 
         var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
@@ -760,6 +774,19 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         var glyph = _sdfFontAtlas.GetGlyph(fontPath, _glyphBatchFontSize, character,
             skipUnflushed: true, charCode: charCode, hint: hint);
+        AddBatchedSdfGlyph(glyph, inkX, inkY, rotation);
+    }
+
+    /// <summary>
+    /// Assembly-internal overload that accepts a pre-resolved <see cref="VkSdfFontAtlas.GlyphInfo"/>
+    /// directly — skips the atlas dictionary lookup that the <c>fontPath</c> overload performs
+    /// internally. Uses the current batch's <c>fontSize</c> (set by <see cref="BeginSdfGlyphBatch"/>)
+    /// to compute scale and spread padding. Passed by <c>in</c> to avoid copying the ~40-byte
+    /// record struct on the per-glyph hot path.
+    /// </summary>
+    internal void AddBatchedSdfGlyph(in VkSdfFontAtlas.GlyphInfo glyph, float inkX, float inkY, float rotation = 0f)
+    {
+        if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
         if (glyph.Width == 0) return;
 
         var glyphScale = VkSdfFontAtlas.GetGlyphScale(_glyphBatchFontSize);
@@ -1084,17 +1111,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             _ => layoutY
         };
 
-        SetColor(fontColor);
-
-        // SDF anti-aliasing is driven by fwidth() in the shader — the sdfEdge push-constant
-        // slot is unused for SDF and zeroed here just to keep push constants clean.
-        _pushConstants[20] = 0f;
-
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.SdfPipeline);
-
-        var descriptorSet = _sdfFontAtlas.DescriptorSet;
-        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
-            Surface.PipelineLayout, 0, 1, &descriptorSet, 0, null);
+        // Open the SDF batch up front. Begin/EndGlyphBatch handles pipeline bind +
+        // descriptor set + push constants + vkCmdDraw -- one set of commands per batch
+        // run instead of one per glyph. Emoji (color) glyphs interrupt the SDF run and
+        // switch to a bitmap batch; switching back reopens an SDF batch.
+        BeginSdfGlyphBatch(fontColor, fontSize);
+        var inSdfBatch = true;
 
         for (var lineIdx = 0; lineIdx < lines.Length; lineIdx++)
         {
@@ -1154,8 +1176,6 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
             var baseline = penY + (lineHeight + maxAscent - maxDescent) / 2f;
 
-            var inSdfMode = true; // track current pipeline to minimize rebinds
-
             foreach (var ch in line.EnumerateRunes())
             {
                 // Color glyphs (emoji, symbols) can't render through the single-channel
@@ -1167,107 +1187,50 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
                 if (isColorGlyph && _fontAtlas is not null)
                 {
-                    // Switch to bitmap pipeline for this glyph
-                    if (inSdfMode)
+                    if (inSdfBatch)
                     {
-                        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.TexturedPipeline);
-                        var bitmapSet = Surface.DescriptorSet;
-                        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
-                            Surface.PipelineLayout, 0, 1, &bitmapSet, 0, null);
-                        // Reset sdfEdge to 0 (not used by TexturedPipeline, but keep push constants clean)
-                        _pushConstants[20] = 0f;
-                        inSdfMode = false;
+                        EndGlyphBatch();
+                        BeginGlyphBatch(fontColor);
+                        inSdfBatch = false;
                     }
 
                     var bitmapGlyph = _fontAtlas.GetGlyph(fontFamily, fontSize, ch, skipUnflushed: true);
-                    if (bitmapGlyph.Width == 0)
-                    {
-                        var bitmapScale = VkFontAtlas.GetGlyphScale(fontSize);
-                        penX += bitmapGlyph.AdvanceX * bitmapScale;
-                        continue;
-                    }
-
                     var bScale = VkFontAtlas.GetGlyphScale(fontSize);
-                    var bgx0 = penX + bitmapGlyph.BearingX * bScale;
-                    var bgy0 = baseline - bitmapGlyph.BearingY * bScale;
-                    var bgx1 = bgx0 + bitmapGlyph.Width * bScale;
-                    var bgy1 = bgy0 + bitmapGlyph.Height * bScale;
-
-                    ReadOnlySpan<float> bVerts =
-                    [
-                        bgx0, bgy0, bitmapGlyph.U0, bitmapGlyph.V0,
-                        bgx1, bgy0, bitmapGlyph.U1, bitmapGlyph.V0,
-                        bgx1, bgy1, bitmapGlyph.U1, bitmapGlyph.V1,
-                        bgx0, bgy0, bitmapGlyph.U0, bitmapGlyph.V0,
-                        bgx1, bgy1, bitmapGlyph.U1, bitmapGlyph.V1,
-                        bgx0, bgy1, bitmapGlyph.U0, bitmapGlyph.V1
-                    ];
-
-                    var bOffset = Surface.WriteVertices(bVerts);
-                    if (bOffset == uint.MaxValue) break;
-
-                    fixed (float* pPC = _pushConstants)
-                        api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
-                            VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
-
-                    var bBuf = Surface.VertexBuffer;
-                    var bOff = (ulong)bOffset;
-                    api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &bBuf, &bOff);
-                    api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
-
+                    if (bitmapGlyph.Width > 0)
+                    {
+                        var bgx0 = penX + bitmapGlyph.BearingX * bScale;
+                        var bgy0 = baseline - bitmapGlyph.BearingY * bScale;
+                        AddBatchedGlyph(in bitmapGlyph, fontSize, bgx0, bgy0);
+                    }
                     penX += bitmapGlyph.AdvanceX * bScale;
                     continue;
                 }
 
                 // SDF path for regular text glyphs
-                if (!inSdfMode)
+                if (!inSdfBatch)
                 {
-                    // Switch back to SDF pipeline
-                    api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.SdfPipeline);
-                    var sdfSet = _sdfFontAtlas.DescriptorSet;
-                    api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
-                        Surface.PipelineLayout, 0, 1, &sdfSet, 0, null);
-                    _pushConstants[20] = 0f; // sdfEdge unused; shader uses fwidth()
-                    inSdfMode = true;
+                    EndGlyphBatch();
+                    BeginSdfGlyphBatch(fontColor, fontSize);
+                    inSdfBatch = true;
                 }
 
                 var glyph = _sdfFontAtlas.GetGlyph(fontFamily, fontSize, ch, skipUnflushed: true);
-                if (glyph.Width == 0)
+                if (glyph.Width > 0)
                 {
-                    penX += glyph.AdvanceX * glyphScale;
-                    continue;
+                    // gx0/gy0 is the TEXTURE quad top-left (BearingX/Y already include the
+                    // SDF spread). AddBatchedSdfGlyph expects INK top-left and internally
+                    // shifts by -pad to get texture top-left; adding pad here converts.
+                    var pad = glyph.Spread * glyphScale;
+                    var inkX = penX + glyph.BearingX * glyphScale + pad;
+                    var inkY = baseline - glyph.BearingY * glyphScale + pad;
+                    AddBatchedSdfGlyph(in glyph, inkX, inkY);
                 }
-
-                var gx0 = penX + glyph.BearingX * glyphScale;
-                var gy0 = baseline - glyph.BearingY * glyphScale;
-                var gx1 = gx0 + glyph.Width * glyphScale;
-                var gy1 = gy0 + glyph.Height * glyphScale;
-
-                ReadOnlySpan<float> vertices =
-                [
-                    gx0, gy0, glyph.U0, glyph.V0,
-                    gx1, gy0, glyph.U1, glyph.V0,
-                    gx1, gy1, glyph.U1, glyph.V1,
-                    gx0, gy0, glyph.U0, glyph.V0,
-                    gx1, gy1, glyph.U1, glyph.V1,
-                    gx0, gy1, glyph.U0, glyph.V1
-                ];
-
-                var vertOffset = Surface.WriteVertices(vertices);
-                if (vertOffset == uint.MaxValue) break;
-
-                fixed (float* pPC = _pushConstants)
-                    api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
-                        VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
-
-                var buffer = Surface.VertexBuffer;
-                var vkOffset = (ulong)vertOffset;
-                api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
-                api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
-
                 penX += glyph.AdvanceX * glyphScale;
             }
         }
+
+        // Flush the final batch (SDF or bitmap, whichever was last).
+        EndGlyphBatch();
     }
 
     public override void Dispose()
