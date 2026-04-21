@@ -61,9 +61,16 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     private VkImageView _imageView;
     private VkSampler _sampler;
 
-    private VkBuffer _uploadBuffer;
-    private VkDeviceMemory _uploadMemory;
-    private ulong _uploadBufferSize;
+    // Per-frame upload ring — one slot per frame-in-flight. The previous design
+    // used a single shared slot and a vkDeviceWaitIdle() on every Flush to make
+    // sure the previous frame's vkCmdCopyBufferToImage had finished reading
+    // before we overwrote it. That was a full-GPU stall on every atlas update.
+    // With N slots indexed by _ctx.CurrentFrame, slot k is only reused after
+    // BeginFrame waited on the fence that guards its last submit — so the GPU
+    // is guaranteed done with it. No stall needed.
+    private readonly VkBuffer[] _uploadBuffers = new VkBuffer[VulkanContext.MaxFramesInFlight];
+    private readonly VkDeviceMemory[] _uploadMemories = new VkDeviceMemory[VulkanContext.MaxFramesInFlight];
+    private readonly ulong[] _uploadBufferSizes = new ulong[VulkanContext.MaxFramesInFlight];
 
     // Set whenever CreateImage allocates a fresh VkImage (initial + every Grow).
     // The image starts in VK_IMAGE_LAYOUT_UNDEFINED; first Flush must transition
@@ -148,14 +155,16 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
         var bufferSize = (ulong)pixelCount;
 
-        _ctx.DeviceApi.vkDeviceWaitIdle();
-        EnsureUploadBuffer(bufferSize);
+        // Pick this frame's upload slot. BeginFrame has already waited on the
+        // fence that guards this slot's last submit, so the GPU is done with it.
+        var slot = _ctx.CurrentFrame;
+        EnsureUploadBuffer(slot, bufferSize);
 
         void* mapped;
-        _ctx.DeviceApi.vkMapMemory(_uploadMemory, 0, bufferSize, 0, &mapped);
+        _ctx.DeviceApi.vkMapMemory(_uploadMemories[slot], 0, bufferSize, 0, &mapped);
         fixed (byte* pData = data)
             Buffer.MemoryCopy(pData, mapped, bufferSize, bufferSize);
-        _ctx.DeviceApi.vkUnmapMemory(_uploadMemory);
+        _ctx.DeviceApi.vkUnmapMemory(_uploadMemories[slot]);
 
         // First Flush after CreateImage: image is still in Undefined layout, so
         // transition from there. Subsequent flushes transition from ShaderReadOnly.
@@ -172,7 +181,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             imageOffset = new VkOffset3D(_dirtyX0, _dirtyY0, 0),
             imageExtent = new VkExtent3D((uint)regionW, (uint)regionH, 1)
         };
-        _ctx.DeviceApi.vkCmdCopyBufferToImage(cmd, _uploadBuffer, _image, VkImageLayout.TransferDstOptimal, 1, &region);
+        _ctx.DeviceApi.vkCmdCopyBufferToImage(cmd, _uploadBuffers[slot], _image, VkImageLayout.TransferDstOptimal, 1, &region);
 
         VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, VkImageLayout.TransferDstOptimal, VkImageLayout.ShaderReadOnlyOptimal);
 
@@ -186,10 +195,13 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
         _ctx.FreeDescriptorSet(_descriptorSet);
 
-        if (_uploadBuffer != VkBuffer.Null)
+        for (var i = 0; i < VulkanContext.MaxFramesInFlight; i++)
         {
-            api.vkDestroyBuffer(_uploadBuffer);
-            api.vkFreeMemory(_uploadMemory);
+            if (_uploadBuffers[i] != VkBuffer.Null)
+            {
+                api.vkDestroyBuffer(_uploadBuffers[i]);
+                api.vkFreeMemory(_uploadMemories[i]);
+            }
         }
 
         api.vkDestroySampler(_sampler);
@@ -376,17 +388,20 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         _ctx.DeviceApi.vkCreateSampler(&samplerCI, null, out _sampler).CheckResult();
     }
 
-    private void EnsureUploadBuffer(ulong size)
+    private void EnsureUploadBuffer(int slot, ulong size)
     {
-        if (_uploadBuffer != VkBuffer.Null && _uploadBufferSize >= size)
+        if (_uploadBuffers[slot] != VkBuffer.Null && _uploadBufferSizes[slot] >= size)
             return;
 
         var api = _ctx.DeviceApi;
 
-        if (_uploadBuffer != VkBuffer.Null)
+        if (_uploadBuffers[slot] != VkBuffer.Null)
         {
-            api.vkDestroyBuffer(_uploadBuffer);
-            api.vkFreeMemory(_uploadMemory);
+            // Slot grows only when the dirty region is larger than the previous peak
+            // for this slot — by the time we're here BeginFrame has waited on the
+            // matching fence, so destroying the previous allocation is safe.
+            api.vkDestroyBuffer(_uploadBuffers[slot]);
+            api.vkFreeMemory(_uploadMemories[slot]);
         }
 
         VkBufferCreateInfo bufCI = new()
@@ -395,18 +410,18 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             usage = VkBufferUsageFlags.TransferSrc,
             sharingMode = VkSharingMode.Exclusive
         };
-        api.vkCreateBuffer(&bufCI, null, out _uploadBuffer).CheckResult();
+        api.vkCreateBuffer(&bufCI, null, out _uploadBuffers[slot]).CheckResult();
 
-        api.vkGetBufferMemoryRequirements(_uploadBuffer, out var memReqs);
+        api.vkGetBufferMemoryRequirements(_uploadBuffers[slot], out var memReqs);
         VkMemoryAllocateInfo allocInfo = new()
         {
             allocationSize = memReqs.size,
             memoryTypeIndex = _ctx.FindMemoryType(memReqs.memoryTypeBits,
                 VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent)
         };
-        api.vkAllocateMemory(&allocInfo, null, out _uploadMemory).CheckResult();
-        api.vkBindBufferMemory(_uploadBuffer, _uploadMemory, 0);
-        _uploadBufferSize = size;
+        api.vkAllocateMemory(&allocInfo, null, out _uploadMemories[slot]).CheckResult();
+        api.vkBindBufferMemory(_uploadBuffers[slot], _uploadMemories[slot], 0);
+        _uploadBufferSizes[slot] = size;
     }
 
     private void ResetDirtyRegion()

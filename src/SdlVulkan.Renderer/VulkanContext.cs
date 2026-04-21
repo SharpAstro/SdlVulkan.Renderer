@@ -8,7 +8,13 @@ namespace SdlVulkan.Renderer;
 public sealed unsafe partial class VulkanContext : IDisposable
 {
     private readonly uint _vertexBufferSize;
-    private const int MaxFramesInFlight = 2;
+    /// <summary>
+    /// Number of frames in flight on the GPU. Exposed so side-car resources
+    /// (per-frame ring buffers, staging uploads) can size themselves to match
+    /// the renderer's own per-frame sync discipline. Pair with
+    /// <see cref="CurrentFrame"/> to index ring-buffered resources.
+    /// </summary>
+    public const int MaxFramesInFlight = 2;
     private const uint MaxDescriptorSets = 512; // font atlas + textures
 
     public VkInstance Instance { get; }
