@@ -34,7 +34,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     /// gives more sub-pixel fidelity when glyphs are displayed smaller than the
     /// raster size, at the cost of atlas memory (quadratic).
     /// </summary>
-    private const float SdfRasterSize = 64f;
+    private const float SdfRasterSize = 128f;
 
     private int _atlasWidth;
     private int _atlasHeight;
