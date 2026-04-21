@@ -52,7 +52,13 @@ public sealed unsafe class VkTexture : IDisposable
     /// before the render pass to schedule the GPU copy. No vkQueueWaitIdle — zero blocking.
     /// Call CleanupStaging() after the frame is submitted to free the staging buffer.
     /// </summary>
-    public static VkTexture CreateDeferred(VulkanContext ctx, ReadOnlySpan<byte> bgraData, int width, int height)
+    /// <param name="format">Pixel format of <paramref name="pixelData"/>. Defaults to
+    /// <see cref="VkFormat.B8G8R8A8Unorm"/> for historical reasons; callers with RGBA byte
+    /// layout (the common CPU-renderer output) should pass <see cref="VkFormat.R8G8B8A8Unorm"/>
+    /// and skip any CPU-side swizzle — letting the driver read the bytes directly is cheaper
+    /// than a per-pixel swap loop.</param>
+    public static VkTexture CreateDeferred(VulkanContext ctx, ReadOnlySpan<byte> pixelData, int width, int height,
+        VkFormat format = VkFormat.B8G8R8A8Unorm)
     {
         var api = ctx.DeviceApi;
         var bufferSize = (ulong)(width * height * 4);
@@ -78,14 +84,14 @@ public sealed unsafe class VkTexture : IDisposable
 
         void* mapped;
         api.vkMapMemory(stagingMemory, 0, bufferSize, 0, &mapped);
-        bgraData.CopyTo(new Span<byte>(mapped, (int)bufferSize));
+        pixelData.CopyTo(new Span<byte>(mapped, (int)bufferSize));
         api.vkUnmapMemory(stagingMemory);
 
         // Create device-local image
         VkImageCreateInfo imageCI = new()
         {
             imageType = VkImageType.Image2D,
-            format = VkFormat.B8G8R8A8Unorm,
+            format = format,
             extent = new VkExtent3D((uint)width, (uint)height, 1),
             mipLevels = 1,
             arrayLayers = 1,
@@ -108,7 +114,7 @@ public sealed unsafe class VkTexture : IDisposable
 
         // Create image view
         var viewCI = new VkImageViewCreateInfo(
-            image, VkImageViewType.Image2D, VkFormat.B8G8R8A8Unorm,
+            image, VkImageViewType.Image2D, format,
             VkComponentMapping.Rgba,
             new VkImageSubresourceRange(VkImageAspectFlags.Color, 0, 1, 0, 1));
         api.vkCreateImageView(&viewCI, null, out var imageView).CheckResult();
