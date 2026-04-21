@@ -5,7 +5,7 @@ using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer;
 
-public sealed unsafe class VulkanContext : IDisposable
+public sealed unsafe partial class VulkanContext : IDisposable
 {
     private readonly uint _vertexBufferSize;
     private const int MaxFramesInFlight = 2;
@@ -477,6 +477,7 @@ public sealed unsafe class VulkanContext : IDisposable
         DeviceApi.vkDeviceWaitIdle();
 
         CleanupSwapchain();
+        if (_isOffscreen) CleanupOffscreenTarget();
 
         for (var i = 0; i < MaxFramesInFlight; i++)
         {
@@ -502,7 +503,9 @@ public sealed unsafe class VulkanContext : IDisposable
         DeviceApi.vkDestroyCommandPool(CommandPool);
         DeviceApi.vkDestroyDevice();
 
-        InstanceApi.vkDestroySurfaceKHR(_surface);
+        // Offscreen contexts have no surface — skip the destroy (Vortice binding AVs on Null).
+        if (_surface != VkSurfaceKHR.Null)
+            InstanceApi.vkDestroySurfaceKHR(_surface);
         InstanceApi.vkDestroyInstance();
     }
 

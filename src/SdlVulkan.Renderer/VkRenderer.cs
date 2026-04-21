@@ -15,10 +15,16 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // Push constant data: mat4 (16 floats) + vec4 color (4 floats) + float innerRadius (1 float) = 84 bytes
     private readonly float[] _pushConstants = new float[21];
 
-    // Glyph batching state — accumulates contiguous glyph quads for a single draw call
+    // Glyph batching state — accumulates contiguous glyph quads for a single draw call.
+    // A batch is either bitmap (TexturedPipeline + RGBA atlas) or SDF (SdfPipeline +
+    // R8 SDF atlas). BeginGlyphBatch opens a bitmap batch; BeginSdfGlyphBatch opens
+    // an SDF batch. EndGlyphBatch dispatches to the correct pipeline based on _glyphBatchIsSdf.
     private uint _glyphBatchStartOffset = uint.MaxValue;
     private int _glyphBatchVertexCount;
     private bool _glyphBatchActive;
+    private bool _glyphBatchIsSdf;
+    // SDF batches share a single fontSize (drives edge-softness push constant).
+    private float _glyphBatchFontSize;
 
     public VkRenderer(VulkanContext ctx, uint width, uint height) : base(ctx)
     {
@@ -131,6 +137,36 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void EndFrame()
     {
         Surface.EndFrame(_currentCmd);
+    }
+
+    /// <summary>
+    /// Offscreen equivalent of <see cref="BeginFrame"/>. Requires the backing context was
+    /// created via <see cref="VulkanContext.CreateOffscreen"/>. Orchestrates the same font
+    /// atlas + pre-render-pass callbacks as the swapchain path so consumers (VectorPageRenderer
+    /// etc.) don't need to know which mode they're in.
+    /// </summary>
+    public bool BeginOffscreenFrame(DIR.Lib.RGBAColor32 clearColor)
+    {
+        _currentCmd = Surface.BeginOffscreenFrame();
+        if (_currentCmd == VkCommandBuffer.Null) return false;
+
+        _fontAtlas?.BeginFrame();
+        _sdfFontAtlas?.BeginFrame();
+        OnPreFlush?.Invoke();
+        _fontAtlas?.Flush(_currentCmd);
+        _sdfFontAtlas?.Flush(_currentCmd);
+
+        OnPreRenderPass?.Invoke(_currentCmd);
+
+        Surface.BeginOffscreenRenderPass(_currentCmd,
+            clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f);
+        return true;
+    }
+
+    /// <summary>Ends the offscreen frame; pair with <see cref="BeginOffscreenFrame"/>. No present.</summary>
+    public void EndOffscreenFrame()
+    {
+        Surface.EndOffscreenFrame(_currentCmd);
     }
 
     public override void Resize(uint width, uint height)
@@ -591,6 +627,23 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void BeginGlyphBatch(DIR.Lib.RGBAColor32 color)
     {
         _glyphBatchActive = true;
+        _glyphBatchIsSdf = false;
+        _glyphBatchStartOffset = uint.MaxValue;
+        _glyphBatchVertexCount = 0;
+        SetColor(color);
+    }
+
+    /// <summary>
+    /// Begins an SDF glyph batch. All subsequent AddBatchedSdfGlyph/AddBatchedSdfGlyphAtBaseline
+    /// calls accumulate into a single draw through the SdfPipeline. The whole batch shares one
+    /// <paramref name="fontSize"/>, which drives the edge-softness push constant — callers must
+    /// end the batch and begin a new one when fontSize changes.
+    /// </summary>
+    public void BeginSdfGlyphBatch(DIR.Lib.RGBAColor32 color, float fontSize)
+    {
+        _glyphBatchActive = true;
+        _glyphBatchIsSdf = true;
+        _glyphBatchFontSize = fontSize;
         _glyphBatchStartOffset = uint.MaxValue;
         _glyphBatchVertexCount = 0;
         SetColor(color);
@@ -672,19 +725,148 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// Adds an SDF glyph to the current batch at the exact ink top-left position (no draw call
+    /// issued). All glyphs in the batch share the fontSize passed to <see cref="BeginSdfGlyphBatch"/>.
+    /// <para>Semantics match <see cref="AddBatchedGlyph"/>: <paramref name="inkX"/>/<paramref name="inkY"/>
+    /// is where the top-left of the glyph's *ink* bounding box should land. The SDF texture itself
+    /// extends <c>spread*scale</c> pixels beyond the ink on every side; this function offsets the
+    /// quad so the ink inside lines up with the caller's coordinates.</para>
+    /// </summary>
+    public void AddBatchedSdfGlyph(string fontPath, System.Text.Rune character, int charCode,
+        float inkX, float inkY, float rotation = 0f,
+        DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+    {
+        if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
+
+        var glyph = _sdfFontAtlas.GetGlyph(fontPath, _glyphBatchFontSize, character,
+            skipUnflushed: true, charCode: charCode, hint: hint);
+        if (glyph.Width == 0) return;
+
+        var glyphScale = VkSdfFontAtlas.GetGlyphScale(_glyphBatchFontSize);
+        var w = glyph.Width * glyphScale;   // SDF texture width (ink + 2*spread)
+        var h = glyph.Height * glyphScale;  // SDF texture height (ink + 2*spread)
+        var pad = glyph.Spread * glyphScale;
+
+        Span<float> verts = stackalloc float[24];
+        if (MathF.Abs(rotation) < 0.01f)
+        {
+            // Quad top-left = ink top-left shifted by (-pad, -pad) so the ink
+            // inside the SDF texture lands at (inkX, inkY).
+            var x0 = inkX - pad;
+            var y0 = inkY - pad;
+            var x1 = x0 + w;
+            var y1 = y0 + h;
+            verts[0] = x0; verts[1] = y0; verts[2] = glyph.U0; verts[3] = glyph.V0;
+            verts[4] = x1; verts[5] = y0; verts[6] = glyph.U1; verts[7] = glyph.V0;
+            verts[8] = x1; verts[9] = y1; verts[10] = glyph.U1; verts[11] = glyph.V1;
+            verts[12] = x0; verts[13] = y0; verts[14] = glyph.U0; verts[15] = glyph.V0;
+            verts[16] = x1; verts[17] = y1; verts[18] = glyph.U1; verts[19] = glyph.V1;
+            verts[20] = x0; verts[21] = y1; verts[22] = glyph.U0; verts[23] = glyph.V1;
+        }
+        else
+        {
+            // Rotation basis: right = (cosA, sinA) for local +x, down = (-sinA, cosA) for local +y.
+            // Texture top-left in rotated screen space = ink top-left shifted by -pad along both
+            // local axes — otherwise the ink inside the texture would land `pad` pixels off along
+            // the rotated direction.
+            var cosA = MathF.Cos(rotation);
+            var sinA = MathF.Sin(rotation);
+            var rxU = cosA;  var ryU = sinA;   // right unit
+            var dxU = -sinA; var dyU = cosA;   // down unit
+            var tlx = inkX - pad * rxU - pad * dxU;
+            var tly = inkY - pad * ryU - pad * dyU;
+            var wrx = w * rxU; var wry = w * ryU;       // "right" scaled by texture width
+            var hdx = h * dxU; var hdy = h * dyU;       // "down"  scaled by texture height
+            var trx = tlx + wrx;        var try_ = tly + wry;
+            var blx = tlx + hdx;        var bly  = tly + hdy;
+            var brx = tlx + wrx + hdx;  var bry  = tly + wry + hdy;
+
+            verts[0] = tlx; verts[1] = tly; verts[2] = glyph.U0; verts[3] = glyph.V0;
+            verts[4] = trx; verts[5] = try_; verts[6] = glyph.U1; verts[7] = glyph.V0;
+            verts[8] = brx; verts[9] = bry;  verts[10] = glyph.U1; verts[11] = glyph.V1;
+            verts[12] = tlx; verts[13] = tly; verts[14] = glyph.U0; verts[15] = glyph.V0;
+            verts[16] = brx; verts[17] = bry; verts[18] = glyph.U1; verts[19] = glyph.V1;
+            verts[20] = blx; verts[21] = bly; verts[22] = glyph.U0; verts[23] = glyph.V1;
+        }
+        ReadOnlySpan<float> vertices = verts;
+
+        var vertOffset = Surface.WriteVertices(vertices);
+        if (vertOffset == uint.MaxValue) return;
+
+        if (_glyphBatchStartOffset == uint.MaxValue)
+            _glyphBatchStartOffset = vertOffset;
+        _glyphBatchVertexCount += 6;
+    }
+
+    /// <summary>
+    /// Adds an SDF glyph to the current batch at the text baseline position (no draw call issued).
+    /// Computes ink-top from baseline using the glyph's bearing, then delegates to
+    /// <see cref="AddBatchedSdfGlyph"/>.
+    /// </summary>
+    public void AddBatchedSdfGlyphAtBaseline(string fontPath, System.Text.Rune character, int charCode,
+        float baselineX, float baselineY, float rotation = 0f,
+        DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+    {
+        if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
+
+        var glyph = _sdfFontAtlas.GetGlyph(fontPath, _glyphBatchFontSize, character,
+            skipUnflushed: true, charCode: charCode, hint: hint);
+        if (glyph.Width == 0) return;
+
+        // BearingX/BearingY on the SDF atlas are to the SDF TEXTURE edges (inc. spread padding).
+        // Convert to INK bearings so we can pass ink-top-left to AddBatchedSdfGlyph:
+        //   ink_bearing_X = texture_bearing_X + spread (ink is spread pixels right of texture left)
+        //   ink_bearing_Y = texture_bearing_Y - spread (ink is spread pixels below texture top)
+        var glyphScale = VkSdfFontAtlas.GetGlyphScale(_glyphBatchFontSize);
+        var inkX = baselineX + (glyph.BearingX + glyph.Spread) * glyphScale;
+        var inkY = baselineY - (glyph.BearingY - glyph.Spread) * glyphScale;
+
+        AddBatchedSdfGlyph(fontPath, character, charCode, inkX, inkY, rotation, hint);
+    }
+
+    /// <summary>
+    /// Pre-warms an SDF glyph so it's available in the current frame's flush.
+    /// Mirror of <see cref="PreWarmGlyph"/> for the SDF atlas.
+    /// </summary>
+    public void PreWarmSdfGlyph(string fontPath, float fontSize, System.Text.Rune character,
+        int charCode = -1, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+    {
+        _sdfFontAtlas?.GetGlyph(fontPath, fontSize, character, charCode: charCode, hint: hint);
+    }
+
+    /// <summary>
     /// Ends the current glyph batch and issues a single draw call for all accumulated glyphs.
+    /// Dispatches to TexturedPipeline (bitmap atlas) or SdfPipeline (SDF atlas) based on which
+    /// Begin*GlyphBatch opened the batch.
     /// </summary>
     public void EndGlyphBatch()
     {
         if (!_glyphBatchActive) return;
+        var isSdf = _glyphBatchIsSdf;
         _glyphBatchActive = false;
+        _glyphBatchIsSdf = false;
 
         if (_glyphBatchVertexCount == 0 || _glyphBatchStartOffset == uint.MaxValue) return;
 
         var api = Surface.DeviceApi;
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines!.TexturedPipeline);
+        Vortice.Vulkan.VkPipeline pipeline;
+        Vortice.Vulkan.VkDescriptorSet descriptorSet;
+        if (isSdf && _sdfFontAtlas is not null)
+        {
+            pipeline = _pipelines!.SdfPipeline;
+            descriptorSet = _sdfFontAtlas.DescriptorSet;
+            // SDF AA is driven by fwidth() in the fragment shader, so no caller-side
+            // edge softness is needed regardless of fontSize. Zero the slot for cleanliness.
+            _pushConstants[20] = 0f;
+        }
+        else
+        {
+            pipeline = _pipelines!.TexturedPipeline;
+            descriptorSet = Surface.DescriptorSet;
+            _pushConstants[20] = 0f; // unused by TexturedPipeline, keep push constants clean
+        }
 
-        var descriptorSet = Surface.DescriptorSet;
+        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, pipeline);
         api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
             Surface.PipelineLayout, 0, 1, &descriptorSet, 0, null);
 
@@ -869,10 +1051,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         SetColor(fontColor);
 
-        // Set SDF edge softness in the extra push constant slot (offset 20 = float index for innerRadius/sdfEdge)
-        // Compute edge width from spread and display scale for sharp anti-aliased edges
-        _pushConstants[20] = 1.5f / (4f * glyphScale * fontSize / 48f + 0.001f);
-        if (_pushConstants[20] > 0.5f) _pushConstants[20] = 0.5f;
+        // SDF anti-aliasing is driven by fwidth() in the shader — the sdfEdge push-constant
+        // slot is unused for SDF and zeroed here just to keep push constants clean.
+        _pushConstants[20] = 0f;
 
         api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.SdfPipeline);
 
@@ -1011,8 +1192,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
                     var sdfSet = _sdfFontAtlas.DescriptorSet;
                     api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
                         Surface.PipelineLayout, 0, 1, &sdfSet, 0, null);
-                    _pushConstants[20] = 1.5f / (4f * glyphScale * fontSize / 48f + 0.001f);
-                    if (_pushConstants[20] > 0.5f) _pushConstants[20] = 0.5f;
+                    _pushConstants[20] = 0f; // sdfEdge unused; shader uses fwidth()
                     inSdfMode = true;
                 }
 
