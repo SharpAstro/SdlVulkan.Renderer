@@ -46,17 +46,18 @@ public sealed unsafe partial class VulkanContext
             pQueuePriorities = &queuePriority
         };
 
-        // Request the swapchain extension anyway — no cost on devices that support it (all do)
-        // and lets the device share pipelines/render passes with the swapchain path if a
-        // consumer ever needs both.
-        using var extensionNames = new VkStringArray([VK_KHR_SWAPCHAIN_EXTENSION_NAME]);
-
+        // Offscreen renders never touch a swapchain, so don't request VK_KHR_swapchain on the
+        // device. Important for headless environments (Linux CI with Mesa lavapipe / llvmpipe
+        // software rasterizer, containers without a display server) where the instance has no
+        // surface extensions enabled — swapchain-on-device would still load but enabling it
+        // without the instance-level counterpart is awkward to justify, and skipping it keeps
+        // the device request minimal.
         VkDeviceCreateInfo deviceCI = new()
         {
             queueCreateInfoCount = 1,
             pQueueCreateInfos = &queueCI,
-            enabledExtensionCount = extensionNames.Length,
-            ppEnabledExtensionNames = extensionNames
+            enabledExtensionCount = 0,
+            ppEnabledExtensionNames = null,
         };
 
         instanceApi.vkCreateDevice(physicalDevice, &deviceCI, null, out var device).CheckResult();
