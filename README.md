@@ -5,18 +5,21 @@ SDL3 + Vortice.Vulkan rendering library built on [DIR.Lib](https://github.com/Sh
 ## Types
 
 - **`SdlVulkanWindow`** — SDL3 window with Vulkan instance and surface lifecycle. Creates maximized, resizable windows with Vulkan surface.
-- **`VulkanContext`** — Vulkan device, swapchain, command buffers, sync management. `MaxFramesInFlight = 2` with per-frame vertex buffers.
-- **`VkRenderer`** — `Renderer<VulkanContext>` implementation with FillRectangle, DrawRectangle, FillEllipse, DrawText. Exposes `FontAtlasDirty` for callers to trigger redraws after glyph rasterization.
-- **`VkPipelineSet`** — GLSL 450 shader compilation and Vulkan pipeline creation (flat, textured, ellipse)
-- **`VkFontAtlas`** — Dynamic glyph atlas with FreeType2 rasterization and Vulkan texture upload. Supports grow (512→2048), deferred eviction, and `skipUnflushed` to prevent sampling stale GPU texture data.
+- **`VulkanContext`** — Vulkan device, command buffers, sync management. `MaxFramesInFlight = 2` with per-frame vertex buffers. Two construction modes:
+  - `VulkanContext.Create(instance, surface, w, h, ...)` — on-screen path with a swapchain tied to an `SdlVulkanWindow`.
+  - `VulkanContext.CreateOffscreen(instance, w, h, ...)` — headless path rendering to a standalone `VkImage`; no surface, no swapchain, no SDL window. See **Headless / offscreen rendering** below.
+- **`VkRenderer`** — `Renderer<VulkanContext>` implementation with FillRectangle, DrawRectangle, FillEllipse, DrawText, plus batched glyph and persistent-vertex-buffer draw APIs. Exposes `FontAtlasDirty` so callers can trigger redraws after glyph rasterization. Has `BeginFrame` / `BeginOffscreenFrame` variants that match the two `VulkanContext` modes.
+- **`VkPipelineSet`** — GLSL 450 shader compilation and Vulkan pipeline creation (flat, textured, ellipse, stroke, SDF, blend variants).
+- **`VkFontAtlas`** — Dynamic bitmap glyph atlas with ManagedFontRasterizer (from DIR.Lib) rasterization and Vulkan texture upload. Supports grow (512→4096), deferred eviction, and `skipUnflushed` to prevent sampling stale GPU texture data.
+- **`VkSdfFontAtlas`** — Signed-distance-field glyph atlas side-car for resolution-independent text. `SdfRasterSize = 128`, `fwidth`-driven AA in the fragment shader auto-tunes to ±0.5 screen pixels at any zoom. Single-channel R8_Unorm texture, keyed on `(font, size, character, charCode)` so CID subset fonts don't collide.
 
 ## Font Atlas Lifecycle
 
 Per frame:
-1. `BeginFrame()` — handles deferred eviction if atlas was full last frame
-2. `Flush(cmd)` — uploads dirty staging region to GPU via `vkCmdCopyBufferToImage`
-3. `DrawText(...)` → `GetGlyph(...)` — cache hit returns UV coords; miss rasterizes into staging
-4. `GetGlyph(..., skipUnflushed: true)` — in draw loops, returns zero-width for glyphs not yet uploaded
+1. `BeginFrame()` / `BeginOffscreenFrame()` — handles deferred eviction, runs `OnPreFlush` (pre-warm callback), calls `Flush(cmd)` on both atlases, runs `OnPreRenderPass` (texture uploads), then `BeginRenderPass`.
+2. `Flush(cmd)` — uploads dirty staging region to GPU via `vkCmdCopyBufferToImage`.
+3. `DrawText(...)` → `GetGlyph(...)` — cache hit returns UV coords; miss rasterizes into staging.
+4. `GetGlyph(..., skipUnflushed: true)` — in draw loops, returns zero-width for glyphs not yet uploaded. Pair with `PreWarmGlyph` in `OnPreFlush` if drawing a glyph that wasn't shown last frame (first-frame glyph flicker).
 
 **Thread safety**: `vkDeviceWaitIdle()` before reusing the shared upload buffer (prevents race with `MaxFramesInFlight = 2`).
 
@@ -42,6 +45,66 @@ while (running)
     if (renderer.FontAtlasDirty) needsRedraw = true;
 }
 ```
+
+## Headless / offscreen rendering
+
+`VulkanContext.CreateOffscreen` builds a context that renders to a single `VkImage` instead of a swapchain. No `VkSurfaceKHR`, no SDL window, no `VK_KHR_swapchain` device extension requested — useful for tests, thumbnail / raster workers, CI without a display server, and server-side rendering.
+
+```csharp
+using SdlVulkan.Renderer;
+using Vortice.Vulkan;
+using static Vortice.Vulkan.Vulkan;
+
+// Minimal instance — no windowing extensions needed.
+vkInitialize().CheckResult();
+VkInstanceCreateInfo ici = new();
+vkCreateInstance(&ici, null, out var instance).CheckResult();
+
+const uint W = 1920, H = 1080;
+using var ctx = VulkanContext.CreateOffscreen(instance, W, H);
+using var renderer = new VkRenderer(ctx, W, H);
+
+renderer.BeginOffscreenFrame(new DIR.Lib.RGBAColor32(255, 255, 255, 255));
+renderer.FillRectangle(new RectInt(new(100, 100), new(400, 300)), red);
+renderer.DrawText("Hello", fontPath, 14f, black, layout);
+renderer.EndOffscreenFrame();
+ctx.WaitOffscreenFrameComplete();
+
+byte[] rgba = ctx.ReadbackOffscreenRgba(); // top-down, 4 bytes per pixel
+// Pipe rgba into PNG encoder / image library of choice.
+```
+
+The offscreen path reuses all existing pipelines, MSAA slots, sync objects, and vertex ring buffers. Only the swapchain acquire/present is replaced by `vkCmdCopyImageToBuffer` into a host-visible staging buffer.
+
+### Runtime requirements (native)
+
+At runtime you need the Vulkan loader plus an ICD (driver). Nothing else: no X11 / Wayland, no SDL native, no DirectX.
+
+- **Windows**: `vulkan-1.dll` (shipped with any modern GPU driver; also installable via the Vulkan SDK).
+- **Linux**: `libvulkan.so.1` + an ICD. Options in increasing order of portability:
+  - **GPU driver** (Mesa `radv` / `intel_anv` / NVIDIA proprietary) — fastest.
+  - **Mesa `lavapipe` / `llvmpipe`** — software rasterizer. 5–20× slower but fully headless. Apt: `mesa-vulkan-drivers`.
+  - **Google SwiftShader** — alternative software ICD.
+- **macOS / iOS**: MoltenVK (Vulkan on Metal). Untested for offscreen here but no reason it shouldn't work.
+
+SDL3-CS remains a package reference because the on-screen path uses it. Its P/Invokes are lazy — `libSDL3.so` / `SDL3.dll` is never loaded if `SdlVulkanWindow` is not instantiated, so the offscreen path has no SDL runtime dependency.
+
+### CI setup
+
+On a fresh Ubuntu runner (GitHub Actions `ubuntu-latest`, Azure Pipelines, GitLab):
+
+```yaml
+- run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-tools
+- run: dotnet test
+```
+
+`vulkan-tools` is optional but gives you `vulkaninfo --summary` for sanity-checking which ICD the runner loaded. For deterministic behaviour across runners, pin to lavapipe:
+
+```yaml
+- run: echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> $GITHUB_ENV
+```
+
+Containers: add the same two packages to your image. The offscreen path doesn't require a `tty`, display variable, or privileged mode.
 
 ## Dependencies
 
