@@ -36,6 +36,14 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     /// </summary>
     private const float SdfRasterSize = 128f;
 
+    /// <summary>
+    /// Default initial atlas dimension, sized so roughly 256 max-extent glyphs
+    /// fit before the first <see cref="Grow"/> — enough for typical startup UI
+    /// (ASCII + punctuation + common emoji) without the first-frame Grow fallout
+    /// that the old fixed 512 hit at higher raster sizes.
+    /// </summary>
+    private const int DefaultInitialAtlasDim = (int)SdfRasterSize * 16;
+
     private int _atlasWidth;
     private int _atlasHeight;
     private int _cursorX;
@@ -57,6 +65,15 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     private VkDeviceMemory _uploadMemory;
     private ulong _uploadBufferSize;
 
+    // Set whenever CreateImage allocates a fresh VkImage (initial + every Grow).
+    // The image starts in VK_IMAGE_LAYOUT_UNDEFINED; first Flush must transition
+    // from Undefined (not ShaderReadOnlyOptimal, which requires prior data).
+    // Previous code transitioned via ctx.ExecuteOneShot during CreateImage — that
+    // worked in isolation but submitting a side command buffer to the graphics
+    // queue while the frame's command buffer is in recording state makes some
+    // drivers return VK_ERROR_INITIALIZATION_FAILED from the next vkQueueSubmit.
+    private bool _needsInitialTransition;
+
     // Own descriptor set for the SDF atlas texture
     private VkDescriptorSet _descriptorSet;
 
@@ -65,7 +82,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     public VkDescriptorSet DescriptorSet => _descriptorSet;
     public bool IsDirty => _needsEviction || (_dirtyX0 < _dirtyX1 && _dirtyY0 < _dirtyY1);
 
-    public VkSdfFontAtlas(VulkanContext ctx, ManagedFontRasterizer rasterizer, int initialWidth = 512, int initialHeight = 512)
+    public VkSdfFontAtlas(VulkanContext ctx, ManagedFontRasterizer rasterizer, int initialWidth = DefaultInitialAtlasDim, int initialHeight = DefaultInitialAtlasDim)
     {
         _ctx = ctx;
         _rasterizer = rasterizer;
@@ -140,7 +157,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             Buffer.MemoryCopy(pData, mapped, bufferSize, bufferSize);
         _ctx.DeviceApi.vkUnmapMemory(_uploadMemory);
 
-        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, VkImageLayout.ShaderReadOnlyOptimal, VkImageLayout.TransferDstOptimal);
+        // First Flush after CreateImage: image is still in Undefined layout, so
+        // transition from there. Subsequent flushes transition from ShaderReadOnly.
+        var srcLayout = _needsInitialTransition ? VkImageLayout.Undefined : VkImageLayout.ShaderReadOnlyOptimal;
+        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, srcLayout, VkImageLayout.TransferDstOptimal);
+        _needsInitialTransition = false;
 
         VkBufferImageCopy region = new()
         {
@@ -323,8 +344,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         api.vkAllocateMemory(&allocInfo, null, out _imageMemory).CheckResult();
         api.vkBindImageMemory(_image, _imageMemory, 0);
 
-        _ctx.ExecuteOneShot(cmd =>
-            VulkanHelpers.TransitionImageLayout(api, cmd, _image, VkImageLayout.Undefined, VkImageLayout.ShaderReadOnlyOptimal));
+        // Defer the Undefined -> TransferDst transition to the next Flush, which
+        // records into the frame's command buffer. A one-shot submit here would
+        // collide with an in-recording frame cmd buffer on some drivers
+        // (VK_ERROR_INITIALIZATION_FAILED from the next vkQueueSubmit).
+        _needsInitialTransition = true;
 
         // Swizzle R channel into all RGBA channels so the sampler reads the SDF
         // value consistently regardless of which component the shader samples

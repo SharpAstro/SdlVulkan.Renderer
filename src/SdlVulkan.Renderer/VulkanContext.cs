@@ -402,9 +402,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
         {
             flags = VkCommandBufferUsageFlags.OneTimeSubmit
         };
-        DeviceApi.vkBeginCommandBuffer(cmd, &beginInfo);
+        // Check Begin/End: when these silently fail (bad cmd-pool flags, driver
+        // state corruption from a prior submit, etc.) the next submit blows up
+        // with a misleading error code. Surface the real first failure here.
+        DeviceApi.vkBeginCommandBuffer(cmd, &beginInfo).CheckResult();
         action(cmd);
-        DeviceApi.vkEndCommandBuffer(cmd);
+        DeviceApi.vkEndCommandBuffer(cmd).CheckResult();
 
         VkSubmitInfo submitInfo = new()
         {
@@ -412,7 +415,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             pCommandBuffers = &cmd
         };
         DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &submitInfo, VkFence.Null).CheckResult();
-        DeviceApi.vkQueueWaitIdle(GraphicsQueue);
+        DeviceApi.vkQueueWaitIdle(GraphicsQueue).CheckResult();
         DeviceApi.vkFreeCommandBuffers(CommandPool, cmd);
     }
 
