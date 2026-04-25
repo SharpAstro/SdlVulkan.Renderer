@@ -283,6 +283,35 @@ public sealed unsafe partial class VulkanContext : IDisposable
         CreateSwapchain(width, height);
     }
 
+    /// <summary>
+    /// Recover from a non-fatal Vulkan error (e.g. a queue submit that failed mid-frame).
+    /// Waits for the device to idle, then rebuilds per-frame sync objects (fences and
+    /// semaphores) and the swapchain. After this returns, the next BeginFrame can proceed
+    /// without hitting a stuck unsignaled fence from the failed submit.
+    /// <para>
+    /// Throws if the device itself is lost — callers should treat that as terminal.
+    /// </para>
+    /// </summary>
+    public void RecoverFromGpuError(uint width, uint height)
+    {
+        // vkDeviceWaitIdle drains any in-flight work. If the previous frame's submit
+        // failed before signaling its fence, the next BeginFrame would otherwise block
+        // forever on vkWaitForFences — recreating the sync objects below sidesteps that.
+        DeviceApi.vkDeviceWaitIdle();
+
+        for (var i = 0; i < MaxFramesInFlight; i++)
+        {
+            DeviceApi.vkDestroyFence(_inFlightFences[i]);
+            DeviceApi.vkDestroySemaphore(_imageAvailableSemaphores[i]);
+            DeviceApi.vkDestroySemaphore(_renderFinishedSemaphores[i]);
+        }
+        CreateSyncObjects();
+        _currentFrame = 0;
+
+        CleanupSwapchain();
+        CreateSwapchain(width, height);
+    }
+
     public VkCommandBuffer BeginFrame(out bool resized)
     {
         resized = false;

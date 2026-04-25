@@ -1,4 +1,5 @@
 using DIR.Lib;
+using Vortice.Vulkan;
 using static SDL3.SDL;
 
 namespace SdlVulkan.Renderer;
@@ -240,26 +241,57 @@ public sealed class SdlEventLoop(SdlVulkanWindow window, VkRenderer renderer)
                 continue;
             _needsRedraw = false;
 
-            if (!renderer.BeginFrame(BackgroundColor))
+            try
             {
-                window.GetSizeInPixels(out var sw, out var sh);
-                if (sw > 0 && sh > 0)
+                if (!renderer.BeginFrame(BackgroundColor))
                 {
-                    renderer.Resize((uint)sw, (uint)sh);
-                    OnResize?.Invoke((uint)sw, (uint)sh);
+                    window.GetSizeInPixels(out var sw, out var sh);
+                    if (sw > 0 && sh > 0)
+                    {
+                        renderer.Resize((uint)sw, (uint)sh);
+                        OnResize?.Invoke((uint)sw, (uint)sh);
+                    }
+                    _needsRedraw = true;
+                    continue;
                 }
-                _needsRedraw = true;
-                continue;
+
+                OnRender?.Invoke();
+
+                renderer.EndFrame();
+
+                if (renderer.FontAtlasDirty)
+                    _needsRedraw = true;
+
+                OnPostFrame?.Invoke();
             }
-
-            OnRender?.Invoke();
-
-            renderer.EndFrame();
-
-            if (renderer.FontAtlasDirty)
-                _needsRedraw = true;
-
-            OnPostFrame?.Invoke();
+            catch (VkException vk)
+            {
+                // A Vulkan call threw mid-frame — most commonly vkQueueSubmit/Present in
+                // EndFrame returning a non-success status that CheckResult turns into a
+                // throw (ErrorOutOfDateKHR after a window resize during submit, or driver
+                // bugs that surface ErrorInitializationFailed when two SDL+Vulkan windows
+                // contend over the same queue). Killing the process on every recoverable
+                // hiccup is too aggressive — try to rebuild sync + swapchain and continue.
+                Console.Error.WriteLine($"[SdlEventLoop] Vulkan error mid-frame: {vk.Result}. Recovering swapchain.");
+                try
+                {
+                    window.GetSizeInPixels(out var sw, out var sh);
+                    if (sw > 0 && sh > 0)
+                    {
+                        renderer.RecoverFromGpuError();
+                        OnResize?.Invoke((uint)sw, (uint)sh);
+                    }
+                    _needsRedraw = true;
+                }
+                catch (Exception inner)
+                {
+                    // Recovery itself failed (likely a true device-lost) — there's no
+                    // sensible way to continue, but at least bail out of the loop cleanly
+                    // so the caller can dispose state instead of stack-trace-crashing.
+                    Console.Error.WriteLine($"[SdlEventLoop] Vulkan recovery failed: {inner.GetType().Name}: {inner.Message}. Stopping event loop.");
+                    _running = false;
+                }
+            }
         }
     }
 

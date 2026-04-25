@@ -177,6 +177,19 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         UpdateProjection();
     }
 
+    /// <summary>
+    /// Drop the current frame's command buffer reference and ask the underlying context to
+    /// rebuild its sync objects and swapchain. Use from an outer try/catch when a Vulkan call
+    /// (typically vkQueueSubmit/Present) throws mid-frame, so the next frame can start clean
+    /// instead of hanging on a stuck fence from the failed submit.
+    /// </summary>
+    public void RecoverFromGpuError()
+    {
+        _currentCmd = VkCommandBuffer.Null;
+        Surface.RecoverFromGpuError(_width, _height);
+        UpdateProjection();
+    }
+
     public override void FillRectangle(in RectInt rect, DIR.Lib.RGBAColor32 fillColor)
     {
         if (_pipelines is null) return;
@@ -723,10 +736,18 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// Computes ink-top from baseline using FreeType bearings, accounting for rotation —
     /// for rotated text the baseline-to-ink-top offset must follow the rotated text frame,
     /// not the screen axes, or every rotated glyph lands at the wrong screen position.
+    /// <para>
+    /// <paramref name="xIsInkLeft"/>: when false (default), <paramref name="baselineX"/> is
+    /// the glyph origin (pen position / cell-left) and the glyph's left-side bearing is
+    /// added to reach ink-left. When true, the caller has already resolved ink-left and the
+    /// LSB add is skipped — useful when feeding per-glyph positions from a layout engine
+    /// that reports ink boxes (pdfium's GetCharQuad) rather than pen positions.
+    /// </para>
     /// </summary>
     public void AddBatchedGlyphAtBaseline(string fontPath, float fontSize, System.Text.Rune character,
         int charCode, float baselineX, float baselineY,
-        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto,
+        bool xIsInkLeft = false)
     {
         if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
 
@@ -734,7 +755,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (glyph.Width == 0) return;
 
         var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
-        var bx = glyph.BearingX * glyphScale;
+        // Skip the LSB shift when the caller already has ink-left — otherwise narrow glyphs
+        // in monospace fonts (e.g. 'S' or 'i' in Courier) end up shifted right by their LSB,
+        // opening a visible gap between them and the next glyph.
+        var bx = xIsInkLeft ? 0f : glyph.BearingX * glyphScale;
         var by = glyph.BearingY * glyphScale;
         float inkX, inkY;
         if (MathF.Abs(rotation) < 0.001f)
@@ -849,10 +873,17 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// Adds an SDF glyph to the current batch at the text baseline position (no draw call issued).
     /// Computes ink-top from baseline using the glyph's bearing, then delegates to
     /// <see cref="AddBatchedSdfGlyph"/>.
+    /// <para>
+    /// <paramref name="xIsInkLeft"/>: when false (default), <paramref name="baselineX"/> is
+    /// treated as glyph origin (pen position) and the glyph's LSB is added to reach ink-left.
+    /// When true, <paramref name="baselineX"/> already IS ink-left and the LSB add is skipped
+    /// — see the non-SDF <see cref="AddBatchedGlyphAtBaseline"/> overload for details.
+    /// </para>
     /// </summary>
     public void AddBatchedSdfGlyphAtBaseline(string fontPath, System.Text.Rune character, int charCode,
         float baselineX, float baselineY, float rotation = 0f,
-        DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+        DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto,
+        bool xIsInkLeft = false)
     {
         if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
 
@@ -864,8 +895,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // Convert to INK bearings so we can pass ink-top-left to AddBatchedSdfGlyph:
         //   ink_bearing_X = texture_bearing_X + spread (ink is spread pixels right of texture left)
         //   ink_bearing_Y = texture_bearing_Y - spread (ink is spread pixels below texture top)
+        // When the caller already has ink-left (xIsInkLeft), skip the horizontal LSB add —
+        // otherwise monospace narrow glyphs (pdfium's GetCharQuad returns ink boxes, not pen
+        // positions) drift right by their own LSB, producing visible gaps in the rendered run.
         var glyphScale = VkSdfFontAtlas.GetGlyphScale(_glyphBatchFontSize);
-        var bx = (glyph.BearingX + glyph.Spread) * glyphScale;
+        var bx = xIsInkLeft ? 0f : (glyph.BearingX + glyph.Spread) * glyphScale;
         var by = (glyph.BearingY - glyph.Spread) * glyphScale;
         float inkX, inkY;
         if (MathF.Abs(rotation) < 0.001f)
