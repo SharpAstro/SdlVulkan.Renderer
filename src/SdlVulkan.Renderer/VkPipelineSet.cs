@@ -334,7 +334,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
             rasterizationSamples = msaaSamples
         };
 
-        VkPipelineColorBlendAttachmentState blendAttachment = new()
+        var blendAttachments = stackalloc VkPipelineColorBlendAttachmentState[1];
+        blendAttachments[0] = new VkPipelineColorBlendAttachmentState
         {
             colorWriteMask = VkColorComponentFlags.All,
             blendEnable = true,
@@ -346,7 +347,11 @@ public sealed unsafe class VkPipelineSet : IDisposable
             alphaBlendOp = VkBlendOp.Add
         };
 
-        VkPipelineColorBlendStateCreateInfo colorBlend = new(blendAttachment);
+        VkPipelineColorBlendStateCreateInfo colorBlend = new()
+        {
+            attachmentCount = 1,
+            pAttachments = blendAttachments
+        };
 
         var dynamicStates = stackalloc VkDynamicState[2];
         dynamicStates[0] = VkDynamicState.Viewport;
