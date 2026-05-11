@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <Platforms>AnyCPU</Platforms>
+    <!-- BlendOpRegressionTests construct VkInstance + push constants via Vortice.Vulkan, which
+         needs unsafe pointer handling. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- The lib's csproj uses central package versions via its own Directory.Packages.props,
+         but the test project sits outside that file's directory and would not inherit it.
+         Disable central management here so we can pin test-framework versions inline without
+         duplicating the lib's package list. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
+    <PackageReference Include="Shouldly" Version="4.3.0" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="coverlet.collector" Version="8.0.1">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <!-- Vortice.Vulkan is a transitive of the renderer ProjectReference but we use its types
+         (VkInstance, VkBlendOp etc.) directly in the test, so pin it explicitly. The 3.2.1
+         version matches the lib's Directory.Packages.props. -->
+    <PackageReference Include="Vortice.Vulkan" Version="3.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
+  </ItemGroup>
+
+</Project>

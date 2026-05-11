@@ -31,8 +31,40 @@ jobs:
         path: '**/*.nupkg'
         retention-days: 5
 
-  publish-nuget:
+  # BlendOpRegressionTests catch the dangling-pAttachments bug fixed in 3.4.471 by
+  # round-tripping VkBlendOp.Min / Max through actual draw calls. Need a Vulkan ICD on the
+  # runner; Mesa lavapipe (software) is the standard headless choice. fail-fast: false so a
+  # regression on one architecture doesn't mask the other.
+  test:
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: SharpAstro/cache-apt-pkgs-action@v1
+      with:
+        packages: mesa-vulkan-drivers libvulkan1 vulkan-tools
+        version: 1.0
+    # If the loader can't enumerate at least one ICD, the tests will Assert.Skip via
+    # TryCreateOffscreenContext rather than fail. This diagnostic surfaces that situation
+    # in the build log without a re-run.
+    - name: Vulkan ICD summary
+      run: vulkaninfo --summary || true
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+    - name: Restore dependencies
+      run: dotnet restore
+    - name: Build
+      run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+    - name: Test
+      run: dotnet test src/SdlVulkan.Renderer.Tests -c $BUILD_CONF --no-build --logger "console;verbosity=detailed"
+
+  publish-nuget:
+    needs: [build, test]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
