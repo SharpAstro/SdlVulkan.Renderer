@@ -7,7 +7,12 @@ on:
     branches: [ main ]
 
 env:
-  VERSION_PREFIX: 3.4.${{ github.run_number }}
+  # Major bump 3.4 -> 4.0 to consume DIR.Lib 4.0 (BoxRasterizer.RenderToRgba
+  # API break + codec divorce). SdlVulkan.Renderer's own public API is
+  # unchanged; the major bump signals that the package now declares a
+  # DIR.Lib 4.0 transitive dependency and won't combine with DIR.Lib 3.x
+  # consumers in the same resolution graph.
+  VERSION_PREFIX: 4.0.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
