@@ -69,8 +69,48 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
         SetWindowFullscreen(Handle, (flags & WindowFlags.Fullscreen) == 0);
     }
 
+    // SDL cursor functions are documented as main-thread-only, so concurrent
+    // calls would be a misuse anyway -- but a lock is cheap insurance against
+    // the lazy-create racing with itself (which would leak the loser's handle)
+    // and matches how we'd want to behave if a Dispose runs concurrent with a
+    // SetSystemCursor.
+    private readonly Dictionary<SystemCursor, nint> _cursorCache = [];
+    private readonly Lock _cursorLock = new();
+    private SystemCursor _currentCursor = SystemCursor.Default;
+
+    /// <summary>
+    /// Sets the active SDL system cursor (e.g. <see cref="SystemCursor.EWResize"/>
+    /// for a horizontal resize handle). Cursors are lazy-created and cached for
+    /// the lifetime of the window. No-op when <paramref name="cursor"/> matches
+    /// the currently active cursor, so callers can fire this every frame from a
+    /// hover test without churning SDL state.
+    /// </summary>
+    public void SetSystemCursor(SystemCursor cursor)
+    {
+        lock (_cursorLock)
+        {
+            if (cursor == _currentCursor) return;
+            if (!_cursorCache.TryGetValue(cursor, out var handle))
+            {
+                handle = CreateSystemCursor(cursor);
+                if (handle == nint.Zero) return; // SDL failure -- leave the cursor as-is
+                _cursorCache[cursor] = handle;
+            }
+            SetCursor(handle);
+            _currentCursor = cursor;
+        }
+    }
+
     public void Dispose()
     {
+        lock (_cursorLock)
+        {
+            foreach (var handle in _cursorCache.Values)
+            {
+                DestroyCursor(handle);
+            }
+            _cursorCache.Clear();
+        }
         DestroyWindow(Handle);
         Quit();
     }
