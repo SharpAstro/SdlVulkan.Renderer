@@ -540,10 +540,16 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <summary>
     /// Draws a single glyph at the exact ink position.
     /// Supports CID subset fonts via charCode for glyph index lookup.
+    /// <para>
+    /// <paramref name="xScale"/> stretches the rendered quad along the writing direction
+    /// only. The atlas glyph itself remains at the uniform <paramref name="fontSize"/>
+    /// rasterization — we just scale the output quad's writing-axis vertex offsets.
+    /// </para>
     /// </summary>
     public void DrawSingleGlyph(string fontPath, float fontSize, System.Text.Rune character,
         int charCode, DIR.Lib.RGBAColor32 color, float inkX, float inkY,
-        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto,
+        float xScale = 1f)
     {
         if (_pipelines is null || _fontAtlas is null) return;
 
@@ -554,7 +560,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         // Scale glyph metrics when rasterized at a capped size (e.g., 128px max)
         var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
-        var w = glyph.Width * glyphScale;
+        var w = glyph.Width * glyphScale * xScale;
         var h = glyph.Height * glyphScale;
 
         // Build glyph quad — rotated or axis-aligned
@@ -619,7 +625,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public void DrawGlyphAtBaseline(string fontPath, float fontSize, System.Text.Rune character,
         int charCode, DIR.Lib.RGBAColor32 color, float baselineX, float baselineY,
-        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto,
+        float xScale = 1f)
     {
         if (_pipelines is null || _fontAtlas is null) return;
 
@@ -627,10 +634,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (glyph.Width == 0) return;
 
         var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
-        var inkX = baselineX + glyph.BearingX * glyphScale;
+        // Bearing-X lives along the writing direction, so it must scale with xScale —
+        // otherwise compressed glyphs drift right of their narrow advance slots.
+        var inkX = baselineX + glyph.BearingX * glyphScale * xScale;
         var inkY = baselineY - glyph.BearingY * glyphScale;
 
-        DrawSingleGlyph(fontPath, fontSize, character, charCode, color, inkX, inkY, rotation, hint);
+        DrawSingleGlyph(fontPath, fontSize, character, charCode, color, inkX, inkY, rotation, hint, xScale);
     }
 
     /// <summary>
@@ -664,15 +673,23 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     /// <summary>
     /// Adds a glyph to the current batch at the exact ink position (no draw call issued).
+    /// <para>
+    /// <paramref name="xScale"/> stretches the rendered quad along the writing direction only
+    /// (the atlas glyph itself stays at the uniform <paramref name="fontSize"/> rasterization).
+    /// 1.0 means no horizontal stretch — the common case. Values &lt; 1 compress glyphs
+    /// horizontally; used for PDF text with /Tz or an anisotropic Tm/cm so wide outlines
+    /// drawn on narrow advances don't crowd each other.
+    /// </para>
     /// </summary>
     public void AddBatchedGlyph(string fontPath, float fontSize, System.Text.Rune character,
         int charCode, float inkX, float inkY,
-        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+        float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto,
+        float xScale = 1f)
     {
         if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
 
         var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode, hint: hint);
-        AddBatchedGlyph(glyph, fontSize, inkX, inkY, rotation);
+        AddBatchedGlyph(glyph, fontSize, inkX, inkY, rotation, xScale);
     }
 
     /// <summary>
@@ -683,13 +700,16 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// avoid copying the ~36-byte record struct on the per-glyph hot path.
     /// </summary>
     internal void AddBatchedGlyph(in VkFontAtlas.GlyphInfo glyph, float fontSize,
-        float inkX, float inkY, float rotation = 0f)
+        float inkX, float inkY, float rotation = 0f, float xScale = 1f)
     {
         if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
         if (glyph.Width == 0) return;
 
         var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
-        var w = glyph.Width * glyphScale;
+        // Stretch only the writing direction. The atlas glyph stays at its uniform-fontSize
+        // rasterization — we just scale the output quad's "right" basis vector by xScale.
+        // Vertical ("down" basis) is unchanged.
+        var w = glyph.Width * glyphScale * xScale;
         var h = glyph.Height * glyphScale;
 
         Span<float> verts = stackalloc float[24];
@@ -747,7 +767,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void AddBatchedGlyphAtBaseline(string fontPath, float fontSize, System.Text.Rune character,
         int charCode, float baselineX, float baselineY,
         float rotation = 0f, DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto,
-        bool xIsInkLeft = false)
+        bool xIsInkLeft = false, float xScale = 1f)
     {
         if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
 
@@ -758,7 +778,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // Skip the LSB shift when the caller already has ink-left — otherwise narrow glyphs
         // in monospace fonts (e.g. 'S' or 'i' in Courier) end up shifted right by their LSB,
         // opening a visible gap between them and the next glyph.
-        var bx = xIsInkLeft ? 0f : glyph.BearingX * glyphScale;
+        // The LSB lives along the writing direction so it must scale with xScale: when text
+        // is horizontally compressed, the bearing-X shifts proportionally — otherwise each
+        // glyph drifts right of its baseline by an unstretched LSB.
+        var bx = xIsInkLeft ? 0f : glyph.BearingX * glyphScale * xScale;
         var by = glyph.BearingY * glyphScale;
         float inkX, inkY;
         if (MathF.Abs(rotation) < 0.001f)
@@ -779,7 +802,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             inkY = baselineY + bx * sinR - by * cosR;
         }
 
-        AddBatchedGlyph(fontPath, fontSize, character, charCode, inkX, inkY, rotation, hint);
+        AddBatchedGlyph(fontPath, fontSize, character, charCode, inkX, inkY, rotation, hint, xScale);
     }
 
     /// <summary>
@@ -792,13 +815,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public void AddBatchedSdfGlyph(string fontPath, System.Text.Rune character, int charCode,
         float inkX, float inkY, float rotation = 0f,
-        DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto)
+        DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto, float xScale = 1f)
     {
         if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
 
         var glyph = _sdfFontAtlas.GetGlyph(fontPath, _glyphBatchFontSize, character,
             skipUnflushed: true, charCode: charCode, hint: hint);
-        AddBatchedSdfGlyph(glyph, inkX, inkY, rotation);
+        AddBatchedSdfGlyph(glyph, inkX, inkY, rotation, xScale);
     }
 
     /// <summary>
@@ -808,23 +831,28 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// to compute scale and spread padding. Passed by <c>in</c> to avoid copying the ~40-byte
     /// record struct on the per-glyph hot path.
     /// </summary>
-    internal void AddBatchedSdfGlyph(in VkSdfFontAtlas.GlyphInfo glyph, float inkX, float inkY, float rotation = 0f)
+    internal void AddBatchedSdfGlyph(in VkSdfFontAtlas.GlyphInfo glyph, float inkX, float inkY,
+        float rotation = 0f, float xScale = 1f)
     {
         if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
         if (glyph.Width == 0) return;
 
         var glyphScale = VkSdfFontAtlas.GetGlyphScale(_glyphBatchFontSize);
-        var w = glyph.Width * glyphScale;   // SDF texture width (ink + 2*spread)
-        var h = glyph.Height * glyphScale;  // SDF texture height (ink + 2*spread)
-        var pad = glyph.Spread * glyphScale;
+        // Stretch only the writing direction. SDF spread padding follows xScale on the X-axis
+        // too so the ink inside the texture continues to land at (inkX, inkY) after scaling
+        // — otherwise compressed text would slip leftward by (1 - xScale) * spread.
+        var w = glyph.Width * glyphScale * xScale;   // SDF texture width along writing dir (ink + 2*spread*xScale)
+        var h = glyph.Height * glyphScale;            // SDF texture height (ink + 2*spread)
+        var padX = glyph.Spread * glyphScale * xScale;
+        var padY = glyph.Spread * glyphScale;
 
         Span<float> verts = stackalloc float[24];
         if (MathF.Abs(rotation) < 0.01f)
         {
-            // Quad top-left = ink top-left shifted by (-pad, -pad) so the ink
+            // Quad top-left = ink top-left shifted by (-padX, -padY) so the ink
             // inside the SDF texture lands at (inkX, inkY).
-            var x0 = inkX - pad;
-            var y0 = inkY - pad;
+            var x0 = inkX - padX;
+            var y0 = inkY - padY;
             var x1 = x0 + w;
             var y1 = y0 + h;
             verts[0] = x0; verts[1] = y0; verts[2] = glyph.U0; verts[3] = glyph.V0;
@@ -837,15 +865,15 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         else
         {
             // Rotation basis: right = (cosA, sinA) for local +x, down = (-sinA, cosA) for local +y.
-            // Texture top-left in rotated screen space = ink top-left shifted by -pad along both
-            // local axes — otherwise the ink inside the texture would land `pad` pixels off along
-            // the rotated direction.
+            // Texture top-left in rotated screen space = ink top-left shifted by -padX along the
+            // writing axis and -padY along the perpendicular — otherwise the ink inside the texture
+            // would land off along either direction.
             var cosA = MathF.Cos(rotation);
             var sinA = MathF.Sin(rotation);
             var rxU = cosA;  var ryU = sinA;   // right unit
             var dxU = -sinA; var dyU = cosA;   // down unit
-            var tlx = inkX - pad * rxU - pad * dxU;
-            var tly = inkY - pad * ryU - pad * dyU;
+            var tlx = inkX - padX * rxU - padY * dxU;
+            var tly = inkY - padX * ryU - padY * dyU;
             var wrx = w * rxU; var wry = w * ryU;       // "right" scaled by texture width
             var hdx = h * dxU; var hdy = h * dyU;       // "down"  scaled by texture height
             var trx = tlx + wrx;        var try_ = tly + wry;
@@ -883,7 +911,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void AddBatchedSdfGlyphAtBaseline(string fontPath, System.Text.Rune character, int charCode,
         float baselineX, float baselineY, float rotation = 0f,
         DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto,
-        bool xIsInkLeft = false)
+        bool xIsInkLeft = false, float xScale = 1f)
     {
         if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
 
@@ -898,8 +926,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // When the caller already has ink-left (xIsInkLeft), skip the horizontal LSB add —
         // otherwise monospace narrow glyphs (pdfium's GetCharQuad returns ink boxes, not pen
         // positions) drift right by their own LSB, producing visible gaps in the rendered run.
+        // The bearing-X lives along the writing direction so it must scale with xScale —
+        // otherwise compressed glyphs slip out of their narrow advance slots.
         var glyphScale = VkSdfFontAtlas.GetGlyphScale(_glyphBatchFontSize);
-        var bx = xIsInkLeft ? 0f : (glyph.BearingX + glyph.Spread) * glyphScale;
+        var bx = xIsInkLeft ? 0f : (glyph.BearingX + glyph.Spread) * glyphScale * xScale;
         var by = (glyph.BearingY - glyph.Spread) * glyphScale;
         float inkX, inkY;
         if (MathF.Abs(rotation) < 0.001f)
@@ -917,7 +947,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             inkY = baselineY + bx * sinR - by * cosR;
         }
 
-        AddBatchedSdfGlyph(fontPath, character, charCode, inkX, inkY, rotation, hint);
+        AddBatchedSdfGlyph(fontPath, character, charCode, inkX, inkY, rotation, hint, xScale);
     }
 
     /// <summary>
