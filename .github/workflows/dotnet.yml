@@ -7,12 +7,13 @@ on:
     branches: [ main ]
 
 env:
-  # Major bump 3.4 -> 4.0 to consume DIR.Lib 4.0 (BoxRasterizer.RenderToRgba
-  # API break + codec divorce). SdlVulkan.Renderer's own public API is
-  # unchanged; the major bump signals that the package now declares a
-  # DIR.Lib 4.0 transitive dependency and won't combine with DIR.Lib 3.x
-  # consumers in the same resolution graph.
-  VERSION_PREFIX: 4.0.${{ github.run_number }}
+  # Minor bump 4.0 -> 4.1: anisotropic glyph rendering. Glyph draw/batch APIs
+  # gain an optional `xScale` parameter that stretches the output quad along
+  # the writing direction (atlas glyph itself stays at the uniform fontSize).
+  # Enables correct rendering when text-rendering-matrix |M11| differs from
+  # |M22| — e.g. PDFs that condense titles via /Tz or anisotropic Tm/cm.
+  # Source-compatible: existing callers default to xScale = 1f.
+  VERSION_PREFIX: 4.1.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
