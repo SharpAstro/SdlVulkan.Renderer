@@ -109,11 +109,19 @@ public sealed unsafe class VkPipelineSet : IDisposable
         }
         """;
 
+    // Vertex and fragment push-constant blocks declare an IDENTICAL layout. The
+    // vertex stage doesn't read innerRadius but it's still part of the block so the
+    // 84-byte vkCmdPushConstants call (which targets Vertex|Fragment stage flags)
+    // covers exactly what each shader's PC block declares. Mismatched per-stage block
+    // sizes pass on hardware drivers but llvmpipe / Mesa validates more strictly and
+    // can SEGV inside the shader compiler when the actual push range exceeds the
+    // declared block on any stage referenced by the push call. See CI segfault on
+    // ubuntu-latest VkRendererPrimitiveTests.DrawEllipse_RingStroke.
     private const string EllipseVertexSource = """
         #version 450
         layout(location = 0) in vec2 aPos;
         layout(location = 1) in vec2 aLocalPos;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; } pc;
+        layout(push_constant) uniform PC { mat4 proj; vec4 color; float innerRadius; } pc;
         layout(location = 0) out vec2 vLocal;
         void main() {
             gl_Position = pc.proj * vec4(aPos, 0.0, 1.0);
@@ -121,6 +129,13 @@ public sealed unsafe class VkPipelineSet : IDisposable
         }
         """;
 
+    // Fragment-side: SINGLE-discard combined predicate. The original had two
+    // sequential `if (...) discard;` statements; Mesa llvmpipe is known to mis-
+    // compile a conditional-on-uniform second discard in some MSAA paths and the
+    // CI dump points squarely at this test. Folding into one discard keeps the
+    // logic identical -- pc.innerRadius=0 in fill mode makes innerRadius*innerRadius
+    // exactly 0, and `dist >= 0` always holds for a dot-product distance, so the
+    // inner-radius branch is unreachable in fill mode without an explicit guard.
     private const string EllipseFragmentSource = """
         #version 450
         layout(location = 0) in vec2 vLocal;
@@ -128,9 +143,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
         layout(location = 0) out vec4 FragColor;
         void main() {
             float dist = dot(vLocal, vLocal);
-            if (dist > 1.0) discard;
-            // Ring mode: discard pixels inside the inner radius (when innerRadius > 0)
-            if (pc.innerRadius > 0.0 && dist < pc.innerRadius * pc.innerRadius) discard;
+            float innerSq = pc.innerRadius * pc.innerRadius;
+            // Outside the unit disc OR inside the inner ring -> discard. Single
+            // statement avoids the llvmpipe double-discard-with-MSAA bug class.
+            if (dist > 1.0 || dist < innerSq) discard;
             FragColor = pc.color;
         }
         """;
