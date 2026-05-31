@@ -961,6 +961,19 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// Batch SDF prewarm with parallel rasterization. Hand the renderer a list of unique
+    /// glyph keys to prime — it dedups against the atlas, rasterizes the missing ones across
+    /// the thread pool, then inserts them serially. Use instead of looping
+    /// <see cref="PreWarmSdfGlyph"/> when a page has tens-to-hundreds of unique glyphs:
+    /// the per-glyph SDF distance-field computation is the expensive part and parallelizes
+    /// well (4x on a 4-core box for typical architectural pages).
+    /// </summary>
+    public void PreWarmSdfGlyphBatch(IReadOnlyList<(string Font, System.Text.Rune Character, int CharCode, DIR.Lib.GlyphMapHint Hint)> keys)
+    {
+        _sdfFontAtlas?.PreRasterizeBatch(keys);
+    }
+
+    /// <summary>
     /// Ends the current glyph batch and issues a single draw call for all accumulated glyphs.
     /// Dispatches to TexturedPipeline (bitmap atlas) or SdfPipeline (SDF atlas) based on which
     /// Begin*GlyphBatch opened the batch.

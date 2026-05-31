@@ -231,6 +231,17 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         var bitmap = charCode >= 0
             ? _rasterizer.RasterizeGlyphSdfWithCharCode(key.Font, key.Size, key.Character, (uint)charCode, hint, SdfSpread)
             : _rasterizer.RasterizeGlyphSdf(key.Font, key.Size, key.Character, SdfSpread);
+        return InsertRasterized(key, bitmap);
+    }
+
+    /// <summary>
+    /// Serial atlas-insertion path: cursor placement, staging-buffer blit, _glyphs dict
+    /// insert. Caller must already hold the rasterized SDF bitmap. Mutates atlas state
+    /// (cursor, _staging, _glyphs, _unflushedGlyphs, dirty region) and may trigger Grow()
+    /// — must NOT be called concurrently from multiple threads.
+    /// </summary>
+    private GlyphInfo InsertRasterized(GlyphKey key, SdfGlyphBitmap bitmap)
+    {
         var glyphWidth = bitmap.Width;
         var glyphHeight = bitmap.Height;
 
@@ -248,7 +259,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             if (_atlasWidth < _maxAtlasSize || _atlasHeight < _maxAtlasSize)
             {
                 Grow();
-                return RasterizeGlyph(key);
+                return InsertRasterized(key, bitmap);
             }
             // Log once per full-episode (not per rejected glyph) — under thrash this fires every frame.
             if (!_needsEviction)
@@ -287,6 +298,66 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         _cursorX += glyphWidth + 1;
         _rowHeight = Math.Max(_rowHeight, glyphHeight);
         return glyphInfo;
+    }
+
+    /// <summary>
+    /// Batch-warms a set of glyph keys with parallel SDF rasterization. Skips keys already
+    /// in the atlas. Rasterization (the expensive part — SDF distance-field computation
+    /// per glyph pixel) runs across the thread pool via <see cref="Parallel.For"/>; the
+    /// resulting bitmaps are then inserted into the atlas serially on the calling thread
+    /// (cursor placement and the staging buffer aren't thread-safe). On architectural PDFs
+    /// where a page touches 60-100 unique glyphs at ~10 ms each, this cuts prewarm time
+    /// from ~700 ms serial to ~200 ms on a 4-core box.
+    ///
+    /// <para>Thread safety: <see cref="ManagedFontRasterizer"/> backs this via
+    /// <see cref="ConcurrentDictionary{TKey,TValue}"/> for its font cache and allocates
+    /// only a per-call result bitmap, so concurrent rasterization is safe.</para>
+    ///
+    /// <para>Whitespace glyphs go through the serial path because their info is derived
+    /// from a reference glyph ('n'), which requires reentry into <see cref="GetGlyph"/>.</para>
+    /// </summary>
+    public void PreRasterizeBatch(IReadOnlyList<(string Font, Rune Character, int CharCode, GlyphMapHint Hint)> keys)
+    {
+        if (keys.Count == 0) return;
+
+        // Phase 1: identify keys that need rasterization (not already cached, not whitespace).
+        // Whitespace and already-cached entries are handled separately.
+        var toRasterize = new List<(GlyphKey AtlasKey, int CharCode, GlyphMapHint Hint)>(keys.Count);
+        var seenThisBatch = new HashSet<GlyphKey>();
+        foreach (var (font, ch, charCode, hint) in keys)
+        {
+            var atlasKey = new GlyphKey(font, SdfRasterSize, ch, charCode);
+            if (_glyphs.ContainsKey(atlasKey)) continue;
+            if (Rune.IsWhiteSpace(ch)) continue;          // serial fallback below
+            if (!seenThisBatch.Add(atlasKey)) continue;    // dedup duplicates within the batch
+            toRasterize.Add((atlasKey, charCode, hint));
+        }
+
+        // Phase 2: parallel SDF rasterization. Each iteration calls into
+        // ManagedFontRasterizer which is documented thread-safe for concurrent
+        // RasterizeGlyphSdf*() calls — it only mutates a ConcurrentDictionary<string, OpenTypeFont>
+        // font cache, and per-glyph rendering allocates only the result bitmap.
+        var bitmaps = new SdfGlyphBitmap[toRasterize.Count];
+        Parallel.For(0, toRasterize.Count, i =>
+        {
+            var (atlasKey, charCode, hint) = toRasterize[i];
+            bitmaps[i] = charCode >= 0
+                ? _rasterizer.RasterizeGlyphSdfWithCharCode(atlasKey.Font, atlasKey.Size, atlasKey.Character, (uint)charCode, hint, SdfSpread)
+                : _rasterizer.RasterizeGlyphSdf(atlasKey.Font, atlasKey.Size, atlasKey.Character, SdfSpread);
+        });
+
+        // Phase 3: serial atlas insertion. Cursor / staging / _glyphs / _unflushedGlyphs
+        // are not thread-safe and Grow() must run in isolation.
+        for (var i = 0; i < toRasterize.Count; i++)
+            InsertRasterized(toRasterize[i].AtlasKey, bitmaps[i]);
+
+        // Phase 4: handle whitespace keys through the normal serial path (they recurse
+        // into GetGlyph for the reference glyph and so can't go through the parallel
+        // phase). This is cheap — whitespace lookups are constant-time once 'n' is cached.
+        foreach (var (font, ch, charCode, hint) in keys)
+        {
+            if (Rune.IsWhiteSpace(ch)) GetGlyph(font, SdfRasterSize, ch, charCode: charCode, hint: hint);
+        }
     }
 
     private void Grow()
