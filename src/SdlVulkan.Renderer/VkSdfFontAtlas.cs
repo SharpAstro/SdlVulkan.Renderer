@@ -58,6 +58,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
     private int _dirtyX0, _dirtyY0, _dirtyX1, _dirtyY1;
     private bool _needsEviction;
+    // Set when a glyph doesn't fit but the atlas can still grow. The actual Grow() (destroy +
+    // recreate the VkImage, rebind its descriptor) is deferred to BeginFrame — performing it
+    // mid-frame from InsertRasterized wedges the Adreno tiler's next vkQueueSubmit. Mirrors
+    // _needsEviction's deferred-to-BeginFrame handling.
+    private bool _needsGrow;
 
     private VkImage _image;
     private VkDeviceMemory _imageMemory;
@@ -115,6 +120,15 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         {
             EvictAll();
             _needsEviction = false;
+        }
+        // Perform a pending atlas grow HERE, before this frame records any glyph insert / Flush / draw.
+        // Growing destroys + recreates the atlas VkImage and rebinds its descriptor; it's deferred out
+        // of InsertRasterized so the swap never lands mid-command-buffer (the Adreno submit wedge).
+        // Grow()'s own vkDeviceWaitIdle still drains the other in-flight frame, so the swap is safe here.
+        if (_needsGrow)
+        {
+            Grow();
+            _needsGrow = false;
         }
     }
 
@@ -258,8 +272,15 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         {
             if (_atlasWidth < _maxAtlasSize || _atlasHeight < _maxAtlasSize)
             {
-                Grow();
-                return InsertRasterized(key, bitmap);
+                // Defer the grow to the next BeginFrame rather than swapping the atlas image here.
+                // InsertRasterized runs mid-frame (prewarm, on-demand GetGlyph during a draw);
+                // destroying + recreating the VkImage and rebinding its descriptor while the frame's
+                // command buffer already has draws bound to the OLD image makes the Adreno tiler fail
+                // the next vkQueueSubmit (VK_ERROR_INITIALIZATION_FAILED). BeginFrame grows before any
+                // draw is recorded. This glyph lands a frame later — the caller treats a default
+                // (Width=0) GlyphInfo as not-yet-available, exactly like the deferred-eviction path below.
+                _needsGrow = true;
+                return default;
             }
             // Log once per full-episode (not per rejected glyph) — under thrash this fires every frame.
             if (!_needsEviction)
