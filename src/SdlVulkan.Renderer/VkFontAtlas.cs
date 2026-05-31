@@ -299,6 +299,11 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         }
 
         var api = _ctx.DeviceApi;
+        // Drain the GPU before swapping the atlas image — same in-flight use-after-free + in-use-descriptor
+        // hazard as VkSdfFontAtlas.Grow (frame N-1 may still be sampling the old image when frame N grows;
+        // strict tilers like Qualcomm Adreno fail the next vkQueueSubmit). Grows are rare, so the full
+        // device idle is cheap.
+        api.vkDeviceWaitIdle();
         api.vkDestroyImageView(_imageView);
         api.vkDestroyImage(_image);
         api.vkFreeMemory(_imageMemory);

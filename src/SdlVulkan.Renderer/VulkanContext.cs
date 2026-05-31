@@ -16,6 +16,10 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// </summary>
     public const int MaxFramesInFlight = 2;
     private const uint MaxDescriptorSets = 512; // font atlas + textures
+    // Cap the per-frame in-flight fence wait (ns) so a never-signaled fence can't hard-freeze the loop.
+    // 2s is hundreds of times a normal frame; only a stuck GPU / non-signaling driver reaches it, and a
+    // timeout is routed into GPU-error recovery (recreate sync + swapchain) via the event loop's catch.
+    private const ulong FenceWaitTimeoutNs = 2_000_000_000UL;
 
     public VkInstance Instance { get; }
     public VkInstanceApi InstanceApi { get; }
@@ -39,6 +43,22 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     /// <summary>MSAA sample count (Count1 = no MSAA).</summary>
     public VkSampleCountFlags MsaaSamples { get; }
+
+    private uint _maxImageDimension2D;
+    /// <summary>Device limit <c>maxImageDimension2D</c> — the largest 2D image the GPU can allocate.
+    /// Queried lazily and cached. Consumers (e.g. the font atlas) clamp their growth to this.</summary>
+    public uint MaxImageDimension2D
+    {
+        get
+        {
+            if (_maxImageDimension2D == 0)
+            {
+                InstanceApi.vkGetPhysicalDeviceProperties(PhysicalDevice, out var props);
+                _maxImageDimension2D = props.limits.maxImageDimension2D;
+            }
+            return _maxImageDimension2D;
+        }
+    }
 
     private VkImage[] _swapchainImages = [];
     private VkImageView[] _swapchainImageViews = [];
@@ -316,7 +336,14 @@ public sealed unsafe partial class VulkanContext : IDisposable
     {
         resized = false;
         var fence = _inFlightFences[_currentFrame];
-        DeviceApi.vkWaitForFences(1, &fence, true, ulong.MaxValue);
+        // Bounded wait: if a fence is never signaled (driver hiccup / stuck GPU) an unbounded wait here
+        // would hard-freeze the loop with no escape. Cap it and throw on timeout — the event loop's catch
+        // routes that into RecoverFromGpuError (recreate sync + swapchain), like a submit failure. A real
+        // device-loss comes back as a negative result (DEVICE_LOST), which CheckResult sends the same way.
+        var waitResult = DeviceApi.vkWaitForFences(1, &fence, true, FenceWaitTimeoutNs);
+        if (waitResult == VkResult.Timeout)
+            throw new VkException(waitResult, "in-flight fence wait timed out (>2s) — recovering");
+        waitResult.CheckResult();
 
         var result = DeviceApi.vkAcquireNextImageKHR(Swapchain, ulong.MaxValue,
             _imageAvailableSemaphores[_currentFrame], VkFence.Null, out _currentImageIndex);
@@ -387,7 +414,16 @@ public sealed unsafe partial class VulkanContext : IDisposable
             pSignalSemaphores = &signalSemaphore
         };
 
-        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &submitInfo, _inFlightFences[_currentFrame]).CheckResult();
+        var submitResult = DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &submitInfo, _inFlightFences[_currentFrame]);
+        RenderDiag.Vk("submit", submitResult, $"frame={_currentFrame} img={_currentImageIndex}");
+        // Some drivers (observed: Qualcomm Adreno X1-85 / qcdx8380 on Windows-on-ARM) return
+        // VK_ERROR_INITIALIZATION_FAILED from vkQueueSubmit even though the work executes and the fence +
+        // semaphore signal normally. That is not a spec-legal return for vkQueueSubmit (only SUCCESS,
+        // OUT_OF_{HOST,DEVICE}_MEMORY and DEVICE_LOST are), so it cannot denote a real failure here —
+        // tolerate it and present, rather than throwing → rebuilding the swapchain every frame (a
+        // self-sustaining recovery storm). Genuinely fatal codes still throw via CheckResult.
+        if (submitResult != VkResult.ErrorInitializationFailed)
+            submitResult.CheckResult();
 
         var swapchain = Swapchain;
         var imageIndex = _currentImageIndex;
@@ -400,7 +436,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
             pImageIndices = &imageIndex
         };
 
-        DeviceApi.vkQueuePresentKHR(GraphicsQueue, &presentInfo);
+        var presentResult = DeviceApi.vkQueuePresentKHR(GraphicsQueue, &presentInfo);
+        RenderDiag.Vk("present", presentResult, $"frame={_currentFrame} img={_currentImageIndex}");
         _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
     }
 
