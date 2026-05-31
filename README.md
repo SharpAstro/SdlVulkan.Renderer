@@ -19,7 +19,7 @@ Per frame:
 1. `BeginFrame()` / `BeginOffscreenFrame()` — handles deferred eviction, runs `OnPreFlush` (pre-warm callback), calls `Flush(cmd)` on both atlases, runs `OnPreRenderPass` (texture uploads), then `BeginRenderPass`.
 2. `Flush(cmd)` — uploads dirty staging region to GPU via `vkCmdCopyBufferToImage`.
 3. `DrawText(...)` → `GetGlyph(...)` — cache hit returns UV coords; miss rasterizes into staging.
-4. `GetGlyph(..., skipUnflushed: true)` — in draw loops, returns zero-width for glyphs not yet uploaded. Pair with `PreWarmGlyph` in `OnPreFlush` if drawing a glyph that wasn't shown last frame (first-frame glyph flicker).
+4. `GetGlyph(..., skipUnflushed: true)` — in draw loops, returns zero-width for glyphs not yet uploaded. Pair with `PreWarmGlyph` in `OnPreFlush` if drawing a glyph that wasn't shown last frame (first-frame glyph flicker). For SDF text, `PreWarmSdfGlyph` is the equivalent; `PreWarmSdfGlyphBatch` warms many glyphs in one call with parallel rasterization — preferred when a page introduces tens-to-hundreds of unique glyphs.
 
 **Thread safety**: `vkDeviceWaitIdle()` before reusing the shared upload buffer (prevents race with `MaxFramesInFlight = 2`).
 
