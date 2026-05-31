@@ -25,6 +25,9 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     private readonly HashSet<GlyphKey> _unflushedGlyphs = new();
 
     private const int MaxAtlasSize = 4096;
+    // Effective cap, clamped to the device's maxImageDimension2D (set in the ctor) so we never request
+    // an atlas larger than the GPU can allocate. Use this — not the const — for grow decisions.
+    private readonly int _maxAtlasSize;
     private const float SdfSpread = 4f;
 
     /// <summary>
@@ -93,6 +96,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     {
         _ctx = ctx;
         _rasterizer = rasterizer;
+        // Never let the atlas grow past what the GPU can allocate.
+        _maxAtlasSize = Math.Min(MaxAtlasSize, (int)ctx.MaxImageDimension2D);
         _atlasWidth = initialWidth;
         _atlasHeight = initialHeight;
         _staging = new byte[initialWidth * initialHeight]; // 1 byte per pixel
@@ -240,11 +245,14 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
         if (_cursorY + glyphHeight > _atlasHeight)
         {
-            if (_atlasWidth < MaxAtlasSize || _atlasHeight < MaxAtlasSize)
+            if (_atlasWidth < _maxAtlasSize || _atlasHeight < _maxAtlasSize)
             {
                 Grow();
                 return RasterizeGlyph(key);
             }
+            // Log once per full-episode (not per rejected glyph) — under thrash this fires every frame.
+            if (!_needsEviction)
+                RenderDiag.Log("sdf.full", $"atlas full {_atlasWidth}x{_atlasHeight} glyphs={_glyphs.Count} — will evict next frame");
             _needsEviction = true;
             return default;
         }
@@ -286,8 +294,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         var oldWidth = _atlasWidth;
         var oldHeight = _atlasHeight;
 
-        _atlasWidth = Math.Min(_atlasWidth * 2, MaxAtlasSize);
-        _atlasHeight = Math.Min(_atlasHeight * 2, MaxAtlasSize);
+        _atlasWidth = Math.Min(_atlasWidth * 2, _maxAtlasSize);
+        _atlasHeight = Math.Min(_atlasHeight * 2, _maxAtlasSize);
 
         var newStaging = new byte[_atlasWidth * _atlasHeight];
         for (var row = 0; row < oldHeight; row++)
@@ -309,6 +317,12 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         }
 
         var api = _ctx.DeviceApi;
+        // Drain the GPU before swapping the atlas image. BeginFrame only waited on the fence from
+        // MaxFramesInFlight-2 frames ago, so frame N-1 may still be sampling the old image through this
+        // descriptor when frame N grows — a use-after-free / in-use-descriptor hazard. Lenient desktop
+        // drivers tolerate it, but strict tilers (e.g. Qualcomm Adreno on Windows-on-ARM) fail the next
+        // vkQueueSubmit. Grows are rare (the atlas only doubles), so a full device idle here is cheap.
+        api.vkDeviceWaitIdle();
         api.vkDestroyImageView(_imageView);
         api.vkDestroyImage(_image);
         api.vkFreeMemory(_imageMemory);
@@ -317,10 +331,12 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
         _dirtyX0 = 0; _dirtyY0 = 0;
         _dirtyX1 = _atlasWidth; _dirtyY1 = _atlasHeight;
+        RenderDiag.Log("sdf.grow", $"{oldWidth}x{oldHeight}->{_atlasWidth}x{_atlasHeight} glyphs={_glyphs.Count}");
     }
 
     private void EvictAll()
     {
+        RenderDiag.Log("sdf.evict", $"wiping {_glyphs.Count} glyphs at {_atlasWidth}x{_atlasHeight}");
         _glyphs.Clear();
         _cursorX = 0; _cursorY = 0; _rowHeight = 0;
         _staging = new byte[_atlasWidth * _atlasHeight];
