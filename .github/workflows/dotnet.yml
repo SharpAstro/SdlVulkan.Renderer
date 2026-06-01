@@ -12,7 +12,8 @@ env:
   # glyph-atlas growth no longer does a vkDeviceWaitIdle + image realloc + re-upload (the visible
   # frame stall). Internal change to VkSdfFontAtlas + the SDF draw path; the public VkRenderer API
   # is source-compatible (the optional sdfInitialAtlasDim param now sizes a page).
-  VERSION_PREFIX: 5.0.${{ github.run_number }}
+  # 5.1: VkRenderer overrides DIR.Lib's PushClip/PopClip → Vulkan scissor (needs DIR.Lib >= 4.4).
+  VERSION_PREFIX: 5.1.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

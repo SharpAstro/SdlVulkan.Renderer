@@ -539,6 +539,19 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         SetScissor(0, 0, _width, _height);
     }
 
+    // DIR.Lib widget clip hooks → Vulkan scissor. Single-level (per the base contract): PopClip
+    // restores the full viewport rather than popping a stack.
+    public override void PushClip(in DIR.Lib.RectInt rect)
+    {
+        var x = Math.Min(rect.UpperLeft.X, rect.LowerRight.X);
+        var y = Math.Min(rect.UpperLeft.Y, rect.LowerRight.Y);
+        var w = (uint)Math.Abs(rect.LowerRight.X - rect.UpperLeft.X);
+        var h = (uint)Math.Abs(rect.LowerRight.Y - rect.UpperLeft.Y);
+        SetScissor(x, y, w, h);
+    }
+
+    public override void PopClip() => ResetScissor();
+
     /// <summary>
     /// Pre-warms a glyph in the font atlas so it's available in the current frame's flush.
     /// Call this from OnPreFlush to avoid 1-frame text flicker when font sizes change.
