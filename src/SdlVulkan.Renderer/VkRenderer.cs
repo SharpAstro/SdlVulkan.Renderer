@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using DIR.Lib;
 using Vortice.Vulkan;
 
@@ -25,14 +26,24 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     private bool _glyphBatchIsSdf;
     // SDF batches share a single fontSize (drives edge-softness push constant).
     private float _glyphBatchFontSize;
+    // SDF glyphs are accumulated per atlas page (the atlas may span several page textures, each
+    // with its own descriptor set). At EndGlyphBatch each non-empty page is one bind+draw. Lists
+    // are reused across frames (Clear, not realloc). Index = atlas page index.
+    private readonly List<List<float>> _sdfPageVertices = new();
 
-    public VkRenderer(VulkanContext ctx, uint width, uint height) : base(ctx)
+    // sdfInitialAtlasDim: square size of each SDF atlas PAGE (0 = the atlas default, 2048²). The
+    // atlas never reallocates — when a page fills it appends a new page — so this is the page
+    // granularity, not a glyph cap. A glyph-heavy consumer can raise it (must be a power of two)
+    // to pack more glyphs per page = fewer pages / fewer per-page draw calls.
+    public VkRenderer(VulkanContext ctx, uint width, uint height, int sdfInitialAtlasDim = 0) : base(ctx)
     {
         _width = width;
         _height = height;
         _pipelines = VkPipelineSet.Create(ctx);
         _fontAtlas = new VkFontAtlas(ctx);
-        _sdfFontAtlas = new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer);
+        _sdfFontAtlas = sdfInitialAtlasDim > 0
+            ? new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, sdfInitialAtlasDim, sdfInitialAtlasDim)
+            : new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer);
         UpdateProjection();
     }
 
@@ -668,6 +679,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _glyphBatchFontSize = fontSize;
         _glyphBatchStartOffset = uint.MaxValue;
         _glyphBatchVertexCount = 0;
+        foreach (var l in _sdfPageVertices) l.Clear();  // reuse the per-page buffers, don't realloc
         SetColor(color);
     }
 
@@ -837,6 +849,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
         if (glyph.Width == 0) return;
 
+        // The atlas may span several page textures; recover this glyph's page + page-local V
+        // (U is already page-local). Each page is drawn separately in EndGlyphBatch.
+        _sdfFontAtlas.DecodePage(glyph, out var page, out var lv0, out var lv1);
+
         var glyphScale = VkSdfFontAtlas.GetGlyphScale(_glyphBatchFontSize);
         // Stretch only the writing direction. SDF spread padding follows xScale on the X-axis
         // too so the ink inside the texture continues to land at (inkX, inkY) after scaling
@@ -855,12 +871,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             var y0 = inkY - padY;
             var x1 = x0 + w;
             var y1 = y0 + h;
-            verts[0] = x0; verts[1] = y0; verts[2] = glyph.U0; verts[3] = glyph.V0;
-            verts[4] = x1; verts[5] = y0; verts[6] = glyph.U1; verts[7] = glyph.V0;
-            verts[8] = x1; verts[9] = y1; verts[10] = glyph.U1; verts[11] = glyph.V1;
-            verts[12] = x0; verts[13] = y0; verts[14] = glyph.U0; verts[15] = glyph.V0;
-            verts[16] = x1; verts[17] = y1; verts[18] = glyph.U1; verts[19] = glyph.V1;
-            verts[20] = x0; verts[21] = y1; verts[22] = glyph.U0; verts[23] = glyph.V1;
+            verts[0] = x0; verts[1] = y0; verts[2] = glyph.U0; verts[3] = lv0;
+            verts[4] = x1; verts[5] = y0; verts[6] = glyph.U1; verts[7] = lv0;
+            verts[8] = x1; verts[9] = y1; verts[10] = glyph.U1; verts[11] = lv1;
+            verts[12] = x0; verts[13] = y0; verts[14] = glyph.U0; verts[15] = lv0;
+            verts[16] = x1; verts[17] = y1; verts[18] = glyph.U1; verts[19] = lv1;
+            verts[20] = x0; verts[21] = y1; verts[22] = glyph.U0; verts[23] = lv1;
         }
         else
         {
@@ -880,20 +896,21 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             var blx = tlx + hdx;        var bly  = tly + hdy;
             var brx = tlx + wrx + hdx;  var bry  = tly + wry + hdy;
 
-            verts[0] = tlx; verts[1] = tly; verts[2] = glyph.U0; verts[3] = glyph.V0;
-            verts[4] = trx; verts[5] = try_; verts[6] = glyph.U1; verts[7] = glyph.V0;
-            verts[8] = brx; verts[9] = bry;  verts[10] = glyph.U1; verts[11] = glyph.V1;
-            verts[12] = tlx; verts[13] = tly; verts[14] = glyph.U0; verts[15] = glyph.V0;
-            verts[16] = brx; verts[17] = bry; verts[18] = glyph.U1; verts[19] = glyph.V1;
-            verts[20] = blx; verts[21] = bly; verts[22] = glyph.U0; verts[23] = glyph.V1;
+            verts[0] = tlx; verts[1] = tly; verts[2] = glyph.U0; verts[3] = lv0;
+            verts[4] = trx; verts[5] = try_; verts[6] = glyph.U1; verts[7] = lv0;
+            verts[8] = brx; verts[9] = bry;  verts[10] = glyph.U1; verts[11] = lv1;
+            verts[12] = tlx; verts[13] = tly; verts[14] = glyph.U0; verts[15] = lv0;
+            verts[16] = brx; verts[17] = bry; verts[18] = glyph.U1; verts[19] = lv1;
+            verts[20] = blx; verts[21] = bly; verts[22] = glyph.U0; verts[23] = lv1;
         }
-        ReadOnlySpan<float> vertices = verts;
 
-        var vertOffset = Surface.WriteVertices(vertices);
-        if (vertOffset == uint.MaxValue) return;
-
-        if (_glyphBatchStartOffset == uint.MaxValue)
-            _glyphBatchStartOffset = vertOffset;
+        // Accumulate into this glyph's page bucket; EndGlyphBatch writes each page to the vertex
+        // ring and issues one bind+draw per page. (No immediate WriteVertices — draws are grouped
+        // by page so each binds its own page descriptor set.)
+        while (_sdfPageVertices.Count <= page)
+            _sdfPageVertices.Add(new List<float>(24 * 64));
+        var pageList = _sdfPageVertices[page];
+        for (var i = 0; i < 24; i++) pageList.Add(verts[i]);
         _glyphBatchVertexCount += 6;
     }
 
@@ -985,37 +1002,52 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _glyphBatchActive = false;
         _glyphBatchIsSdf = false;
 
-        if (_glyphBatchVertexCount == 0 || _glyphBatchStartOffset == uint.MaxValue) return;
-
         var api = Surface.DeviceApi;
-        Vortice.Vulkan.VkPipeline pipeline;
-        Vortice.Vulkan.VkDescriptorSet descriptorSet;
+        // SDF AA is driven by fwidth() in the fragment shader, so no caller-side edge softness is
+        // needed regardless of fontSize. Slot 20 is unused by both pipelines; zero it for cleanliness.
+        _pushConstants[20] = 0f;
+
         if (isSdf && _sdfFontAtlas is not null)
         {
-            pipeline = _pipelines!.SdfPipeline;
-            descriptorSet = _sdfFontAtlas.DescriptorSet;
-            // SDF AA is driven by fwidth() in the fragment shader, so no caller-side
-            // edge softness is needed regardless of fontSize. Zero the slot for cleanliness.
-            _pushConstants[20] = 0f;
-        }
-        else
-        {
-            pipeline = _pipelines!.TexturedPipeline;
-            descriptorSet = Surface.DescriptorSet;
-            _pushConstants[20] = 0f; // unused by TexturedPipeline, keep push constants clean
+            if (_glyphBatchVertexCount == 0) return;
+            // The atlas spans one or more page textures, each its own descriptor set. Bind the SDF
+            // pipeline + push constants once, then issue ONE bind(page descriptor)+draw per page.
+            // Rebinding descriptor sets between draws is legal Vulkan and Adreno-safe — pages are
+            // never destroyed mid-frame, unlike the old Grow() image swap.
+            api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines!.SdfPipeline);
+            fixed (float* pPC = _pushConstants)
+                api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                    VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+            for (var p = 0; p < _sdfPageVertices.Count; p++)
+            {
+                var list = _sdfPageVertices[p];
+                if (list.Count == 0) continue;
+                var vertOffset = Surface.WriteVertices(CollectionsMarshal.AsSpan(list));
+                if (vertOffset == uint.MaxValue) continue; // ring full this frame; drop the page
+                var descriptorSet = _sdfFontAtlas.GetPageDescriptorSet(p);
+                api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
+                    Surface.PipelineLayout, 0, 1, &descriptorSet, 0, null);
+                var buffer = Surface.VertexBuffer;
+                var vkOffset = (ulong)vertOffset;
+                api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+                api.vkCmdDraw(_currentCmd, (uint)(list.Count / 4), 1, 0, 0); // 4 floats (pos.xy+uv.xy)/vertex
+            }
+            return;
         }
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, pipeline);
+        // Bitmap atlas path: a single contiguous vertex range, one draw (unchanged).
+        if (_glyphBatchVertexCount == 0 || _glyphBatchStartOffset == uint.MaxValue) return;
+        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines!.TexturedPipeline);
+        var bmpDescriptor = Surface.DescriptorSet;
         api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
-            Surface.PipelineLayout, 0, 1, &descriptorSet, 0, null);
-
+            Surface.PipelineLayout, 0, 1, &bmpDescriptor, 0, null);
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
-
-        var buffer = Surface.VertexBuffer;
-        var vkOffset = (ulong)_glyphBatchStartOffset;
-        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        var bmpBuffer = Surface.VertexBuffer;
+        var bmpOffset = (ulong)_glyphBatchStartOffset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &bmpBuffer, &bmpOffset);
         api.vkCmdDraw(_currentCmd, (uint)_glyphBatchVertexCount, 1, 0, 0);
     }
 
