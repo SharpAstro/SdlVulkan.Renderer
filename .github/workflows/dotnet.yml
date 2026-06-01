@@ -7,13 +7,12 @@ on:
     branches: [ main ]
 
 env:
-  # Minor bump 4.0 -> 4.1: anisotropic glyph rendering. Glyph draw/batch APIs
-  # gain an optional `xScale` parameter that stretches the output quad along
-  # the writing direction (atlas glyph itself stays at the uniform fontSize).
-  # Enables correct rendering when text-rendering-matrix |M11| differs from
-  # |M22| — e.g. PDFs that condense titles via /Tz or anisotropic Tm/cm.
-  # Source-compatible: existing callers default to xScale = 1f.
-  VERSION_PREFIX: 4.1.${{ github.run_number }}
+  # Major bump 4.1 -> 5.0: multi-page SDF glyph atlas. The atlas is now a list of fixed-size
+  # page textures (default 2048²); a full page appends a new page instead of reallocating, so
+  # glyph-atlas growth no longer does a vkDeviceWaitIdle + image realloc + re-upload (the visible
+  # frame stall). Internal change to VkSdfFontAtlas + the SDF draw path; the public VkRenderer API
+  # is source-compatible (the optional sdfInitialAtlasDim param now sizes a page).
+  VERSION_PREFIX: 5.0.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

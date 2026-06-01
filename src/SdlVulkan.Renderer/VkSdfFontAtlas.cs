@@ -40,78 +40,122 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     private const float SdfRasterSize = 128f;
 
     /// <summary>
-    /// Default initial atlas dimension, sized so roughly 256 max-extent glyphs
-    /// fit before the first <see cref="Grow"/> — enough for typical startup UI
-    /// (ASCII + punctuation + common emoji) without the first-frame Grow fallout
-    /// that the old fixed 512 hit at higher raster sizes.
+    /// Default page dimension. The atlas is a list of fixed-size square pages of this size;
+    /// when a page fills, a NEW page is appended (no realloc, no GPU drain, no re-upload), so
+    /// this is the placement granularity, not a glyph cap. Power-of-two so a glyph's page index
+    /// can be recovered exactly from its virtual V coordinate (see <see cref="InsertRasterized"/>
+    /// and <see cref="DecodePage"/>).
     /// </summary>
-    private const int DefaultInitialAtlasDim = (int)SdfRasterSize * 16;
+    private const int DefaultInitialAtlasDim = (int)SdfRasterSize * 16; // 2048
 
-    private int _atlasWidth;
-    private int _atlasHeight;
-    private int _cursorX;
-    private int _cursorY;
-    private int _rowHeight;
+    // Max resident pages before falling back to evict-all. 8 × 2048² × 1 byte ≈ 32 MB worst case.
+    private const int MaxPages = 8;
 
-    // Single-channel staging buffer (1 byte per pixel)
-    private byte[] _staging;
+    /// <summary>One physical SDF page texture + its bookkeeping. Pages are never reallocated:
+    /// a full page is left in place and a new page appended. That is what makes growth free —
+    /// existing pages stay uploaded and bound; only new glyphs land on a fresh page.</summary>
+    private sealed class Page
+    {
+        public VkImage Image;
+        public VkDeviceMemory ImageMemory;
+        public VkImageView ImageView;
+        public VkDescriptorSet DescriptorSet;
+        public byte[] Staging = [];                       // 1 byte per pixel, _pageDim²
+        public int CursorX, CursorY, RowHeight;
+        public int DirtyX0, DirtyY0, DirtyX1, DirtyY1;
+        // Image starts UNDEFINED; the first FlushPage transitions from there, not ShaderReadOnly.
+        public bool NeedsInitialTransition;
+        // Per-frame upload ring — slot k reused only after BeginFrame waited on its fence.
+        public readonly VkBuffer[] UploadBuffers = new VkBuffer[VulkanContext.MaxFramesInFlight];
+        public readonly VkDeviceMemory[] UploadMemories = new VkDeviceMemory[VulkanContext.MaxFramesInFlight];
+        public readonly ulong[] UploadSizes = new ulong[VulkanContext.MaxFramesInFlight];
+    }
 
-    private int _dirtyX0, _dirtyY0, _dirtyX1, _dirtyY1;
+    private readonly List<Page> _pages = new();
+    private int _pageDim;          // fixed square page size (power of two)
     private bool _needsEviction;
-    // Set when a glyph doesn't fit but the atlas can still grow. The actual Grow() (destroy +
-    // recreate the VkImage, rebind its descriptor) is deferred to BeginFrame — performing it
-    // mid-frame from InsertRasterized wedges the Adreno tiler's next vkQueueSubmit. Mirrors
-    // _needsEviction's deferred-to-BeginFrame handling.
-    private bool _needsGrow;
+    private VkSampler _sampler;    // shared across all pages (identical params)
 
-    private VkImage _image;
-    private VkDeviceMemory _imageMemory;
-    private VkImageView _imageView;
-    private VkSampler _sampler;
-
-    // Per-frame upload ring — one slot per frame-in-flight. The previous design
-    // used a single shared slot and a vkDeviceWaitIdle() on every Flush to make
-    // sure the previous frame's vkCmdCopyBufferToImage had finished reading
-    // before we overwrote it. That was a full-GPU stall on every atlas update.
-    // With N slots indexed by _ctx.CurrentFrame, slot k is only reused after
-    // BeginFrame waited on the fence that guards its last submit — so the GPU
-    // is guaranteed done with it. No stall needed.
-    private readonly VkBuffer[] _uploadBuffers = new VkBuffer[VulkanContext.MaxFramesInFlight];
-    private readonly VkDeviceMemory[] _uploadMemories = new VkDeviceMemory[VulkanContext.MaxFramesInFlight];
-    private readonly ulong[] _uploadBufferSizes = new ulong[VulkanContext.MaxFramesInFlight];
-
-    // Set whenever CreateImage allocates a fresh VkImage (initial + every Grow).
-    // The image starts in VK_IMAGE_LAYOUT_UNDEFINED; first Flush must transition
-    // from Undefined (not ShaderReadOnlyOptimal, which requires prior data).
-    // Previous code transitioned via ctx.ExecuteOneShot during CreateImage — that
-    // worked in isolation but submitting a side command buffer to the graphics
-    // queue while the frame's command buffer is in recording state makes some
-    // drivers return VK_ERROR_INITIALIZATION_FAILED from the next vkQueueSubmit.
-    private bool _needsInitialTransition;
-
-    // Own descriptor set for the SDF atlas texture
-    private VkDescriptorSet _descriptorSet;
-
-    public VkImageView ImageView => _imageView;
+    public int PageCount => _pages.Count;
+    public VkDescriptorSet GetPageDescriptorSet(int pageIndex) => _pages[pageIndex].DescriptorSet;
     public VkSampler Sampler => _sampler;
-    public VkDescriptorSet DescriptorSet => _descriptorSet;
-    public bool IsDirty => _needsEviction || (_dirtyX0 < _dirtyX1 && _dirtyY0 < _dirtyY1);
+
+    public bool IsDirty
+    {
+        get
+        {
+            if (_needsEviction) return true;
+            foreach (var p in _pages)
+                if (p.DirtyX0 < p.DirtyX1 && p.DirtyY0 < p.DirtyY1) return true;
+            return false;
+        }
+    }
+
+    /// <summary>Recover which page a glyph lives on and its page-local V range from the virtual V
+    /// encoded at insert time (V is normalized over the MaxPages-tall virtual stack). Exact while
+    /// <see cref="_pageDim"/> and <see cref="MaxPages"/> are powers of two. U is already page-local.</summary>
+    public void DecodePage(in GlyphInfo g, out int page, out float localV0, out float localV1)
+    {
+        var vy = g.V0 * MaxPages;
+        page = (int)vy;
+        localV0 = vy - page;
+        localV1 = g.V1 * MaxPages - page;
+    }
 
     public VkSdfFontAtlas(VulkanContext ctx, ManagedFontRasterizer rasterizer, int initialWidth = DefaultInitialAtlasDim, int initialHeight = DefaultInitialAtlasDim)
     {
         _ctx = ctx;
         _rasterizer = rasterizer;
-        // Never let the atlas grow past what the GPU can allocate.
+        // Page dimension = the requested size, clamped to the device limit and rounded DOWN to a
+        // power of two (so DecodePage's (int)(V*MaxPages) recovers the page index exactly).
+        // initialHeight is ignored — pages are square _pageDim. The atlas never grows the page;
+        // it appends new pages instead, so this is granularity, not a cap.
         _maxAtlasSize = Math.Min(MaxAtlasSize, (int)ctx.MaxImageDimension2D);
-        _atlasWidth = initialWidth;
-        _atlasHeight = initialHeight;
-        _staging = new byte[initialWidth * initialHeight]; // 1 byte per pixel
-        ResetDirtyRegion();
+        _pageDim = PrevPowerOfTwo(Math.Min(initialWidth, _maxAtlasSize));
 
-        CreateImage(initialWidth, initialHeight);
-        CreateSampler();
-        _descriptorSet = ctx.AllocateDescriptorSet();
-        ctx.UpdateDescriptorSet(_descriptorSet, _imageView, _sampler);
+        CreateSampler();     // shared by every page
+        AllocateNewPage();   // start with one page
+    }
+
+    private static int PrevPowerOfTwo(int n)
+    {
+        var p = 1;
+        while (p * 2 <= n) p *= 2;
+        return p;
+    }
+
+    /// <summary>Append a fresh page: allocate its image + descriptor set, no GPU drain. This is the
+    /// "grow" replacement — O(1), never touches existing pages.</summary>
+    private Page AllocateNewPage()
+    {
+        var page = new Page
+        {
+            Staging = new byte[_pageDim * _pageDim],
+            DirtyX0 = _pageDim, DirtyY0 = _pageDim, DirtyX1 = 0, DirtyY1 = 0,
+        };
+        CreateImage(page, _pageDim, _pageDim);
+        page.DescriptorSet = _ctx.AllocateDescriptorSet();
+        _ctx.UpdateDescriptorSet(page.DescriptorSet, page.ImageView, _sampler);
+        _pages.Add(page);
+        RenderDiag.Log("sdf.newpage", $"page {_pages.Count - 1} allocated {_pageDim}x{_pageDim}");
+        return page;
+    }
+
+    private void DestroyPage(Page p)
+    {
+        var api = _ctx.DeviceApi;
+        _ctx.FreeDescriptorSet(p.DescriptorSet);
+        for (var i = 0; i < VulkanContext.MaxFramesInFlight; i++)
+        {
+            if (p.UploadBuffers[i] != VkBuffer.Null)
+            {
+                api.vkDestroyBuffer(p.UploadBuffers[i]);
+                api.vkFreeMemory(p.UploadMemories[i]);
+            }
+        }
+        api.vkDestroyImageView(p.ImageView);
+        api.vkDestroyImage(p.Image);
+        api.vkFreeMemory(p.ImageMemory);
     }
 
     public void BeginFrame()
@@ -120,15 +164,6 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         {
             EvictAll();
             _needsEviction = false;
-        }
-        // Perform a pending atlas grow HERE, before this frame records any glyph insert / Flush / draw.
-        // Growing destroys + recreates the atlas VkImage and rebinds its descriptor; it's deferred out
-        // of InsertRasterized so the swap never lands mid-command-buffer (the Adreno submit wedge).
-        // Grow()'s own vkDeviceWaitIdle still drains the other in-flight frame, so the swap is safe here.
-        if (_needsGrow)
-        {
-            Grow();
-            _needsGrow = false;
         }
     }
 
@@ -156,40 +191,49 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
     public void Flush(VkCommandBuffer cmd)
     {
-        if (_dirtyX0 >= _dirtyX1 || _dirtyY0 >= _dirtyY1)
-            return;
+        // Pick this frame's upload slot. BeginFrame has already waited on the fence that guards
+        // this slot's last submit, so the GPU is done with each page's slot-k upload buffer.
+        var slot = _ctx.CurrentFrame;
+        var any = false;
+        foreach (var page in _pages)
+            any |= FlushPage(cmd, page, slot);
+        // A glyph is "unflushed" until its page is uploaded; the loop flushes every dirty page in
+        // this one command buffer, so once it returns all pages are current.
+        if (any) _unflushedGlyphs.Clear();
+    }
 
-        var regionW = _dirtyX1 - _dirtyX0;
-        var regionH = _dirtyY1 - _dirtyY0;
+    private bool FlushPage(VkCommandBuffer cmd, Page page, int slot)
+    {
+        if (page.DirtyX0 >= page.DirtyX1 || page.DirtyY0 >= page.DirtyY1)
+            return false;
+
+        var regionW = page.DirtyX1 - page.DirtyX0;
+        var regionH = page.DirtyY1 - page.DirtyY0;
         var pixelCount = regionW * regionH;
 
         // Extract dirty region into contiguous buffer (1 byte per pixel)
         var data = new byte[pixelCount];
         for (var row = 0; row < regionH; row++)
         {
-            var srcOffset = (_dirtyY0 + row) * _atlasWidth + _dirtyX0;
+            var srcOffset = (page.DirtyY0 + row) * _pageDim + page.DirtyX0;
             var dstOffset = row * regionW;
-            Buffer.BlockCopy(_staging, srcOffset, data, dstOffset, regionW);
+            Buffer.BlockCopy(page.Staging, srcOffset, data, dstOffset, regionW);
         }
 
         var bufferSize = (ulong)pixelCount;
-
-        // Pick this frame's upload slot. BeginFrame has already waited on the
-        // fence that guards this slot's last submit, so the GPU is done with it.
-        var slot = _ctx.CurrentFrame;
-        EnsureUploadBuffer(slot, bufferSize);
+        EnsureUploadBuffer(page, slot, bufferSize);
 
         void* mapped;
-        _ctx.DeviceApi.vkMapMemory(_uploadMemories[slot], 0, bufferSize, 0, &mapped);
+        _ctx.DeviceApi.vkMapMemory(page.UploadMemories[slot], 0, bufferSize, 0, &mapped);
         fixed (byte* pData = data)
             Buffer.MemoryCopy(pData, mapped, bufferSize, bufferSize);
-        _ctx.DeviceApi.vkUnmapMemory(_uploadMemories[slot]);
+        _ctx.DeviceApi.vkUnmapMemory(page.UploadMemories[slot]);
 
-        // First Flush after CreateImage: image is still in Undefined layout, so
-        // transition from there. Subsequent flushes transition from ShaderReadOnly.
-        var srcLayout = _needsInitialTransition ? VkImageLayout.Undefined : VkImageLayout.ShaderReadOnlyOptimal;
-        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, srcLayout, VkImageLayout.TransferDstOptimal);
-        _needsInitialTransition = false;
+        // First flush of a page: its image is still Undefined, so transition from there.
+        // Subsequent flushes transition from ShaderReadOnly.
+        var srcLayout = page.NeedsInitialTransition ? VkImageLayout.Undefined : VkImageLayout.ShaderReadOnlyOptimal;
+        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, page.Image, srcLayout, VkImageLayout.TransferDstOptimal);
+        page.NeedsInitialTransition = false;
 
         VkBufferImageCopy region = new()
         {
@@ -197,36 +241,25 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             bufferRowLength = 0,
             bufferImageHeight = 0,
             imageSubresource = new VkImageSubresourceLayers(VkImageAspectFlags.Color, 0, 0, 1),
-            imageOffset = new VkOffset3D(_dirtyX0, _dirtyY0, 0),
+            imageOffset = new VkOffset3D(page.DirtyX0, page.DirtyY0, 0),
             imageExtent = new VkExtent3D((uint)regionW, (uint)regionH, 1)
         };
-        _ctx.DeviceApi.vkCmdCopyBufferToImage(cmd, _uploadBuffers[slot], _image, VkImageLayout.TransferDstOptimal, 1, &region);
+        _ctx.DeviceApi.vkCmdCopyBufferToImage(cmd, page.UploadBuffers[slot], page.Image, VkImageLayout.TransferDstOptimal, 1, &region);
 
-        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, VkImageLayout.TransferDstOptimal, VkImageLayout.ShaderReadOnlyOptimal);
+        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, page.Image, VkImageLayout.TransferDstOptimal, VkImageLayout.ShaderReadOnlyOptimal);
 
-        ResetDirtyRegion();
-        _unflushedGlyphs.Clear();
+        page.DirtyX0 = _pageDim; page.DirtyY0 = _pageDim;
+        page.DirtyX1 = 0; page.DirtyY1 = 0;
+        return true;
     }
 
     public void Dispose()
     {
-        var api = _ctx.DeviceApi;
-
-        _ctx.FreeDescriptorSet(_descriptorSet);
-
-        for (var i = 0; i < VulkanContext.MaxFramesInFlight; i++)
-        {
-            if (_uploadBuffers[i] != VkBuffer.Null)
-            {
-                api.vkDestroyBuffer(_uploadBuffers[i]);
-                api.vkFreeMemory(_uploadMemories[i]);
-            }
-        }
-
-        api.vkDestroySampler(_sampler);
-        api.vkDestroyImageView(_imageView);
-        api.vkDestroyImage(_image);
-        api.vkFreeMemory(_imageMemory);
+        // Caller (VkRenderer.Dispose) ensures the GPU is idle before disposing the renderer.
+        foreach (var page in _pages)
+            DestroyPage(page);
+        _pages.Clear();
+        _ctx.DeviceApi.vkDestroySampler(_sampler);
     }
 
     private GlyphInfo RasterizeGlyph(GlyphKey key, int charCode = -1, GlyphMapHint hint = GlyphMapHint.Auto)
@@ -249,9 +282,9 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     }
 
     /// <summary>
-    /// Serial atlas-insertion path: cursor placement, staging-buffer blit, _glyphs dict
-    /// insert. Caller must already hold the rasterized SDF bitmap. Mutates atlas state
-    /// (cursor, _staging, _glyphs, _unflushedGlyphs, dirty region) and may trigger Grow()
+    /// Serial atlas-insertion path: per-page cursor placement, staging-buffer blit, _glyphs dict
+    /// insert. Caller must already hold the rasterized SDF bitmap. Mutates page state (cursor,
+    /// staging, dirty region) + _glyphs/_unflushedGlyphs and may append a new page
     /// — must NOT be called concurrently from multiple threads.
     /// </summary>
     private GlyphInfo InsertRasterized(GlyphKey key, SdfGlyphBitmap bitmap)
@@ -260,53 +293,58 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         var glyphHeight = bitmap.Height;
 
         if (glyphWidth == 0 || glyphHeight == 0) return default;
+        // A glyph bigger than a whole page can never be placed (shouldn't happen at 128px raster).
+        if (glyphWidth > _pageDim || glyphHeight > _pageDim) return default;
 
-        if (_cursorX + glyphWidth > _atlasWidth)
+        var pageIdx = _pages.Count - 1;
+        var page = _pages[pageIdx];
+
+        // Advance to a new row if the glyph overflows the current row.
+        if (page.CursorX + glyphWidth > _pageDim)
         {
-            _cursorX = 0;
-            _cursorY += _rowHeight + 1;
-            _rowHeight = 0;
+            page.CursorX = 0;
+            page.CursorY += page.RowHeight + 1;
+            page.RowHeight = 0;
         }
 
-        if (_cursorY + glyphHeight > _atlasHeight)
+        // Overflows the page → APPEND A NEW PAGE (no grow, no vkDeviceWaitIdle, no re-upload of
+        // existing pages). Only when all pages are full do we fall back to a (deferred) evict-all.
+        if (page.CursorY + glyphHeight > _pageDim)
         {
-            if (_atlasWidth < _maxAtlasSize || _atlasHeight < _maxAtlasSize)
+            if (_pages.Count >= MaxPages)
             {
-                // Defer the grow to the next BeginFrame rather than swapping the atlas image here.
-                // InsertRasterized runs mid-frame (prewarm, on-demand GetGlyph during a draw);
-                // destroying + recreating the VkImage and rebinding its descriptor while the frame's
-                // command buffer already has draws bound to the OLD image makes the Adreno tiler fail
-                // the next vkQueueSubmit (VK_ERROR_INITIALIZATION_FAILED). BeginFrame grows before any
-                // draw is recorded. This glyph lands a frame later — the caller treats a default
-                // (Width=0) GlyphInfo as not-yet-available, exactly like the deferred-eviction path below.
-                _needsGrow = true;
+                // Log once per full-episode (not per rejected glyph). Caller treats Width=0 as
+                // not-yet-available and retries next frame, exactly like the old grow/evict path.
+                if (!_needsEviction)
+                    RenderDiag.Log("sdf.pagecap", $"all {MaxPages} pages full glyphs={_glyphs.Count} — evict deferred");
+                _needsEviction = true;
                 return default;
             }
-            // Log once per full-episode (not per rejected glyph) — under thrash this fires every frame.
-            if (!_needsEviction)
-                RenderDiag.Log("sdf.full", $"atlas full {_atlasWidth}x{_atlasHeight} glyphs={_glyphs.Count} — will evict next frame");
-            _needsEviction = true;
-            return default;
+            pageIdx = _pages.Count;
+            page = AllocateNewPage();
         }
 
-        // Blit single-channel SDF data into staging buffer
+        // Blit single-channel SDF data into this page's staging buffer.
         for (var row = 0; row < glyphHeight; row++)
         {
             var srcOffset = row * glyphWidth;
-            var dstOffset = (_cursorY + row) * _atlasWidth + _cursorX;
-            Buffer.BlockCopy(bitmap.Alpha, srcOffset, _staging, dstOffset, glyphWidth);
+            var dstOffset = (page.CursorY + row) * _pageDim + page.CursorX;
+            Buffer.BlockCopy(bitmap.Alpha, srcOffset, page.Staging, dstOffset, glyphWidth);
         }
 
-        _dirtyX0 = Math.Min(_dirtyX0, _cursorX);
-        _dirtyY0 = Math.Min(_dirtyY0, _cursorY);
-        _dirtyX1 = Math.Max(_dirtyX1, _cursorX + glyphWidth);
-        _dirtyY1 = Math.Max(_dirtyY1, _cursorY + glyphHeight);
+        page.DirtyX0 = Math.Min(page.DirtyX0, page.CursorX);
+        page.DirtyY0 = Math.Min(page.DirtyY0, page.CursorY);
+        page.DirtyX1 = Math.Max(page.DirtyX1, page.CursorX + glyphWidth);
+        page.DirtyY1 = Math.Max(page.DirtyY1, page.CursorY + glyphHeight);
 
+        // U is page-local (every page shares the same width). V is the VIRTUAL y over the
+        // MaxPages-tall stack so the page index is recoverable from V alone (see DecodePage).
+        var virtDenom = (float)(MaxPages * _pageDim);
         var glyphInfo = new GlyphInfo(
-            U0: _cursorX / (float)_atlasWidth,
-            V0: _cursorY / (float)_atlasHeight,
-            U1: (_cursorX + glyphWidth) / (float)_atlasWidth,
-            V1: (_cursorY + glyphHeight) / (float)_atlasHeight,
+            U0: page.CursorX / (float)_pageDim,
+            V0: (pageIdx * _pageDim + page.CursorY) / virtDenom,
+            U1: (page.CursorX + glyphWidth) / (float)_pageDim,
+            V1: (pageIdx * _pageDim + page.CursorY + glyphHeight) / virtDenom,
             Width: glyphWidth,
             Height: glyphHeight,
             AdvanceX: bitmap.AdvanceX,
@@ -316,8 +354,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
         _glyphs[key] = glyphInfo;
         _unflushedGlyphs.Add(key);
-        _cursorX += glyphWidth + 1;
-        _rowHeight = Math.Max(_rowHeight, glyphHeight);
+        page.CursorX += glyphWidth + 1;
+        page.RowHeight = Math.Max(page.RowHeight, glyphHeight);
         return glyphInfo;
     }
 
@@ -367,8 +405,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
                 : _rasterizer.RasterizeGlyphSdf(atlasKey.Font, atlasKey.Size, atlasKey.Character, SdfSpread);
         });
 
-        // Phase 3: serial atlas insertion. Cursor / staging / _glyphs / _unflushedGlyphs
-        // are not thread-safe and Grow() must run in isolation.
+        // Phase 3: serial atlas insertion. Per-page cursor / staging / _glyphs / _unflushedGlyphs
+        // are not thread-safe and page allocation must run in isolation.
         for (var i = 0; i < toRasterize.Count; i++)
             InsertRasterized(toRasterize[i].AtlasKey, bitmaps[i]);
 
@@ -381,62 +419,33 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         }
     }
 
-    private void Grow()
-    {
-        var oldWidth = _atlasWidth;
-        var oldHeight = _atlasHeight;
-
-        _atlasWidth = Math.Min(_atlasWidth * 2, _maxAtlasSize);
-        _atlasHeight = Math.Min(_atlasHeight * 2, _maxAtlasSize);
-
-        var newStaging = new byte[_atlasWidth * _atlasHeight];
-        for (var row = 0; row < oldHeight; row++)
-        {
-            var srcOffset = row * oldWidth;
-            var dstOffset = row * _atlasWidth;
-            Buffer.BlockCopy(_staging, srcOffset, newStaging, dstOffset, oldWidth);
-        }
-        _staging = newStaging;
-
-        var scaleX = (float)oldWidth / _atlasWidth;
-        var scaleY = (float)oldHeight / _atlasHeight;
-        var keys = new GlyphKey[_glyphs.Count];
-        _glyphs.Keys.CopyTo(keys, 0);
-        foreach (var key in keys)
-        {
-            var g = _glyphs[key];
-            _glyphs[key] = g with { U0 = g.U0 * scaleX, V0 = g.V0 * scaleY, U1 = g.U1 * scaleX, V1 = g.V1 * scaleY };
-        }
-
-        var api = _ctx.DeviceApi;
-        // Drain the GPU before swapping the atlas image. BeginFrame only waited on the fence from
-        // MaxFramesInFlight-2 frames ago, so frame N-1 may still be sampling the old image through this
-        // descriptor when frame N grows — a use-after-free / in-use-descriptor hazard. Lenient desktop
-        // drivers tolerate it, but strict tilers (e.g. Qualcomm Adreno on Windows-on-ARM) fail the next
-        // vkQueueSubmit. Grows are rare (the atlas only doubles), so a full device idle here is cheap.
-        api.vkDeviceWaitIdle();
-        api.vkDestroyImageView(_imageView);
-        api.vkDestroyImage(_image);
-        api.vkFreeMemory(_imageMemory);
-        CreateImage(_atlasWidth, _atlasHeight);
-        _ctx.UpdateDescriptorSet(_descriptorSet, _imageView, _sampler);
-
-        _dirtyX0 = 0; _dirtyY0 = 0;
-        _dirtyX1 = _atlasWidth; _dirtyY1 = _atlasHeight;
-        RenderDiag.Log("sdf.grow", $"{oldWidth}x{oldHeight}->{_atlasWidth}x{_atlasHeight} glyphs={_glyphs.Count}");
-    }
-
     private void EvictAll()
     {
-        RenderDiag.Log("sdf.evict", $"wiping {_glyphs.Count} glyphs at {_atlasWidth}x{_atlasHeight}");
+        RenderDiag.Log("sdf.evict", $"wiping {_glyphs.Count} glyphs across {_pages.Count} page(s)");
         _glyphs.Clear();
-        _cursorX = 0; _cursorY = 0; _rowHeight = 0;
-        _staging = new byte[_atlasWidth * _atlasHeight];
-        _dirtyX0 = 0; _dirtyY0 = 0;
-        _dirtyX1 = _atlasWidth; _dirtyY1 = _atlasHeight;
+        // Destroy every extra page (1..N-1); page 0 is reset in place. Those pages' descriptor sets may
+        // still be referenced by the previous frame's draws, so a single device-idle is needed here —
+        // but this is the ONLY remaining drain and fires only when all MaxPages are full (≈never).
+        if (_pages.Count > 1)
+        {
+            _ctx.DeviceApi.vkDeviceWaitIdle();
+            for (var i = _pages.Count - 1; i >= 1; i--)
+            {
+                DestroyPage(_pages[i]);
+                _pages.RemoveAt(i);
+            }
+        }
+
+        // Reset page 0 in place: clear its staging + cursor and mark it fully dirty so the next Flush
+        // re-uploads the cleared pixels. Its image is already valid (no new initial transition needed).
+        var p0 = _pages[0];
+        p0.CursorX = 0; p0.CursorY = 0; p0.RowHeight = 0;
+        Array.Clear(p0.Staging, 0, p0.Staging.Length);
+        p0.DirtyX0 = 0; p0.DirtyY0 = 0;
+        p0.DirtyX1 = _pageDim; p0.DirtyY1 = _pageDim;
     }
 
-    private void CreateImage(int width, int height)
+    private void CreateImage(Page page, int width, int height)
     {
         var api = _ctx.DeviceApi;
 
@@ -453,30 +462,29 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             sharingMode = VkSharingMode.Exclusive,
             initialLayout = VkImageLayout.Undefined
         };
-        api.vkCreateImage(&imageCI, null, out _image).CheckResult();
+        api.vkCreateImage(&imageCI, null, out page.Image).CheckResult();
 
-        api.vkGetImageMemoryRequirements(_image, out var memReqs);
+        api.vkGetImageMemoryRequirements(page.Image, out var memReqs);
         VkMemoryAllocateInfo allocInfo = new()
         {
             allocationSize = memReqs.size,
             memoryTypeIndex = _ctx.FindMemoryType(memReqs.memoryTypeBits, VkMemoryPropertyFlags.DeviceLocal)
         };
-        api.vkAllocateMemory(&allocInfo, null, out _imageMemory).CheckResult();
-        api.vkBindImageMemory(_image, _imageMemory, 0);
+        api.vkAllocateMemory(&allocInfo, null, out page.ImageMemory).CheckResult();
+        api.vkBindImageMemory(page.Image, page.ImageMemory, 0);
 
-        // Defer the Undefined -> TransferDst transition to the next Flush, which
-        // records into the frame's command buffer. A one-shot submit here would
-        // collide with an in-recording frame cmd buffer on some drivers
-        // (VK_ERROR_INITIALIZATION_FAILED from the next vkQueueSubmit).
-        _needsInitialTransition = true;
+        // Defer the Undefined -> TransferDst transition to the first FlushPage, which records into the
+        // frame's command buffer. A one-shot submit here would collide with an in-recording frame cmd
+        // buffer on some drivers (VK_ERROR_INITIALIZATION_FAILED from the next vkQueueSubmit).
+        page.NeedsInitialTransition = true;
 
         // Swizzle R channel into all RGBA channels so the sampler reads the SDF
         // value consistently regardless of which component the shader samples
         var viewCI = new VkImageViewCreateInfo(
-            _image, VkImageViewType.Image2D, VkFormat.R8Unorm,
+            page.Image, VkImageViewType.Image2D, VkFormat.R8Unorm,
             new VkComponentMapping(VkComponentSwizzle.R, VkComponentSwizzle.R, VkComponentSwizzle.R, VkComponentSwizzle.R),
             new VkImageSubresourceRange(VkImageAspectFlags.Color, 0, 1, 0, 1));
-        api.vkCreateImageView(&viewCI, null, out _imageView).CheckResult();
+        api.vkCreateImageView(&viewCI, null, out page.ImageView).CheckResult();
     }
 
     private void CreateSampler()
@@ -496,20 +504,20 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         _ctx.DeviceApi.vkCreateSampler(&samplerCI, null, out _sampler).CheckResult();
     }
 
-    private void EnsureUploadBuffer(int slot, ulong size)
+    private void EnsureUploadBuffer(Page page, int slot, ulong size)
     {
-        if (_uploadBuffers[slot] != VkBuffer.Null && _uploadBufferSizes[slot] >= size)
+        if (page.UploadBuffers[slot] != VkBuffer.Null && page.UploadSizes[slot] >= size)
             return;
 
         var api = _ctx.DeviceApi;
 
-        if (_uploadBuffers[slot] != VkBuffer.Null)
+        if (page.UploadBuffers[slot] != VkBuffer.Null)
         {
             // Slot grows only when the dirty region is larger than the previous peak
             // for this slot — by the time we're here BeginFrame has waited on the
             // matching fence, so destroying the previous allocation is safe.
-            api.vkDestroyBuffer(_uploadBuffers[slot]);
-            api.vkFreeMemory(_uploadMemories[slot]);
+            api.vkDestroyBuffer(page.UploadBuffers[slot]);
+            api.vkFreeMemory(page.UploadMemories[slot]);
         }
 
         VkBufferCreateInfo bufCI = new()
@@ -518,23 +526,17 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             usage = VkBufferUsageFlags.TransferSrc,
             sharingMode = VkSharingMode.Exclusive
         };
-        api.vkCreateBuffer(&bufCI, null, out _uploadBuffers[slot]).CheckResult();
+        api.vkCreateBuffer(&bufCI, null, out page.UploadBuffers[slot]).CheckResult();
 
-        api.vkGetBufferMemoryRequirements(_uploadBuffers[slot], out var memReqs);
+        api.vkGetBufferMemoryRequirements(page.UploadBuffers[slot], out var memReqs);
         VkMemoryAllocateInfo allocInfo = new()
         {
             allocationSize = memReqs.size,
             memoryTypeIndex = _ctx.FindMemoryType(memReqs.memoryTypeBits,
                 VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent)
         };
-        api.vkAllocateMemory(&allocInfo, null, out _uploadMemories[slot]).CheckResult();
-        api.vkBindBufferMemory(_uploadBuffers[slot], _uploadMemories[slot], 0);
-        _uploadBufferSizes[slot] = size;
-    }
-
-    private void ResetDirtyRegion()
-    {
-        _dirtyX0 = _atlasWidth; _dirtyY0 = _atlasHeight;
-        _dirtyX1 = 0; _dirtyY1 = 0;
+        api.vkAllocateMemory(&allocInfo, null, out page.UploadMemories[slot]).CheckResult();
+        api.vkBindBufferMemory(page.UploadBuffers[slot], page.UploadMemories[slot], 0);
+        page.UploadSizes[slot] = size;
     }
 }
