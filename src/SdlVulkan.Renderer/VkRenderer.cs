@@ -831,8 +831,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
 
+        // rasterizeOnMiss: false — the draw path must never rasterize on the render thread. A glyph
+        // not yet in the atlas is queued for background rasterization and skipped this frame (Width=0);
+        // it appears once DrainPendingRasterized inserts it (a redraw is kept alive via IsDirty).
         var glyph = _sdfFontAtlas.GetGlyph(fontPath, _glyphBatchFontSize, character,
-            skipUnflushed: true, charCode: charCode, hint: hint);
+            skipUnflushed: true, charCode: charCode, hint: hint, rasterizeOnMiss: false);
         AddBatchedSdfGlyph(glyph, inkX, inkY, rotation, xScale);
     }
 
@@ -932,8 +935,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
 
+        // rasterizeOnMiss: false — see AddBatchedSdfGlyph. Not-yet-rasterized glyphs queue + skip.
         var glyph = _sdfFontAtlas.GetGlyph(fontPath, _glyphBatchFontSize, character,
-            skipUnflushed: true, charCode: charCode, hint: hint);
+            skipUnflushed: true, charCode: charCode, hint: hint, rasterizeOnMiss: false);
         if (glyph.Width == 0) return;
 
         // BearingX/BearingY on the SDF atlas are to the SDF TEXTURE edges (inc. spread padding).
