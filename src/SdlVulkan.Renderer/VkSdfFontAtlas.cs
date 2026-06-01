@@ -48,8 +48,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     /// </summary>
     private const int DefaultInitialAtlasDim = (int)SdfRasterSize * 16; // 2048
 
-    // Max resident pages before falling back to evict-all. 8 × 2048² × 1 byte ≈ 32 MB worst case.
-    private const int MaxPages = 8;
+    // Max resident pages before falling back to evict-all. 16 × 2048² × 1 byte ≈ 64 MB worst case.
+    // 8 was tight for glyph-heavy docs (many embedded subset fonts, or CJK with thousands of unique
+    // glyphs): the atlas filled every page and then EvictAll thrashed — a vkDeviceWaitIdle drain plus
+    // a full glyph re-raster on each scroll (the jank). 16 roughly doubles the working set first.
+    private const int MaxPages = 16;
 
     /// <summary>One physical SDF page texture + its bookkeeping. Pages are never reallocated:
     /// a full page is left in place and a new page appended. That is what makes growth free —
