@@ -1,12 +1,21 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using Vortice.Vulkan;
 using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer;
 
+/// <summary>
+/// Per-window swapchain + frame loop. Owns the surface, swapchain, framebuffers, per-frame sync,
+/// the per-frame vertex ring, and the per-frame command buffers. The device-level state (logical
+/// device, queue, command pool, render pass, descriptor pool/layout, pipeline layout) lives in a
+/// shared <see cref="VulkanDevice"/> that this context references and forwards — so several windows
+/// can present from one device. A context disposes the device only when it created it (the
+/// single-window and offscreen paths); shared-device windows leave teardown to the device owner.
+/// </summary>
 public sealed unsafe partial class VulkanContext : IDisposable
 {
+    private readonly VulkanDevice _dev;
+    private readonly bool _ownsDevice;
     private readonly uint _vertexBufferSize;
     /// <summary>
     /// Number of frames in flight on the GPU. Exposed so side-car resources
@@ -15,50 +24,43 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// <see cref="CurrentFrame"/> to index ring-buffered resources.
     /// </summary>
     public const int MaxFramesInFlight = 2;
-    private const uint MaxDescriptorSets = 512; // font atlas + textures
     // Cap the per-frame in-flight fence wait (ns) so a never-signaled fence can't hard-freeze the loop.
     // 2s is hundreds of times a normal frame; only a stuck GPU / non-signaling driver reaches it, and a
-    // timeout is routed into GPU-error recovery (recreate sync + swapchain) via the event loop's catch.
+    // timeout is routed into the same GPU-error recovery the event loop uses (recreate sync + swapchain).
     private const ulong FenceWaitTimeoutNs = 2_000_000_000UL;
 
-    public VkInstance Instance { get; }
-    public VkInstanceApi InstanceApi { get; }
-    public VkPhysicalDevice PhysicalDevice { get; }
-    public VkDevice Device { get; }
-    public VkDeviceApi DeviceApi { get; }
-    public VkQueue GraphicsQueue { get; }
-    public uint GraphicsQueueFamily { get; }
-    public VkCommandPool CommandPool { get; }
-    public VkRenderPass RenderPass { get; }
-    public VkDescriptorPool DescriptorPool { get; }
-    public VkDescriptorSetLayout DescriptorSetLayout { get; }
-    public VkDescriptorSet DescriptorSet { get; private set; }
-    public VkPipelineLayout PipelineLayout { get; }
+    /// <summary>The shared device backing this window. GPU resources reused across windows (font
+    /// atlases, textures, pipelines) are created against this rather than the context.</summary>
+    public VulkanDevice GraphicsDevice => _dev;
+
+    // Device-level members, forwarded to the shared VulkanDevice. Kept on the context so existing
+    // consumers (VkRenderer, VkFontAtlas, VkTexture, side-car pipelines) that read ctx.Device /
+    // ctx.RenderPass / ctx.PipelineLayout etc. continue to work whether or not the device is shared.
+    public VkInstance Instance => _dev.Instance;
+    public VkInstanceApi InstanceApi => _dev.InstanceApi;
+    public VkPhysicalDevice PhysicalDevice => _dev.PhysicalDevice;
+    public VkDevice Device => _dev.Device;
+    public VkDeviceApi DeviceApi => _dev.DeviceApi;
+    public VkQueue GraphicsQueue => _dev.GraphicsQueue;
+    public uint GraphicsQueueFamily => _dev.GraphicsQueueFamily;
+    public VkCommandPool CommandPool => _dev.CommandPool;
+    public VkRenderPass RenderPass => _dev.RenderPass;
+    public VkDescriptorPool DescriptorPool => _dev.DescriptorPool;
+    public VkDescriptorSetLayout DescriptorSetLayout => _dev.DescriptorSetLayout;
+    public VkDescriptorSet DescriptorSet => _dev.DescriptorSet;
+    public VkPipelineLayout PipelineLayout => _dev.PipelineLayout;
+
+    /// <summary>MSAA sample count (Count1 = no MSAA). Inherited from the shared device.</summary>
+    public VkSampleCountFlags MsaaSamples => _dev.MsaaSamples;
+
+    /// <summary>Device <c>maxImageDimension2D</c> limit. Forwarded from the shared device.</summary>
+    public uint MaxImageDimension2D => _dev.MaxImageDimension2D;
 
     // Swapchain state
     public VkSwapchainKHR Swapchain { get; private set; }
     public VkFormat SwapchainFormat { get; private set; }
     public uint SwapchainWidth { get; private set; }
     public uint SwapchainHeight { get; private set; }
-
-    /// <summary>MSAA sample count (Count1 = no MSAA).</summary>
-    public VkSampleCountFlags MsaaSamples { get; }
-
-    private uint _maxImageDimension2D;
-    /// <summary>Device limit <c>maxImageDimension2D</c> — the largest 2D image the GPU can allocate.
-    /// Queried lazily and cached. Consumers (e.g. the font atlas) clamp their growth to this.</summary>
-    public uint MaxImageDimension2D
-    {
-        get
-        {
-            if (_maxImageDimension2D == 0)
-            {
-                InstanceApi.vkGetPhysicalDeviceProperties(PhysicalDevice, out var props);
-                _maxImageDimension2D = props.limits.maxImageDimension2D;
-            }
-            return _maxImageDimension2D;
-        }
-    }
 
     private VkImage[] _swapchainImages = [];
     private VkImageView[] _swapchainImageViews = [];
@@ -94,141 +96,20 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private readonly VkSurfaceKHR _surface;
     private bool _disposed;
 
-    private VulkanContext(
-        VkInstance instance, VkInstanceApi instanceApi,
-        VkSurfaceKHR surface,
-        VkPhysicalDevice physicalDevice,
-        VkDevice device, VkDeviceApi deviceApi,
-        VkQueue graphicsQueue, uint graphicsQueueFamily,
-        VkCommandPool commandPool, VkRenderPass renderPass,
-        VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
-        VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout,
-        uint vertexBufferSize,
-        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
+    private VulkanContext(VulkanDevice device, VkSurfaceKHR surface, uint vertexBufferSize, bool ownsDevice)
     {
-        _vertexBufferSize = vertexBufferSize;
-        MsaaSamples = msaaSamples;
-        Instance = instance;
-        InstanceApi = instanceApi;
+        _dev = device;
         _surface = surface;
-        PhysicalDevice = physicalDevice;
-        Device = device;
-        DeviceApi = deviceApi;
-        GraphicsQueue = graphicsQueue;
-        GraphicsQueueFamily = graphicsQueueFamily;
-        CommandPool = commandPool;
-        RenderPass = renderPass;
-        DescriptorPool = descriptorPool;
-        DescriptorSetLayout = descriptorSetLayout;
-        DescriptorSet = descriptorSet;
-        PipelineLayout = pipelineLayout;
+        _vertexBufferSize = vertexBufferSize;
+        _ownsDevice = ownsDevice;
     }
 
     public static VulkanContext Create(VkInstance instance, VkSurfaceKHR surface, uint width, uint height,
         uint vertexBufferSize = 4 * 1024 * 1024, VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
     {
-        var instanceApi = GetApi(instance);
-
-        // Pick physical device
-        var physicalDevice = PickPhysicalDevice(instanceApi, surface, out var queueFamily);
-
-        // Create logical device
-        float queuePriority = 1.0f;
-        VkDeviceQueueCreateInfo queueCI = new()
-        {
-            queueFamilyIndex = queueFamily,
-            queueCount = 1,
-            pQueuePriorities = &queuePriority
-        };
-
-        using var extensionNames = new VkStringArray([VK_KHR_SWAPCHAIN_EXTENSION_NAME]);
-
-        VkDeviceCreateInfo deviceCI = new()
-        {
-            queueCreateInfoCount = 1,
-            pQueueCreateInfos = &queueCI,
-            enabledExtensionCount = extensionNames.Length,
-            ppEnabledExtensionNames = extensionNames
-        };
-
-        instanceApi.vkCreateDevice(physicalDevice, &deviceCI, null, out var device).CheckResult();
-        var deviceApi = GetApi(instance, device);
-
-        deviceApi.vkGetDeviceQueue(queueFamily, 0, out var graphicsQueue);
-
-        // Command pool
-        VkCommandPoolCreateInfo poolCI = new()
-        {
-            flags = VkCommandPoolCreateFlags.ResetCommandBuffer,
-            queueFamilyIndex = queueFamily
-        };
-        deviceApi.vkCreateCommandPool(&poolCI, null, out var commandPool).CheckResult();
-
-        // Render pass
-        var renderPass = CreateRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm, msaaSamples);
-
-        // Descriptor pool — large enough for font atlas + textures
-        // FreeDescriptorSet flag allows individual sets to be freed when textures are evicted
-        VkDescriptorPoolSize poolSize = new()
-        {
-            type = VkDescriptorType.CombinedImageSampler,
-            descriptorCount = MaxDescriptorSets
-        };
-        VkDescriptorPoolCreateInfo dpCI = new()
-        {
-            flags = VkDescriptorPoolCreateFlags.FreeDescriptorSet,
-            maxSets = MaxDescriptorSets,
-            poolSizeCount = 1,
-            pPoolSizes = &poolSize
-        };
-        deviceApi.vkCreateDescriptorPool(&dpCI, null, out var descriptorPool).CheckResult();
-
-        VkDescriptorSetLayoutBinding binding = new()
-        {
-            binding = 0,
-            descriptorType = VkDescriptorType.CombinedImageSampler,
-            descriptorCount = 1,
-            stageFlags = VkShaderStageFlags.Fragment
-        };
-        VkDescriptorSetLayoutCreateInfo dslCI = new()
-        {
-            bindingCount = 1,
-            pBindings = &binding
-        };
-        deviceApi.vkCreateDescriptorSetLayout(&dslCI, null, out var descriptorSetLayout).CheckResult();
-
-        // Allocate the font atlas descriptor set
-        var setLayout = descriptorSetLayout;
-        VkDescriptorSetAllocateInfo dsAI = new()
-        {
-            descriptorPool = descriptorPool,
-            descriptorSetCount = 1,
-            pSetLayouts = &setLayout
-        };
-        VkDescriptorSet descriptorSet;
-        deviceApi.vkAllocateDescriptorSets(&dsAI, &descriptorSet).CheckResult();
-
-        // Pipeline layout with push constants (84 bytes: mat4 + vec4 + float innerRadius) + 1 descriptor set
-        VkPushConstantRange pushRange = new()
-        {
-            stageFlags = VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment,
-            offset = 0,
-            size = 84
-        };
-        VkPipelineLayoutCreateInfo plCI = new()
-        {
-            setLayoutCount = 1,
-            pSetLayouts = &setLayout,
-            pushConstantRangeCount = 1,
-            pPushConstantRanges = &pushRange
-        };
-        deviceApi.vkCreatePipelineLayout(&plCI, null, out var pipelineLayout).CheckResult();
-
-        var ctx = new VulkanContext(
-            instance, instanceApi, surface, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, commandPool, renderPass,
-            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout,
-            vertexBufferSize, msaaSamples);
+        // Single-window path: this context creates and owns its device.
+        var device = VulkanDevice.Create(instance, surface, msaaSamples);
+        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: true);
 
         ctx.CreateSyncObjects();
         ctx.AllocateCommandBuffers();
@@ -239,62 +120,49 @@ public sealed unsafe partial class VulkanContext : IDisposable
     }
 
     /// <summary>
-    /// Allocates a new descriptor set from the pool with the shared layout.
-    /// Used by VkTexture to get its own descriptor set for texture binding.
+    /// Creates a window context that SHARES an existing <see cref="VulkanDevice"/> rather than
+    /// creating its own. This is the multi-window path: <see cref="SdlVulkanApp"/> builds the device
+    /// once (from the first window's surface) and hands it to every window's context here. The
+    /// context owns only its swapchain / sync / vertex ring / command buffers — not the device, which
+    /// the app disposes after the last window is gone. GPU resources built against the shared device
+    /// (page geometry buffers, image textures) stay valid across all windows that share it, so a
+    /// document session can move between windows without re-uploading them.
     /// </summary>
-    // Descriptor pool operations need external synchronization for multi-threaded access
-    private readonly Lock _descriptorPoolLock = new();
-
-    public VkDescriptorSet AllocateDescriptorSet()
+    public static VulkanContext CreateForSharedDevice(VulkanDevice device, VkSurfaceKHR surface,
+        uint width, uint height, uint vertexBufferSize = 4 * 1024 * 1024)
     {
-        lock (_descriptorPoolLock)
-        {
-            var layout = DescriptorSetLayout;
-            VkDescriptorSetAllocateInfo dsAI = new()
-            {
-                descriptorPool = DescriptorPool,
-                descriptorSetCount = 1,
-                pSetLayouts = &layout
-            };
-            VkDescriptorSet set;
-            DeviceApi.vkAllocateDescriptorSets(&dsAI, &set).CheckResult();
-            return set;
-        }
+        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: false);
+
+        ctx.CreateSyncObjects();
+        ctx.AllocateCommandBuffers();
+        ctx.CreateVertexBuffers();
+        ctx.CreateSwapchain(width, height);
+
+        return ctx;
     }
 
-    /// <summary>
-    /// Frees a descriptor set back to the pool.
-    /// </summary>
-    public void FreeDescriptorSet(VkDescriptorSet set)
-    {
-        lock (_descriptorPoolLock)
-        {
-            DeviceApi.vkFreeDescriptorSets(DescriptorPool, 1, &set);
-        }
-    }
+    // --- Device-level operations, forwarded to the shared VulkanDevice ---
 
-    /// <summary>
-    /// Updates any descriptor set to point to the given image view and sampler.
-    /// </summary>
+    /// <summary>Allocates a new descriptor set from the shared pool with the shared layout.</summary>
+    public VkDescriptorSet AllocateDescriptorSet() => _dev.AllocateDescriptorSet();
+
+    /// <summary>Frees a descriptor set back to the shared pool.</summary>
+    public void FreeDescriptorSet(VkDescriptorSet set) => _dev.FreeDescriptorSet(set);
+
+    /// <summary>Updates a descriptor set to point to the given image view and sampler.</summary>
     public void UpdateDescriptorSet(VkDescriptorSet targetSet, VkImageView imageView, VkSampler sampler)
-    {
-        VkDescriptorImageInfo imageInfo = new()
-        {
-            imageLayout = VkImageLayout.ShaderReadOnlyOptimal,
-            imageView = imageView,
-            sampler = sampler
-        };
-        VkWriteDescriptorSet write = new()
-        {
-            dstSet = targetSet,
-            dstBinding = 0,
-            dstArrayElement = 0,
-            descriptorType = VkDescriptorType.CombinedImageSampler,
-            descriptorCount = 1,
-            pImageInfo = &imageInfo
-        };
-        DeviceApi.vkUpdateDescriptorSets(1, &write, 0, null);
-    }
+        => _dev.UpdateDescriptorSet(targetSet, imageView, sampler);
+
+    public uint FindMemoryType(uint typeFilter, VkMemoryPropertyFlags properties)
+        => _dev.FindMemoryType(typeFilter, properties);
+
+    public void ExecuteOneShot(Action<VkCommandBuffer> action) => _dev.ExecuteOneShot(action);
+
+    /// <summary>Creates a persistent vertex buffer with the given data (lives until destroyed).</summary>
+    public (VkBuffer Buffer, VkDeviceMemory Memory) CreatePersistentVertexBuffer(ReadOnlySpan<float> data)
+        => _dev.CreatePersistentVertexBuffer(data);
+
+    public void DestroyBuffer(VkBuffer buffer, VkDeviceMemory memory) => _dev.DestroyBuffer(buffer, memory);
 
     public void RecreateSwapchain(uint width, uint height)
     {
@@ -336,10 +204,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
     {
         resized = false;
         var fence = _inFlightFences[_currentFrame];
-        // Bounded wait: if a fence is never signaled (driver hiccup / stuck GPU) an unbounded wait here
-        // would hard-freeze the loop with no escape. Cap it and throw on timeout — the event loop's catch
-        // routes that into RecoverFromGpuError (recreate sync + swapchain), like a submit failure. A real
-        // device-loss comes back as a negative result (DEVICE_LOST), which CheckResult sends the same way.
+        // Bounded wait. We rely on the submit signaling this fence — including on drivers (Adreno
+        // X1-85) where vkQueueSubmit returns a bogus error yet still signals normally. If a fence is
+        // genuinely never signaled, an unbounded wait here would hard-freeze the loop with no escape,
+        // so cap it and throw on timeout: the event loop's catch routes that into RecoverFromGpuError
+        // (recreate sync objects + swapchain) exactly like a submit failure. A real device-loss comes
+        // back as a negative result (DEVICE_LOST), which CheckResult turns into the same recovery path.
         var waitResult = DeviceApi.vkWaitForFences(1, &fence, true, FenceWaitTimeoutNs);
         if (waitResult == VkResult.Timeout)
             throw new VkException(waitResult, "in-flight fence wait timed out (>2s) — recovering");
@@ -416,12 +286,18 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
         var submitResult = DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &submitInfo, _inFlightFences[_currentFrame]);
         RenderDiag.Vk("submit", submitResult, $"frame={_currentFrame} img={_currentImageIndex}");
-        // Some drivers (observed: Qualcomm Adreno X1-85 / qcdx8380 on Windows-on-ARM) return
-        // VK_ERROR_INITIALIZATION_FAILED from vkQueueSubmit even though the work executes and the fence +
-        // semaphore signal normally. That is not a spec-legal return for vkQueueSubmit (only SUCCESS,
-        // OUT_OF_{HOST,DEVICE}_MEMORY and DEVICE_LOST are), so it cannot denote a real failure here —
-        // tolerate it and present, rather than throwing → rebuilding the swapchain every frame (a
-        // self-sustaining recovery storm). Genuinely fatal codes still throw via CheckResult.
+        // Qualcomm Adreno X1-85 (qcdx8380, Windows-on-ARM) can return VK_ERROR_INITIALIZATION_FAILED from
+        // vkQueueSubmit even though the work executes and the fence + semaphore signal normally. That is not
+        // a spec-legal return for vkQueueSubmit (only SUCCESS, OUT_OF_{HOST,DEVICE}_MEMORY and DEVICE_LOST
+        // are), so it can NEVER denote a real failure here — a genuine failure arrives as one of those and
+        // still throws via CheckResult below.
+        //
+        // The ROOT CAUSE of the per-frame storm was an unsynchronized atlas image swap in
+        // VkSdfFontAtlas.Grow / VkFontAtlas.Grow (fixed there with a vkDeviceWaitIdle before the swap). This
+        // tolerance is KEPT DELIBERATELY as defense-in-depth: it's free, it cannot mask a real error, and it
+        // breaks the throw -> rebuild-swapchain-every-frame feedback loop for ANY other latent trigger (that
+        // recovery churn was itself what sustained the storm). The RenderDiag.Vk call above still logs every
+        // occurrence in DEBUG, so a new trigger stays visible without freezing the app.
         if (submitResult != VkResult.ErrorInitializationFailed)
             submitResult.CheckResult();
 
@@ -436,6 +312,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
             pImageIndices = &imageIndex
         };
 
+        // Present is intentionally not CheckResult'd — ErrorOutOfDateKHR/SuboptimalKHR on resize are
+        // handled by the next BeginFrame's acquire. Log it (DEBUG only) so we can confirm present is
+        // actually succeeding now that submit no longer throws on the benign Adreno quirk above.
         var presentResult = DeviceApi.vkQueuePresentKHR(GraphicsQueue, &presentInfo);
         RenderDiag.Vk("present", presentResult, $"frame={_currentFrame} img={_currentImageIndex}");
         _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
@@ -466,84 +345,6 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     public VkBuffer VertexBuffer => _vertexBuffers[_currentFrame];
 
-    public void ExecuteOneShot(Action<VkCommandBuffer> action)
-    {
-        DeviceApi.vkAllocateCommandBuffer(CommandPool, out var cmd).CheckResult();
-
-        VkCommandBufferBeginInfo beginInfo = new()
-        {
-            flags = VkCommandBufferUsageFlags.OneTimeSubmit
-        };
-        // Check Begin/End: when these silently fail (bad cmd-pool flags, driver
-        // state corruption from a prior submit, etc.) the next submit blows up
-        // with a misleading error code. Surface the real first failure here.
-        DeviceApi.vkBeginCommandBuffer(cmd, &beginInfo).CheckResult();
-        action(cmd);
-        DeviceApi.vkEndCommandBuffer(cmd).CheckResult();
-
-        VkSubmitInfo submitInfo = new()
-        {
-            commandBufferCount = 1,
-            pCommandBuffers = &cmd
-        };
-        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &submitInfo, VkFence.Null).CheckResult();
-        DeviceApi.vkQueueWaitIdle(GraphicsQueue).CheckResult();
-        DeviceApi.vkFreeCommandBuffers(CommandPool, cmd);
-    }
-
-    public uint FindMemoryType(uint typeFilter, VkMemoryPropertyFlags properties)
-    {
-        InstanceApi.vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, out var memProperties);
-        for (uint i = 0; i < memProperties.memoryTypeCount; i++)
-        {
-            if ((typeFilter & (1u << (int)i)) != 0 &&
-                (memProperties.memoryTypes[(int)i].propertyFlags & properties) == properties)
-                return i;
-        }
-        throw new InvalidOperationException("Failed to find suitable memory type");
-    }
-
-    /// <summary>
-    /// Creates a persistent vertex buffer with the given data. The buffer lives until explicitly destroyed.
-    /// Thread-safe — can be called from background tessellation tasks.
-    /// </summary>
-    public (VkBuffer Buffer, VkDeviceMemory Memory) CreatePersistentVertexBuffer(ReadOnlySpan<float> data)
-    {
-        var size = (ulong)(data.Length * sizeof(float));
-
-        VkBufferCreateInfo bufCI = new()
-        {
-            size = size,
-            usage = VkBufferUsageFlags.VertexBuffer,
-            sharingMode = VkSharingMode.Exclusive
-        };
-        DeviceApi.vkCreateBuffer(&bufCI, null, out var buffer).CheckResult();
-
-        DeviceApi.vkGetBufferMemoryRequirements(buffer, out var memReqs);
-        VkMemoryAllocateInfo allocInfo = new()
-        {
-            allocationSize = memReqs.size,
-            memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits,
-                VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent)
-        };
-        DeviceApi.vkAllocateMemory(&allocInfo, null, out var memory).CheckResult();
-        DeviceApi.vkBindBufferMemory(buffer, memory, 0);
-
-        void* mapped;
-        DeviceApi.vkMapMemory(memory, 0, size, 0, &mapped);
-        fixed (float* pData = data)
-            System.Buffer.MemoryCopy(pData, mapped, (long)size, (long)size);
-        DeviceApi.vkUnmapMemory(memory);
-
-        return (buffer, memory);
-    }
-
-    public void DestroyBuffer(VkBuffer buffer, VkDeviceMemory memory)
-    {
-        DeviceApi.vkDestroyBuffer(buffer);
-        DeviceApi.vkFreeMemory(memory);
-    }
-
     public void Dispose()
     {
         if (_disposed) return;
@@ -571,165 +372,22 @@ public sealed unsafe partial class VulkanContext : IDisposable
             DeviceApi.vkDestroyFence(_inFlightFences[i]);
         }
 
-        DeviceApi.vkDestroyPipelineLayout(PipelineLayout);
-        DeviceApi.vkDestroyDescriptorSetLayout(DescriptorSetLayout);
-        DeviceApi.vkDestroyDescriptorPool(DescriptorPool);
-        DeviceApi.vkDestroyRenderPass(RenderPass);
-        DeviceApi.vkDestroyCommandPool(CommandPool);
-        DeviceApi.vkDestroyDevice();
+        // Return the per-frame command buffers to the shared pool. When this context owns the device
+        // the pool is destroyed just below anyway, but a shared-device window (one of several) must
+        // free them explicitly or they leak until the app tears the device down.
+        fixed (VkCommandBuffer* pCmds = _commandBuffers)
+            DeviceApi.vkFreeCommandBuffers(CommandPool, (uint)_commandBuffers.Length, pCmds);
 
+        // The surface is per-window (created against the shared instance). Destroy it before the
+        // device tears the instance down. The swapchain that referenced it is already gone above.
         // Offscreen contexts have no surface — skip the destroy (Vortice binding AVs on Null).
         if (_surface != VkSurfaceKHR.Null)
             InstanceApi.vkDestroySurfaceKHR(_surface);
-        InstanceApi.vkDestroyInstance();
-    }
 
-    private static VkPhysicalDevice PickPhysicalDevice(VkInstanceApi instanceApi, VkSurfaceKHR surface, out uint queueFamily)
-    {
-        uint count = 0;
-        instanceApi.vkEnumeratePhysicalDevices(&count, null);
-        var devices = new VkPhysicalDevice[count];
-        fixed (VkPhysicalDevice* pDevices = devices)
-            instanceApi.vkEnumeratePhysicalDevices(&count, pDevices);
-
-        foreach (var pd in devices)
-        {
-            if (TryFindGraphicsQueue(instanceApi, pd, surface, out var family))
-            {
-                queueFamily = family;
-                return pd;
-            }
-        }
-
-        throw new InvalidOperationException("No suitable Vulkan physical device found");
-    }
-
-    private static bool TryFindGraphicsQueue(VkInstanceApi instanceApi, VkPhysicalDevice device, VkSurfaceKHR surface, out uint family)
-    {
-        uint count = 0;
-        instanceApi.vkGetPhysicalDeviceQueueFamilyProperties(device, &count, null);
-        var props = new VkQueueFamilyProperties[count];
-        fixed (VkQueueFamilyProperties* pProps = props)
-            instanceApi.vkGetPhysicalDeviceQueueFamilyProperties(device, &count, pProps);
-
-        for (uint i = 0; i < count; i++)
-        {
-            if ((props[i].queueFlags & VkQueueFlags.Graphics) == 0) continue;
-
-            instanceApi.vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, out var supported);
-            if (supported)
-            {
-                family = i;
-                return true;
-            }
-        }
-
-        family = 0;
-        return false;
-    }
-
-    private static VkRenderPass CreateRenderPass(VkDeviceApi deviceApi, VkFormat format,
-        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
-    {
-        if (msaaSamples == VkSampleCountFlags.Count1)
-        {
-            // No MSAA — single color attachment
-            VkAttachmentDescription colorAttachment = new()
-            {
-                format = format,
-                samples = VkSampleCountFlags.Count1,
-                loadOp = VkAttachmentLoadOp.Clear,
-                storeOp = VkAttachmentStoreOp.Store,
-                stencilLoadOp = VkAttachmentLoadOp.DontCare,
-                stencilStoreOp = VkAttachmentStoreOp.DontCare,
-                initialLayout = VkImageLayout.Undefined,
-                finalLayout = VkImageLayout.PresentSrcKHR
-            };
-
-            VkAttachmentReference colorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-
-            VkSubpassDescription subpass = new()
-            {
-                pipelineBindPoint = VkPipelineBindPoint.Graphics,
-                colorAttachmentCount = 1,
-                pColorAttachments = &colorRef
-            };
-
-            VkSubpassDependency dependency = new()
-            {
-                srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
-                srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput, srcAccessMask = 0,
-                dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-                dstAccessMask = VkAccessFlags.ColorAttachmentWrite
-            };
-
-            VkRenderPassCreateInfo rpCI = new()
-            {
-                attachmentCount = 1, pAttachments = &colorAttachment,
-                subpassCount = 1, pSubpasses = &subpass,
-                dependencyCount = 1, pDependencies = &dependency
-            };
-
-            deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
-            return rp;
-        }
-
-        // MSAA — multisample color attachment (0) + resolve to swapchain (1)
-        Span<VkAttachmentDescription> attachments = stackalloc VkAttachmentDescription[2];
-        attachments[0] = new() // multisample color
-        {
-            format = format,
-            samples = msaaSamples,
-            loadOp = VkAttachmentLoadOp.Clear,
-            storeOp = VkAttachmentStoreOp.DontCare, // resolved, no need to store
-            stencilLoadOp = VkAttachmentLoadOp.DontCare,
-            stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined,
-            finalLayout = VkImageLayout.ColorAttachmentOptimal
-        };
-        attachments[1] = new() // resolve target (swapchain image)
-        {
-            format = format,
-            samples = VkSampleCountFlags.Count1,
-            loadOp = VkAttachmentLoadOp.DontCare,
-            storeOp = VkAttachmentStoreOp.Store,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare,
-            stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined,
-            finalLayout = VkImageLayout.PresentSrcKHR
-        };
-
-        VkAttachmentReference msaaColorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-        VkAttachmentReference resolveRef = new() { attachment = 1, layout = VkImageLayout.ColorAttachmentOptimal };
-
-        VkSubpassDescription msaaSubpass = new()
-        {
-            pipelineBindPoint = VkPipelineBindPoint.Graphics,
-            colorAttachmentCount = 1,
-            pColorAttachments = &msaaColorRef,
-            pResolveAttachments = &resolveRef
-        };
-
-        VkSubpassDependency msaaDep = new()
-        {
-            srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
-            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput, srcAccessMask = 0,
-            dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-            dstAccessMask = VkAccessFlags.ColorAttachmentWrite
-        };
-
-        fixed (VkAttachmentDescription* pAttachments = attachments)
-        {
-            VkRenderPassCreateInfo msaaRpCI = new()
-            {
-                attachmentCount = 2, pAttachments = pAttachments,
-                subpassCount = 1, pSubpasses = &msaaSubpass,
-                dependencyCount = 1, pDependencies = &msaaDep
-            };
-
-            deviceApi.vkCreateRenderPass(&msaaRpCI, null, out var renderPass).CheckResult();
-            return renderPass;
-        }
+        // Only tear down the device if this context created it (single-window / offscreen). A device
+        // shared by several windows is disposed by its owner once the last window is gone.
+        if (_ownsDevice)
+            _dev.Dispose();
     }
 
     private void CreateSwapchain(uint width, uint height)
