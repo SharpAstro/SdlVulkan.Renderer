@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Vortice.Vulkan;
 using Vortice.ShaderCompiler;
 using static Vortice.Vulkan.Vulkan;
@@ -6,6 +7,12 @@ namespace SdlVulkan.Renderer;
 
 public sealed unsafe class VkPipelineSet : IDisposable
 {
+    // Compiled SPIR-V is the same for every device/window, but GLSL→SPIR-V compilation is the slow
+    // part of building a renderer (~hundreds of ms cold). Cache the bytecode per shader for the
+    // process lifetime so the FIRST renderer compiles and every later one — each additional window, or
+    // a tab torn into its own window — only creates per-device shader modules from cached bytecode.
+    // Keyed by the shader's stable file name. Thread-safe so background window creation is safe.
+    private static readonly ConcurrentDictionary<string, byte[]> SpirvCache = new();
     public VkPipeline FlatPipeline { get; }
     public VkPipeline TexturedPipeline { get; }
     public VkPipeline EllipsePipeline { get; }
@@ -400,17 +407,21 @@ public sealed unsafe class VkPipelineSet : IDisposable
 
     private static VkShaderModule CompileAndCreateModule(VkDeviceApi deviceApi, Compiler compiler, string source, string fileName, ShaderKind kind)
     {
-        var options = new CompilerOptions
+        // Compile once per process (cache hit on every renderer after the first), then create the
+        // per-device shader module from the cached bytecode.
+        var spirv = SpirvCache.GetOrAdd(fileName, _ =>
         {
-            TargetEnv = TargetEnvironmentVersion.Vulkan_1_0,
-            ShaderStage = kind
-        };
+            var options = new CompilerOptions
+            {
+                TargetEnv = TargetEnvironmentVersion.Vulkan_1_0,
+                ShaderStage = kind
+            };
+            var result = compiler.Compile(source, fileName, options);
+            if (result.Status != CompilationStatus.Success)
+                throw new InvalidOperationException($"Shader compilation failed ({fileName}): {result.ErrorMessage}");
+            return result.Bytecode;
+        });
 
-        var result = compiler.Compile(source, fileName, options);
-        if (result.Status != CompilationStatus.Success)
-            throw new InvalidOperationException($"Shader compilation failed ({fileName}): {result.ErrorMessage}");
-
-        var spirv = result.Bytecode;
         fixed (byte* pSpirv = spirv)
         {
             VkShaderModuleCreateInfo createInfo = new()

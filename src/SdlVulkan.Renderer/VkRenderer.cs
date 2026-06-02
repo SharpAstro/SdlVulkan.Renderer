@@ -35,15 +35,21 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // atlas never reallocates — when a page fills it appends a new page — so this is the page
     // granularity, not a glyph cap. A glyph-heavy consumer can raise it (must be a power of two)
     // to pack more glyphs per page = fewer pages / fewer per-page draw calls.
-    public VkRenderer(VulkanContext ctx, uint width, uint height, int sdfInitialAtlasDim = 0) : base(ctx)
+    // rasterizer: an optional PROCESS-OWNED glyph rasterizer shared across windows. A multi-window host
+    // passes one so every window's atlas — and the PDF parser — rasterize through the same instance,
+    // which lets a document tab tear out into another window without losing its embedded-font
+    // registrations when the origin window closes. When null, this renderer's atlas creates and owns its
+    // own rasterizer (the single-window / standalone case), unchanged.
+    public VkRenderer(VulkanContext ctx, uint width, uint height, SdfGlyphDiskCache? sdfDiskCache = null,
+        int sdfInitialAtlasDim = 0, ManagedFontRasterizer? rasterizer = null) : base(ctx)
     {
         _width = width;
         _height = height;
         _pipelines = VkPipelineSet.Create(ctx);
-        _fontAtlas = new VkFontAtlas(ctx);
+        _fontAtlas = new VkFontAtlas(ctx, rasterizer);
         _sdfFontAtlas = sdfInitialAtlasDim > 0
-            ? new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, sdfInitialAtlasDim, sdfInitialAtlasDim)
-            : new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer);
+            ? new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, sdfDiskCache, sdfInitialAtlasDim, sdfInitialAtlasDim)
+            : new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, sdfDiskCache);
         UpdateProjection();
     }
 

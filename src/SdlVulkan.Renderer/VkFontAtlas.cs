@@ -14,7 +14,14 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     internal readonly record struct GlyphInfo(float U0, float V0, float U1, float V1, int Width, int Height, float AdvanceX, int BearingX, int BearingY);
 
     private readonly VulkanContext _ctx;
-    internal readonly ManagedFontRasterizer Rasterizer = new();
+    // The glyph rasterizer. Normally this atlas creates and owns it, but a multi-window host injects a
+    // single PROCESS-OWNED rasterizer shared by every window's atlas (and the PDF parser). That shared
+    // instance must outlive any one window — a document tab can be torn out into another window, and its
+    // parser keeps rasterizing through this same instance — so an injected rasterizer is NOT disposed
+    // here (see _ownsRasterizer). Dispose() on this rasterizer only clears its font cache, which would
+    // otherwise pull every registered embedded font out from under a tab that outlived its origin window.
+    internal readonly ManagedFontRasterizer Rasterizer;
+    private readonly bool _ownsRasterizer;
     private readonly Dictionary<GlyphKey, GlyphInfo> _glyphs = new();
     private readonly HashSet<GlyphKey> _unflushedGlyphs = new();
 
@@ -30,6 +37,16 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     private int _dirtyX0, _dirtyY0, _dirtyX1, _dirtyY1;
     private bool _needsEviction;
+
+    // Set whenever CreateImage allocates a fresh VkImage (initial + every Grow). The image starts
+    // in VK_IMAGE_LAYOUT_UNDEFINED; the first Flush must transition from there. Previously CreateImage
+    // did this via ctx.ExecuteOneShot — a SECOND vkQueueSubmit to the graphics queue while the frame's
+    // command buffer is already recording (CreateImage runs inside Grow → RasterizeGlyph → OnPreFlush,
+    // which is after vkBeginCommandBuffer). Some drivers (Nvidia/Intel) then return
+    // VK_ERROR_INITIALIZATION_FAILED from the next vkQueueSubmit, which spins the swapchain-recovery
+    // loop. Deferring the transition into the frame's own command buffer (as VkSdfFontAtlas does)
+    // avoids the side-submit entirely.
+    private bool _needsInitialTransition;
 
     private VkImage _image;
     private VkDeviceMemory _imageMemory;
@@ -48,9 +65,13 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     public VkImageView ImageView => _imageView;
     public VkSampler Sampler => _sampler;
 
-    public VkFontAtlas(VulkanContext ctx, int initialWidth = 512, int initialHeight = 512)
+    public VkFontAtlas(VulkanContext ctx, ManagedFontRasterizer? rasterizer = null,
+        int initialWidth = 512, int initialHeight = 512)
     {
         _ctx = ctx;
+        // Use the injected (process-owned, shared) rasterizer when given; otherwise create and own one.
+        Rasterizer = rasterizer ?? new ManagedFontRasterizer();
+        _ownsRasterizer = rasterizer is null;
         _atlasWidth = initialWidth;
         _atlasHeight = initialHeight;
         _staging = new byte[initialWidth * initialHeight * 4];
@@ -158,7 +179,12 @@ internal sealed unsafe class VkFontAtlas : IDisposable
             Buffer.MemoryCopy(pRgba, mapped, bufferSize, bufferSize);
         _ctx.DeviceApi.vkUnmapMemory(_uploadMemories[slot]);
 
-        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, VkImageLayout.ShaderReadOnlyOptimal, VkImageLayout.TransferDstOptimal);
+        // First Flush after CreateImage: the image is still in Undefined layout, so transition from
+        // there (a fresh image has no prior contents to preserve). Subsequent flushes come from
+        // ShaderReadOnly. This replaces the side-submit that CreateImage used to do.
+        var srcLayout = _needsInitialTransition ? VkImageLayout.Undefined : VkImageLayout.ShaderReadOnlyOptimal;
+        VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, srcLayout, VkImageLayout.TransferDstOptimal);
+        _needsInitialTransition = false;
 
         VkBufferImageCopy region = new()
         {
@@ -179,7 +205,10 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     public void Dispose()
     {
-        Rasterizer.Dispose();
+        // Only dispose the rasterizer if this atlas created it. An injected shared rasterizer is owned
+        // by the host (it outlives this window — see the Rasterizer field comment).
+        if (_ownsRasterizer)
+            Rasterizer.Dispose();
 
         var api = _ctx.DeviceApi;
 
@@ -300,9 +329,11 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         var api = _ctx.DeviceApi;
         // Drain the GPU before swapping the atlas image — same in-flight use-after-free + in-use-descriptor
-        // hazard as VkSdfFontAtlas.Grow (frame N-1 may still be sampling the old image when frame N grows;
-        // strict tilers like Qualcomm Adreno fail the next vkQueueSubmit). Grows are rare, so the full
-        // device idle is cheap.
+        // hazard as VkSdfFontAtlas.Grow: with MaxFramesInFlight=2, frame N-1 may still be sampling the old
+        // image through this descriptor when frame N grows, and the Adreno X1-85 punishes that by failing
+        // the next vkQueueSubmit. This was historically masked by the per-Flush vkDeviceWaitIdle that the
+        // upload-ring refactor removed — that drain ran every frame, so it had been incidentally protecting
+        // Grow too. Grows are rare (the atlas only doubles), so a targeted device idle here is cheap.
         api.vkDeviceWaitIdle();
         api.vkDestroyImageView(_imageView);
         api.vkDestroyImage(_image);
@@ -351,8 +382,9 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkAllocateMemory(&allocInfo, null, out _imageMemory).CheckResult();
         api.vkBindImageMemory(_image, _imageMemory, 0);
 
-        _ctx.ExecuteOneShot(cmd =>
-            VulkanHelpers.TransitionImageLayout(api, cmd, _image, VkImageLayout.Undefined, VkImageLayout.ShaderReadOnlyOptimal));
+        // Defer the Undefined→ShaderReadOnly transition into the next Flush (the frame's own command
+        // buffer) instead of side-submitting here — see _needsInitialTransition above.
+        _needsInitialTransition = true;
 
         var viewCI = new VkImageViewCreateInfo(
             _image, VkImageViewType.Image2D, VkFormat.R8G8B8A8Unorm,
