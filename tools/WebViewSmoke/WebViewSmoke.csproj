@@ -1,13 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Manual smoke harness for the Windows WebView backend. NOT part of the solution / package
-    build — run it directly with: dotnet run, passing the project path and an optional url.
-    Opens an SDL3+Vulkan window, hosts a WebView2 child in it, and navigates to a URL.
+    Manual smoke harness for the native WebView backends. NOT part of the solution / package
+    build — run it directly with: dotnet run, passing an optional url.
+    Opens an SDL3+Vulkan window, hosts the platform WebView child in it, and navigates to a URL.
+      Windows (WebView2):  dotnet run -f net10.0-windows [url]
+      Linux   (WebKitGTK): SDL_VIDEODRIVER=x11 dotnet run -f net10.0 [url]
+    The net10.0 TFM carries the Linux/macOS backends; net10.0-windows adds WebView2. The windows
+    TFM stays buildable on a Linux box via EnableWindowsTargeting (so a full restore succeeds there).
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -24,10 +29,10 @@
     <PackageReference Include="SDL3-CS.Native" Version="3.5.0-preview.20260205-174353" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- Place WebView2Loader.dll under the exe's runtimes/<rid>/native/ so
-         WebView2Utilities.Initialize finds it via its file-path probe. Sourced from the
-         native-assets project (this is the in-tree equivalent of the published Native package). -->
+  <!-- Windows only: place WebView2Loader.dll under the exe's runtimes/<rid>/native/ so
+       WebView2Utilities.Initialize finds it via its file-path probe. Sourced from the
+       native-assets project (this is the in-tree equivalent of the published Native package). -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
     <None Include="..\..\src\SdlVulkan.Renderer.WebView.Native\runtimes\**\WebView2Loader.dll"
           Link="runtimes\%(RecursiveDir)WebView2Loader.dll"
           CopyToOutputDirectory="PreserveNewest" />
