@@ -39,6 +39,36 @@ internal static partial class Program
     // Reply the host bounces back to the page when it receives the page's message.
     private const string HostReply = "{\"reply\":\"pong from host\"}";
 
+    // Self-test page for `autosize`/`assert-autosize` mode: a fixed-size content box the host can resize
+    // by posting { setHeight: N }. The body shrink-wraps the box vertically, so the content height the
+    // sizer reports tracks the box height for both growth and shrink (the property the sizer relies on).
+    // The status <pre> is position:fixed so it stays out of flow and doesn't affect the measured height.
+    private const string AutoSizeTestHtml = """
+        <!doctype html><meta charset="utf-8"><title>autosize-test</title>
+        <style>html,body{margin:0;padding:0}#box{width:600px;height:400px;background:#0088ff}</style>
+        <div id="box"></div>
+        <pre id="log" style="position:fixed;right:0;bottom:0;margin:0;font:12px monospace"></pre>
+        <script>
+          var log = function (m) { var el = document.getElementById('log'); if (el) el.textContent += m + '\n'; };
+          window.chrome.webview.addEventListener('message', function (e) {
+            var d = e.data;
+            if (d && typeof d.setHeight === 'number') {
+              document.getElementById('box').style.height = d.setHeight + 'px';
+              log('set box height ' + d.setHeight);
+            }
+          });
+          log('autosize page ready');
+        </script>
+        """;
+
+    // The host asks the page to shrink its content box to this many CSS px mid-test. The assert only
+    // checks that the reported content height grows initially and then shrinks well below it once the
+    // box is shrunk — DPI-independent, and proof that shrink-to-fit below the viewport works.
+    private const int AutoSizeShrinkToCssPx = 250;
+    private const string AutoSizeShrinkMessage = "{\"setHeight\":250}";
+
+    private enum Scenario { Navigate, Messaging, AutoSize }
+
     private static void Log(string line)
     {
         Console.WriteLine(line);
@@ -64,14 +94,22 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         var arg0 = args.Length > 0 ? args[0] : "https://example.com";
-        // `assert` mode: run the network-free messaging self-test and exit 0/1 on the observed
-        // signals (for CI). `messaging`: same self-test but interactive. Otherwise: navigate to a URL.
-        var assertMode = string.Equals(arg0, "assert", StringComparison.OrdinalIgnoreCase);
-        Log($"[smoke] process arch = {RuntimeInformation.ProcessArchitecture}");
+        // Modes: `assert` = messaging self-test, exit 0/1 (CI). `assert-autosize` = content-sizer
+        // self-test, exit 0/1 (CI). `messaging`/`autosize` = the same self-tests but interactive.
+        // Anything else = navigate to that URL.
+        var (scenario, assertMode) = arg0.ToLowerInvariant() switch
+        {
+            "assert" => (Scenario.Messaging, true),
+            "assert-autosize" => (Scenario.AutoSize, true),
+            "messaging" => (Scenario.Messaging, false),
+            "autosize" => (Scenario.AutoSize, false),
+            _ => (Scenario.Navigate, false),
+        };
+        Log($"[smoke] process arch = {RuntimeInformation.ProcessArchitecture}, scenario = {scenario}");
 
         try
         {
-            return Run(arg0, assertMode);
+            return Run(scenario, assertMode, arg0);
         }
         catch (Exception ex) when (assertMode)
         {
@@ -83,11 +121,8 @@ internal static partial class Program
         }
     }
 
-    private static int Run(string arg0, bool assertMode)
+    private static int Run(Scenario scenario, bool assertMode, string navigateUrl)
     {
-        var url = assertMode ? "messaging" : arg0;
-        var messaging = string.Equals(url, "messaging", StringComparison.OrdinalIgnoreCase);
-
         using var window = SdlVulkanWindow.Create("WebView smoke", 1280, 800);
         var hwnd = window.GetNativeWindowHandle();
         Log($"[smoke] native window handle = 0x{hwnd:X}");
@@ -102,73 +137,53 @@ internal static partial class Program
         using var webView = NativeWebView.Create();
         Log($"[smoke] backend = {webView.GetType().Name}");
 
-        // Assert-mode signal tracking: page→host message, host→page reply (via title), and a
-        // completed navigation. PASS once all three are observed; exit before teardown.
-        var gotPageMessage = false;
-        var gotHostReply = false;
-        var gotNavigation = false;
-        void CheckAssert()
-        {
-            if (assertMode && gotPageMessage && gotHostReply && gotNavigation)
-            {
-                Log("SMOKE: PASS");
-                FastExit(0);
-            }
-        }
-
-        // Granular redirect/navigation trace (nav-starting → source-changed → nav-completed).
+        // Common diagnostics: redirect/navigation trace, console output, uncaught JS errors.
         webView.Trace += s => Log($"[trace] {s}");
-        webView.TitleChanged += t =>
-        {
-            Log($"[smoke] title changed: {t}");
-            if (t.Contains("pong from host", StringComparison.Ordinal))
-            {
-                gotHostReply = true;
-                CheckAssert();
-            }
-        };
-
-        // In-page diagnostics (console output and uncaught JS errors).
         webView.ConsoleMessage += (level, text) => Log($"[console:{level}] {text}");
         webView.PageError += text => Log($"[js-error] {text}");
 
-        // Two-way messaging: log page → host messages, and bounce a reply back (host → page).
-        webView.MessageReceived += json =>
+        // assertMode PASS bookkeeping; each scenario sets its own predicate and calls Pass() when met.
+        void Pass()
         {
-            Log($"[message] page -> host: {json}");
-            if (json.Contains("from page", StringComparison.Ordinal))
-                gotPageMessage = true;
-            webView.PostMessage(HostReply);
-            CheckAssert();
-        };
+            Log("SMOKE: PASS");
+            FastExit(0);
+        }
 
-        // On each completed navigation, prove JS execution works by probing the live DOM —
-        // this also reveals where a redirect actually landed and whether the page has content.
-        webView.NavigationCompleted += completedUrl =>
+        Func<string> failReason = () => "no scenario signals tracked";
+
+        switch (scenario)
         {
-            Log($"[smoke] navigation completed: {completedUrl}");
-            gotNavigation = true;
-            CheckAssert();
-            webView.ExecuteScriptAsync(
-                    "location.href + ' | title=' + JSON.stringify(document.title) + ' | bodyChars=' + " +
-                    "(document.body ? document.body.innerText.length : 0) + ' | ua=' + navigator.userAgent")
-                .ContinueWith(t => Log(t.IsFaulted
-                    ? $"[smoke] js-probe failed: {t.Exception?.GetBaseException().Message}"
-                    : $"[smoke] js-probe: {t.Result}"));
-        };
+            case Scenario.Messaging:
+                failReason = WireMessaging(webView, assertMode, Pass);
+                break;
+            case Scenario.AutoSize:
+                failReason = WireAutoSize(webView, window, assertMode, Pass);
+                break;
+            case Scenario.Navigate:
+                WireNavigateProbe(webView);
+                break;
+        }
 
         webView.AttachToWindow(window);
-        if (messaging)
+
+        switch (scenario)
         {
-            Log(assertMode
-                ? "[smoke] assert mode: two-way messaging self-test (expecting page->host, host->page, navigation)."
-                : "[smoke] two-way messaging self-test (NavigateToString) — close the window to exit.");
-            webView.NavigateToString(MessagingTestHtml);
-        }
-        else
-        {
-            webView.Navigate(url);
-            Log($"[smoke] navigating to {url} — close the window to exit.");
+            case Scenario.Messaging:
+                Log(assertMode
+                    ? "[smoke] assert mode: two-way messaging self-test (expecting page->host, host->page, navigation)."
+                    : "[smoke] two-way messaging self-test (NavigateToString) — close the window to exit.");
+                webView.NavigateToString(MessagingTestHtml);
+                break;
+            case Scenario.AutoSize:
+                Log(assertMode
+                    ? "[smoke] assert mode: content-sizer self-test (expecting an initial content height, then a smaller one after shrink)."
+                    : "[smoke] content-sizer self-test (NavigateToString) — close the window to exit.");
+                webView.NavigateToString(AutoSizeTestHtml);
+                break;
+            case Scenario.Navigate:
+                webView.Navigate(navigateUrl);
+                Log($"[smoke] navigating to {navigateUrl} — close the window to exit.");
+                break;
         }
 
         // Bounded run for automated/unattended verification (SMOKE_EXIT_AFTER_MS); assert mode
@@ -199,9 +214,14 @@ internal static partial class Program
 
                         case EventType.WindowResized:
                         case EventType.WindowPixelSizeChanged:
-                            window.GetSizeInPixels(out var w, out var h);
-                            if (w > 0 && h > 0)
-                                webView.SetBounds(new RectInt(new PointInt(w, h), new PointInt(0, 0)));
+                            // Only the navigate/messaging scenarios fill the window; autosize owns the
+                            // bounds itself via the content-sizer, so don't fight it here.
+                            if (scenario != Scenario.AutoSize)
+                            {
+                                window.GetSizeInPixels(out var w, out var h);
+                                if (w > 0 && h > 0)
+                                    webView.SetBounds(new RectInt(new PointInt(w, h), new PointInt(0, 0)));
+                            }
                             break;
                     }
                 } while (running && PollEvent(out evt));
@@ -210,12 +230,124 @@ internal static partial class Program
 
         if (assertMode)
         {
-            Log($"SMOKE: FAIL: missing signals (page->host={gotPageMessage}, host->page={gotHostReply}, navigation={gotNavigation})");
+            Log($"SMOKE: FAIL: {failReason()}");
             FastExit(1);
         }
 
         Log("[smoke] exiting.");
         FastExit(0);
         return 0; // unreachable
+    }
+
+    // Two-way messaging: log page→host messages, bounce a reply (host→page), and prove JS execution on
+    // each completed navigation. In assert mode, PASS once page->host, host->page, and a navigation are
+    // all observed. Returns the failure-reason provider used when the signals don't arrive in time.
+    private static Func<string> WireMessaging(INativeWebView webView, bool assertMode, Action pass)
+    {
+        var gotPageMessage = false;
+        var gotHostReply = false;
+        var gotNavigation = false;
+        void CheckAssert()
+        {
+            if (assertMode && gotPageMessage && gotHostReply && gotNavigation)
+                pass();
+        }
+
+        webView.TitleChanged += t =>
+        {
+            Log($"[smoke] title changed: {t}");
+            if (t.Contains("pong from host", StringComparison.Ordinal))
+            {
+                gotHostReply = true;
+                CheckAssert();
+            }
+        };
+
+        webView.MessageReceived += json =>
+        {
+            Log($"[message] page -> host: {json}");
+            if (json.Contains("from page", StringComparison.Ordinal))
+                gotPageMessage = true;
+            webView.PostMessage(HostReply);
+            CheckAssert();
+        };
+
+        webView.NavigationCompleted += completedUrl =>
+        {
+            Log($"[smoke] navigation completed: {completedUrl}");
+            gotNavigation = true;
+            CheckAssert();
+            webView.ExecuteScriptAsync(
+                    "location.href + ' | title=' + JSON.stringify(document.title) + ' | bodyChars=' + " +
+                    "(document.body ? document.body.innerText.length : 0) + ' | ua=' + navigator.userAgent")
+                .ContinueWith(t => Log(t.IsFaulted
+                    ? $"[smoke] js-probe failed: {t.Exception?.GetBaseException().Message}"
+                    : $"[smoke] js-probe: {t.Result}"));
+        };
+
+        return () => $"missing signals (page->host={gotPageMessage}, host->page={gotHostReply}, navigation={gotNavigation})";
+    }
+
+    // Content-sizer: attach a WebViewContentSizer, let it auto-size the webview's height to the page, and
+    // verify the content→host channel reacts to a content change. In assert mode, PASS once an initial
+    // content height is reported and then a clearly smaller one arrives after the host shrinks the box.
+    private static Func<string> WireAutoSize(INativeWebView webView, SdlVulkanWindow window, bool assertMode, Action pass)
+    {
+        window.GetSizeInPixels(out var winW, out _);
+
+        // Keep the sizer rooted for the lifetime of the run (it also stays reachable via the webview's
+        // event subscriptions). Height-axis auto-size with a fixed width = the common fit-to-content embed.
+        var sizer = new WebViewContentSizer(webView);
+        sizer.EnableAutoSize(origin: new PointInt(0, 0), fixedExtent: new PointInt(winW, 0), axis: AutoSizeAxis.Height);
+
+        var initialHeight = 0;
+        var requestedShrink = false;
+        var gotShrink = false;
+
+        webView.NavigationCompleted += completedUrl => Log($"[smoke] navigation completed: {completedUrl}");
+
+        sizer.ContentSizeChanged += size =>
+        {
+            Log($"[autosize] content size reported = {size.X}x{size.Y} (device px)");
+
+            if (initialHeight == 0 && size.Y >= 100)
+            {
+                initialHeight = size.Y;
+                // Ask the page to shrink its content box well below the initial height. Posts via the
+                // raw webview (the sizer consumes only inbound __sdlLayout envelopes).
+                requestedShrink = true;
+                Log($"[autosize] requesting shrink to {AutoSizeShrinkToCssPx} CSS px (initial reported height {initialHeight})");
+                webView.PostMessage(AutoSizeShrinkMessage);
+                return;
+            }
+
+            // A height clearly smaller than the initial proves reactivity + shrink-to-fit below the
+            // viewport (which documentElement.scrollHeight could not report). 250 vs 400 CSS px = 0.625.
+            if (requestedShrink && initialHeight > 0 && size.Y <= initialHeight * 0.8 && size.Y >= 50)
+            {
+                gotShrink = true;
+                Log($"[autosize] shrink observed: {size.Y} <= {initialHeight} * 0.8");
+                if (assertMode)
+                    pass();
+            }
+        };
+
+        return () => $"missing signals (initialHeight={initialHeight}, requestedShrink={requestedShrink}, gotShrink={gotShrink})";
+    }
+
+    // Navigate-to-URL: on each completed navigation, probe the live DOM to prove JS execution and reveal
+    // where a redirect actually landed.
+    private static void WireNavigateProbe(INativeWebView webView)
+    {
+        webView.NavigationCompleted += completedUrl =>
+        {
+            Log($"[smoke] navigation completed: {completedUrl}");
+            webView.ExecuteScriptAsync(
+                    "location.href + ' | title=' + JSON.stringify(document.title) + ' | bodyChars=' + " +
+                    "(document.body ? document.body.innerText.length : 0) + ' | ua=' + navigator.userAgent")
+                .ContinueWith(t => Log(t.IsFaulted
+                    ? $"[smoke] js-probe failed: {t.Exception?.GetBaseException().Message}"
+                    : $"[smoke] js-probe: {t.Result}"));
+        };
     }
 }

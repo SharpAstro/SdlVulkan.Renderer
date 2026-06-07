@@ -153,6 +153,31 @@ request/response protocol you want on top. The Linux backend injects a small `wi
 shim at document-start (mapping to WebKit's `messageHandlers`), so the **same page JS API works on
 both backends**.
 
+### Fit-to-content sizing
+
+`SetBounds` is host→browser (you position the webview). For the reverse direction — letting the
+page's content drive the webview's size — wrap it in a `WebViewContentSizer`. It injects a small
+`ResizeObserver` reporter after each navigation, surfaces the page's content size (in **device
+pixels**, ready for `SetBounds`) as `ContentSizeChanged`, and can drive the bounds for you:
+
+```csharp
+using var web = NativeWebView.Create();
+using var sizer = new WebViewContentSizer(web);     // construct before navigating
+
+// Grow/shrink the webview's height to fit the page; width stays fixed at `w`, top-left at (0,0).
+sizer.EnableAutoSize(origin: new PointInt(0, 0), fixedExtent: new PointInt(w, 0), axis: AutoSizeAxis.Height);
+sizer.ContentSizeChanged += size => Console.WriteLine($"content is {size.X}x{size.Y} device px");
+
+web.AttachToWindow(window);
+web.NavigateToString("<h1>I size myself</h1>");
+```
+
+`AutoSizeAxis.Height` is the default and the safe choice: a fixed width never reflows the page, so it
+can't oscillate. `Width`/`Both` track the other axis but are prone to reflow feedback. The `__sdlLayout`
+message key is **reserved** for this protocol — layout envelopes are consumed by the sizer and never
+reach *its* `MessageReceived`, so subscribe to `sizer.MessageReceived` to get only your app's messages.
+No `INativeWebView` change is involved; the sizer is built entirely on the existing message bridge.
+
 Beyond navigation, both backends surface diagnostics: `Trace` (redirect/load chain), `ConsoleMessage`
 (`console.*`), and `PageError` (uncaught JS exceptions, with stack). On Windows these come from the
 WebView2 DevTools Protocol; on Linux from in-page hooks forwarded over dedicated script-message

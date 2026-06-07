@@ -72,11 +72,12 @@ jobs:
     - name: Test
       run: dotnet test src/SdlVulkan.Renderer.Tests -c $BUILD_CONF --no-build --logger "console;verbosity=detailed"
 
-  # Headless functional smoke for the Linux WebView backend (GtkWebView / WebKitGTK). Runs the
-  # network-free two-way-messaging self-test (tools/WebViewSmoke `assert` mode) inside a real SDL
-  # X11 window under Xvfb, asserting page->host + host->page + navigation + JS execution, then
-  # exits 0/1 deterministically (it _exit()s past WebKitGTK's atexit teardown, which otherwise
-  # aborts with 134). The harness SKIPs (exit 0) when the display / WebKitGTK / Vulkan stack is
+  # Headless functional smoke for the Linux WebView backend (GtkWebView / WebKitGTK). Runs two
+  # network-free self-tests (tools/WebViewSmoke) inside a real SDL X11 window under Xvfb: `assert`
+  # (two-way messaging: page->host + host->page + navigation + JS execution) and `assert-autosize`
+  # (the WebViewContentSizer content->host channel). Each exits 0/1 deterministically (it _exit()s
+  # past WebKitGTK's atexit teardown, which otherwise aborts with 134). The harness SKIPs (exit 0)
+  # when the display / WebKitGTK / Vulkan stack is
   # unavailable, mirroring BlendOpRegressionTests' Assert.Skip-on-no-ICD. Non-gating for now (not
   # in publish-nuget's needs) until proven stable across runners. If a runner's Mesa does not
   # auto-fall-back to software, add LIBGL_ALWAYS_SOFTWARE=1 + WEBKIT_DISABLE_DMABUF_RENDERER=1 below.
@@ -104,6 +105,14 @@ jobs:
         xvfb-run -a -s "-screen 0 1280x800x24"
         env SDL_VIDEODRIVER=x11
         dotnet run --project tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0 -c $BUILD_CONF assert
+    - name: WebView content-sizer self-test (headless via Xvfb)
+      # Exercises WebViewContentSizer: the page reports its content height (content->host), and the
+      # assert proves the height shrinks below the initial once the box is shrunk — i.e. shrink-to-fit
+      # below the webview viewport works. Same skip-on-no-GUI / deterministic-exit semantics as above.
+      run: >-
+        xvfb-run -a -s "-screen 0 1280x800x24"
+        env SDL_VIDEODRIVER=x11
+        dotnet run --project tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0 -c $BUILD_CONF assert-autosize
 
   publish-nuget:
     needs: [build, test]
