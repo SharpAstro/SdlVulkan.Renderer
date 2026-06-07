@@ -13,6 +13,22 @@ internal static class Program
     private static readonly string? LogPath = Environment.GetEnvironmentVariable("SMOKE_LOG");
     private static readonly object LogLock = new();
 
+    // Self-test page for `messaging` mode: posts to the host on load and reflects any host reply
+    // into document.title (observable via TitleChanged), exercising both directions of the bridge.
+    private const string MessagingTestHtml = """
+        <!doctype html><meta charset="utf-8"><title>msg-test</title>
+        <h1>WebView two-way messaging test</h1><pre id="log"></pre>
+        <script>
+          const log = m => { document.getElementById('log').textContent += m + '\n'; };
+          window.chrome.webview.addEventListener('message', e => {
+            log('page <- host: ' + JSON.stringify(e.data));
+            document.title = 'host said: ' + (e.data && e.data.reply);
+          });
+          window.chrome.webview.postMessage({ hello: 'from page', n: 7 });
+          log('page -> host posted');
+        </script>
+        """;
+
     private static void Log(string line)
     {
         Console.WriteLine(line);
@@ -50,6 +66,13 @@ internal static class Program
         webView.ConsoleMessage += (level, text) => Log($"[console:{level}] {text}");
         webView.PageError += text => Log($"[js-error] {text}");
 
+        // Two-way messaging: log page → host messages, and bounce a reply back (host → page).
+        webView.MessageReceived += json =>
+        {
+            Log($"[message] page -> host: {json}");
+            webView.PostMessage("{\"reply\":\"pong from host\"}");
+        };
+
         // On each completed navigation, prove JS execution works by probing the live DOM —
         // this also reveals where a redirect actually landed and whether the page has content.
         webView.NavigationCompleted += completedUrl =>
@@ -64,8 +87,16 @@ internal static class Program
         };
 
         webView.AttachToWindow(window);
-        webView.Navigate(url);
-        Log($"[smoke] navigating to {url} — close the window to exit.");
+        if (string.Equals(url, "messaging", StringComparison.OrdinalIgnoreCase))
+        {
+            Log("[smoke] two-way messaging self-test (NavigateToString) — close the window to exit.");
+            webView.NavigateToString(MessagingTestHtml);
+        }
+        else
+        {
+            webView.Navigate(url);
+            Log($"[smoke] navigating to {url} — close the window to exit.");
+        }
 
         // Optional bounded run for automated/unattended verification: SMOKE_EXIT_AFTER_MS=8000.
         var exitAfterMs = int.TryParse(Environment.GetEnvironmentVariable("SMOKE_EXIT_AFTER_MS"), out var ms) ? ms : 0;

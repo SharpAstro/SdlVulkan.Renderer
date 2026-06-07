@@ -145,6 +145,11 @@ web.SetBounds(new RectInt(new PointInt(w, h), new PointInt(0, 0)));   // window 
 string href = await web.ExecuteScriptAsync("location.href");   // JSON-encoded result
 ```
 
+For two-way native↔web interaction, `MessageReceived` surfaces the page's
+`window.chrome.webview.postMessage(...)` calls (as raw JSON) and `PostMessage(json)` sends the
+other way (the page receives it on `chrome.webview`'s `message` event) — build whatever
+request/response protocol you want on top.
+
 Beyond navigation, the Windows backend surfaces diagnostics via the WebView2 DevTools
 Protocol: `Trace` (full redirect chain + browser log entries — network/CSP failures),
 `ConsoleMessage` (`console.*`), and `PageError` (uncaught JS exceptions, with stack).
