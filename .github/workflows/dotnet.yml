@@ -89,10 +89,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@v4
-    - uses: SharpAstro/cache-apt-pkgs-action@v1
-      with:
-        packages: mesa-vulkan-drivers libvulkan1 libwebkit2gtk-4.1-0 libgtk-3-0 xvfb
-        version: 1.0
+    # Plain apt-get (not cache-apt-pkgs-action): the cache action installs only the named packages
+    # without their dependencies, so mesa-vulkan-drivers landed without the driver libs its ICD needs
+    # -> "vkCreateInstance: Found no drivers" (-9). apt-get resolves dependencies and installs the ICD.
+    - name: Install WebKitGTK + software Vulkan + Xvfb
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libgtk-3-0 libwebkit2gtk-4.1-0 xvfb
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
