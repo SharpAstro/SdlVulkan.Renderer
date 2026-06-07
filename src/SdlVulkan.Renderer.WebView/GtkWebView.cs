@@ -16,7 +16,7 @@ internal sealed class GtkWebView : INativeWebView
 
     public event Action<string>? TitleChanged;
     public event Action<string>? NavigationCompleted;
-    public event Action<string, string>? MessageReceived;
+    public event Action<string>? MessageReceived;
     public event Action<nint, uint, nint, nint>? WndProcOverride; // always null on Linux
     public event Action<string>? Trace;
     public event Action<string, string>? ConsoleMessage;
@@ -50,6 +50,7 @@ internal sealed class GtkWebView : INativeWebView
     public void Focus() => throw new NotImplementedException();
     public void SetVisible(bool visible) => throw new NotImplementedException();
     public Task<string> ExecuteScriptAsync(string javaScript) => throw new NotImplementedException();
+    public void PostMessage(string json) => throw new NotImplementedException();
 
     public void Dispose()
     {

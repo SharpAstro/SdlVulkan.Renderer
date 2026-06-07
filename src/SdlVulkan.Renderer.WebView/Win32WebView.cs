@@ -1,7 +1,7 @@
 // Windows backend — compiled only in the net10.0-windows TFM (see csproj Compile Remove).
 // COM types come from WebView2Aot (WebView2.dll) + its DirectNAot dependency
 // (DirectN.dll / DirectN.Extensions.dll). Usage mirrors smourier's HelloWebView2 sample.
-#pragma warning disable CS0067 // MessageReceived/WndProcOverride: not surfaced via this backend yet
+#pragma warning disable CS0067 // WndProcOverride: not surfaced via this backend yet
 
 using System.Reflection;
 using System.Text;
@@ -56,9 +56,13 @@ internal sealed class Win32WebView : INativeWebView
     private readonly List<ICoreWebView2DevToolsProtocolEventReceiver> _cdpReceivers = [];
     private readonly List<CoreWebView2DevToolsProtocolEventReceivedEventHandler> _cdpHandlers = [];
 
+    // Two-way page<->host messaging: window.chrome.webview.postMessage <-> PostWebMessageAsJson.
+    private CoreWebView2WebMessageReceivedEventHandler? _webMessageHandler;
+    private EventRegistrationToken _webMessageToken;
+
     public event Action<string>? TitleChanged;
     public event Action<string>? NavigationCompleted;
-    public event Action<string, string>? MessageReceived;
+    public event Action<string>? MessageReceived;
     public event Action<nint, uint, nint, nint>? WndProcOverride; // not surfaced via this backend yet
     public event Action<string>? Trace;
     public event Action<string, string>? ConsoleMessage;
@@ -102,6 +106,7 @@ internal sealed class Win32WebView : INativeWebView
                         _webView2 = webView2;
                         WireTraceEvents(webView2);
                         EnableDiagnostics(webView2);
+                        WireMessaging(webView2);
                         ApplyPendingNavigation();
                     }));
             }));
@@ -338,6 +343,27 @@ internal sealed class Win32WebView : INativeWebView
         return tcs.Task;
     }
 
+    public void PostMessage(string json)
+    {
+        ArgumentNullException.ThrowIfNull(json);
+        var webView2 = _webView2
+            ?? throw new InvalidOperationException(
+                "WebView2 is not ready yet. Call AttachToWindow and wait for the first navigation.");
+        // Delivered to the page on window.chrome.webview's 'message' event as event.data.
+        webView2.PostWebMessageAsJson(PWSTR.From(json)).ThrowOnError();
+    }
+
+    // Surfaces the page's window.chrome.webview.postMessage(...) calls as MessageReceived (raw JSON).
+    private void WireMessaging(ICoreWebView2 webView2)
+    {
+        _webMessageHandler = new CoreWebView2WebMessageReceivedEventHandler((_, args) =>
+        {
+            args.get_WebMessageAsJson(out var json);
+            MessageReceived?.Invoke(json.ToString() ?? string.Empty);
+        });
+        webView2.add_WebMessageReceived(_webMessageHandler, ref _webMessageToken).ThrowOnError();
+    }
+
     private static RECT ToRect(in RectInt b) => new()
     {
         left = b.UpperLeft.X,
@@ -354,6 +380,7 @@ internal sealed class Win32WebView : INativeWebView
         _navCompletedHandler = null;
         _titleChangedHandler = null;
         _processFailedHandler = null;
+        _webMessageHandler = null;
         _cdpHandlers.Clear();
         _cdpReceivers.Clear();
         _webView2 = null;

@@ -38,15 +38,21 @@ public interface INativeWebView : IDisposable
     /// <summary>Evaluates <paramref name="javaScript"/> in the page and returns its JSON result.</summary>
     Task<string> ExecuteScriptAsync(string javaScript);
 
+    /// <summary>Posts <paramref name="json"/> to the page (.NET → JS). The page receives it on
+    /// <c>window.chrome.webview</c>'s <c>message</c> event as <c>event.data</c>. Must be valid JSON.
+    /// Pairs with <see cref="MessageReceived"/> for a two-way host↔page channel.</summary>
+    void PostMessage(string json);
+
     /// <summary>Raised when the document title changes.</summary>
     event Action<string>? TitleChanged;
 
     /// <summary>Raised when a navigation completes; carries the final URL.</summary>
     event Action<string>? NavigationCompleted;
 
-    /// <summary>Raised when the page posts a message to the host (JS → .NET).
-    /// Args: (name, payload).</summary>
-    event Action<string, string>? MessageReceived;
+    /// <summary>Raised when the page posts a message to the host via
+    /// <c>window.chrome.webview.postMessage(...)</c> (JS → .NET). Carries the message as raw JSON;
+    /// the host parses whatever protocol it defines on top.</summary>
+    event Action<string>? MessageReceived;
 
     /// <summary>Windows/HWND only: lets the host observe window messages the webview child
     /// receives. Args mirror a WndProc: (hwnd, msg, wParam, lParam). Null on other platforms.</summary>
