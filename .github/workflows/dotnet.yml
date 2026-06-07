@@ -72,6 +72,39 @@ jobs:
     - name: Test
       run: dotnet test src/SdlVulkan.Renderer.Tests -c $BUILD_CONF --no-build --logger "console;verbosity=detailed"
 
+  # Headless functional smoke for the Linux WebView backend (GtkWebView / WebKitGTK). Runs the
+  # network-free two-way-messaging self-test (tools/WebViewSmoke `assert` mode) inside a real SDL
+  # X11 window under Xvfb, asserting page->host + host->page + navigation + JS execution, then
+  # exits 0/1 deterministically (it _exit()s past WebKitGTK's atexit teardown, which otherwise
+  # aborts with 134). The harness SKIPs (exit 0) when the display / WebKitGTK / Vulkan stack is
+  # unavailable, mirroring BlendOpRegressionTests' Assert.Skip-on-no-ICD. Non-gating for now (not
+  # in publish-nuget's needs) until proven stable across runners. If a runner's Mesa does not
+  # auto-fall-back to software, add LIBGL_ALWAYS_SOFTWARE=1 + WEBKIT_DISABLE_DMABUF_RENDERER=1 below.
+  webview-smoke-linux:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+    # Plain apt-get (not cache-apt-pkgs-action): the cache action installs only the named packages
+    # without their dependencies, so mesa-vulkan-drivers landed without the driver libs its ICD needs
+    # -> "vkCreateInstance: Found no drivers" (-9). apt-get resolves dependencies and installs the ICD.
+    - name: Install WebKitGTK + software Vulkan + Xvfb
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libgtk-3-0 libwebkit2gtk-4.1-0 xvfb
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+    - name: WebView messaging self-test (headless via Xvfb)
+      run: >-
+        xvfb-run -a -s "-screen 0 1280x800x24"
+        env SDL_VIDEODRIVER=x11
+        dotnet run --project tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0 -c $BUILD_CONF assert
+
   publish-nuget:
     needs: [build, test]
     runs-on: ubuntu-latest

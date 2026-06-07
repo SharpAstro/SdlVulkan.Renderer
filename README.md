@@ -114,7 +114,7 @@ pass. Shipped as separate packages so core renderer consumers pull no webview de
 
 | Package | Purpose |
 | --- | --- |
-| [`SdlVulkan.Renderer.WebView`](https://www.nuget.org/packages/SdlVulkan.Renderer.WebView) | The `INativeWebView` abstraction + platform backends. Multi-targets `net10.0` (interface + factory only) and `net10.0-windows` (adds the Windows backend + its native dependency). |
+| [`SdlVulkan.Renderer.WebView`](https://www.nuget.org/packages/SdlVulkan.Renderer.WebView) | The `INativeWebView` abstraction + platform backends. Multi-targets `net10.0` (interface, factory + the Linux/WebKitGTK backend) and `net10.0-windows` (adds the Windows/WebView2 backend + its native dependency). |
 | [`SdlVulkan.Renderer.WebView.Native`](https://www.nuget.org/packages/SdlVulkan.Renderer.WebView.Native) | `WebView2Loader.dll` native assets per Windows RID (x64 / arm64 / x86). Pulled in transitively on Windows — no need to reference it directly. |
 
 ```
@@ -123,7 +123,8 @@ dotnet add package SdlVulkan.Renderer.WebView
 
 Backends:
 - **Windows** — `Win32WebView`, WebView2 (Edge/Chromium) via the [WebView2Aot](https://www.nuget.org/packages/WebView2Aot) Native-AOT bindings. Needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) installed: that runtime is a system component and is **not** redistributed here; only the loader DLL ships (in the `.Native` package).
-- **macOS** (`WKWebView`) / **Linux** (`WebKitGTK`, Wayland-preferred) — backends are present but not yet implemented.
+- **Linux** — `GtkWebView`, WebKitGTK 4.1 embedded via X11 (`XReparentWindow` into SDL's window; GTK runs its own loop on a dedicated thread). Requires the SDL window on the X11 driver — run with `SDL_VIDEODRIVER=x11` (works under Wayland sessions via XWayland) — and the WebKitGTK 4.1 + GTK3 runtime (`apt install libwebkit2gtk-4.1-0` on Debian/Ubuntu; present on most desktops).
+- **macOS** — `WKWebView`; backend is present but not yet implemented.
 
 ```csharp
 using SdlVulkan.Renderer;
@@ -148,13 +149,23 @@ string href = await web.ExecuteScriptAsync("location.href");   // JSON-encoded r
 For two-way native↔web interaction, `MessageReceived` surfaces the page's
 `window.chrome.webview.postMessage(...)` calls (as raw JSON) and `PostMessage(json)` sends the
 other way (the page receives it on `chrome.webview`'s `message` event) — build whatever
-request/response protocol you want on top.
+request/response protocol you want on top. The Linux backend injects a small `window.chrome.webview`
+shim at document-start (mapping to WebKit's `messageHandlers`), so the **same page JS API works on
+both backends**.
 
-Beyond navigation, the Windows backend surfaces diagnostics via the WebView2 DevTools
-Protocol: `Trace` (full redirect chain + browser log entries — network/CSP failures),
-`ConsoleMessage` (`console.*`), and `PageError` (uncaught JS exceptions, with stack).
-WebView2 async creation completes on the Win32 message pump, which SDL's event loop drives,
-so it composes with the standard render/event loop. Requires an STA thread.
+Beyond navigation, both backends surface diagnostics: `Trace` (redirect/load chain), `ConsoleMessage`
+(`console.*`), and `PageError` (uncaught JS exceptions, with stack). On Windows these come from the
+WebView2 DevTools Protocol; on Linux from in-page hooks forwarded over dedicated script-message
+channels.
+
+Backend notes:
+- **Windows** — WebView2's async creation completes on the Win32 message pump, which SDL's event
+  loop drives, so it composes with the standard render/event loop. Requires an STA thread. Events
+  are raised on the UI thread.
+- **Linux** — GTK runs its own main loop on a dedicated thread; public methods are safe to call from
+  the SDL event-loop thread (they marshal across via `g_idle_add`). Events (`MessageReceived`,
+  `TitleChanged`, …) are raised on the **GTK thread**, so handlers must be thread-safe or marshal back
+  themselves.
 
 ## Dependencies
 
