@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <!-- Base TFM carries the interface, factory, Gtk + Cocoa backends. The
+         net10.0-windows TFM adds Win32WebView + the Windows-only package refs.
+         A single multi-target NuGet; NuGet hands each consumer the right TFM.
+         EnableWindowsTargeting lets the net10.0-windows TFM compile on any OS
+         (else NETSDK1100), so the Linux CI runner can still build and ship it. -->
+    <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <VersionPrefix>6.0.0</VersionPrefix>
+    <AssemblyVersion>6.0.0.0</AssemblyVersion>
+    <PackageId>SdlVulkan.Renderer.WebView</PackageId>
+    <Description>Cross-platform native WebView (WebView2 / WebKitGTK / WKWebView) hosted inside an SdlVulkan.Renderer window.</Description>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <RepositoryUrl>https://github.com/SharpAstro/SdlVulkan.Renderer.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>embedded</DebugType>
+    <!-- This project sits outside the core's Directory.Packages.props directory,
+         so it does not inherit central versions (same situation the Tests project
+         documents). Pin package versions inline here. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- Core renderer: ProjectReference in-tree (becomes a package dependency on pack). -->
+  <ItemGroup>
+    <ProjectReference Include="..\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
+  </ItemGroup>
+
+  <!-- Win32WebView depends on WebView2Aot, which is Windows-only: exclude it from the
+       base TFM so the net10.0 (Linux/macOS) build doesn't see the dependency. -->
+  <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
+    <Compile Remove="Win32WebView.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <PackageReference Include="WebView2Aot" Version="1.4.1" />
+    <!-- Native loader package; ProjectReference emits the package dependency on pack. -->
+    <ProjectReference Include="..\SdlVulkan.Renderer.WebView.Native\SdlVulkan.Renderer.WebView.Native.csproj" />
+  </ItemGroup>
+
+</Project>

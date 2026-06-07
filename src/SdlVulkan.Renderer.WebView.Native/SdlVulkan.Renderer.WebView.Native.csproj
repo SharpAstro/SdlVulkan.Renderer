@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Native-assets-only package: ships WebView2Loader.dll per Windows RID and no
+    managed code. Versioned apart from the managed binding (SdlVulkan.Renderer.WebView)
+    because the loader rarely changes. Sourced from the Microsoft.Web.WebView2
+    package's runtimes/<rid>/native/ payload, vendored into this repo. The Edge
+    WebView2 *runtime* is a system component and is NOT redistributed here.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- No .cs in this project: don't pack the (empty) build output, just the natives. -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <VersionPrefix>6.0.0</VersionPrefix>
+    <AssemblyVersion>6.0.0.0</AssemblyVersion>
+    <PackageId>SdlVulkan.Renderer.WebView.Native</PackageId>
+    <Description>Native WebView2Loader.dll assets (win-x64 / win-arm64 / win-x86) for SdlVulkan.Renderer.WebView.</Description>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <RepositoryUrl>https://github.com/SharpAstro/SdlVulkan.Renderer.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <!-- A native-assets package has no lib assembly; the _._ placeholder makes it
+         TFM-compatible. Suppress the "no lib but has runtimes" pack warning. -->
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="runtimes/win-x64/native/WebView2Loader.dll"   Pack="true" PackagePath="runtimes/win-x64/native/" />
+    <None Include="runtimes/win-arm64/native/WebView2Loader.dll" Pack="true" PackagePath="runtimes/win-arm64/native/" />
+    <None Include="runtimes/win-x86/native/WebView2Loader.dll"   Pack="true" PackagePath="runtimes/win-x86/native/" />
+    <None Include="_._" Pack="true" PackagePath="lib/net10.0/_._" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>
