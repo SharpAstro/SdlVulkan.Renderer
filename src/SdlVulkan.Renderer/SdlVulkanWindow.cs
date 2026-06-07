@@ -93,6 +93,31 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
 
     public void GetSizeInPixels(out int w, out int h) => GetWindowSizeInPixels(Handle, out w, out h);
 
+    /// <summary>
+    /// Returns the platform-native window handle backing this SDL window: an HWND on Windows,
+    /// an NSWindow on macOS, a Wayland <c>wl_surface</c> (preferred) or X11 window on Linux.
+    /// Used to host native child surfaces such as an embedded webview. Returns
+    /// <see cref="nint.Zero"/> if the handle is unavailable for this platform/driver.
+    /// </summary>
+    public nint GetNativeWindowHandle()
+    {
+        var props = GetWindowProperties(Handle);
+        if (OperatingSystem.IsWindows())
+            return GetPointerProperty(props, Props.WindowWin32HWNDPointer, nint.Zero);
+        if (OperatingSystem.IsMacOS())
+            return GetPointerProperty(props, Props.WindowCocoaWindowPointer, nint.Zero);
+        if (OperatingSystem.IsLinux())
+        {
+            // Prefer Wayland; fall back to X11. The X11 window is a NUMBER property (the XID),
+            // not a pointer.
+            var wlSurface = GetPointerProperty(props, Props.WindowWaylandSurfacePointer, nint.Zero);
+            return wlSurface != nint.Zero
+                ? wlSurface
+                : (nint)GetNumberProperty(props, Props.WindowX11WindowNumber, 0);
+        }
+        return nint.Zero;
+    }
+
     public void SetTitle(string title) => SDL3.SDL.SetWindowTitle(Handle, title);
 
     /// <summary>
