@@ -106,6 +106,51 @@ On a fresh Ubuntu runner (GitHub Actions `ubuntu-latest`, Azure Pipelines, GitLa
 
 Containers: add the same two packages to your image. The offscreen path doesn't require a `tty`, display variable, or privileged mode.
 
+## Native WebView (optional)
+
+Host a native browser view *inside* an `SdlVulkanWindow`. The window system composites it
+over the Vulkan swapchain as a child surface — it does **not** go through the Vulkan render
+pass. Shipped as separate packages so core renderer consumers pull no webview dependency:
+
+| Package | Purpose |
+| --- | --- |
+| [`SdlVulkan.Renderer.WebView`](https://www.nuget.org/packages/SdlVulkan.Renderer.WebView) | The `INativeWebView` abstraction + platform backends. Multi-targets `net10.0` (interface + factory only) and `net10.0-windows` (adds the Windows backend + its native dependency). |
+| [`SdlVulkan.Renderer.WebView.Native`](https://www.nuget.org/packages/SdlVulkan.Renderer.WebView.Native) | `WebView2Loader.dll` native assets per Windows RID (x64 / arm64 / x86). Pulled in transitively on Windows — no need to reference it directly. |
+
+```
+dotnet add package SdlVulkan.Renderer.WebView
+```
+
+Backends:
+- **Windows** — `Win32WebView`, WebView2 (Edge/Chromium) via the [WebView2Aot](https://www.nuget.org/packages/WebView2Aot) Native-AOT bindings. Needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) installed: that runtime is a system component and is **not** redistributed here; only the loader DLL ships (in the `.Native` package).
+- **macOS** (`WKWebView`) / **Linux** (`WebKitGTK`, Wayland-preferred) — backends are present but not yet implemented.
+
+```csharp
+using SdlVulkan.Renderer;
+using SdlVulkan.Renderer.WebView;
+using DIR.Lib;
+
+using var window = SdlVulkanWindow.Create("App", 1280, 800);
+using var web = NativeWebView.Create();            // platform backend via the factory
+
+web.NavigationCompleted += url => Console.WriteLine($"loaded {url}");
+web.ConsoleMessage += (level, text) => Console.WriteLine($"[{level}] {text}");
+web.PageError += err => Console.WriteLine($"JS error: {err}");
+
+web.AttachToWindow(window);                         // parents the webview into the window's HWND
+web.Navigate("https://example.com");
+window.GetSizeInPixels(out var w, out var h);
+web.SetBounds(new RectInt(new PointInt(w, h), new PointInt(0, 0)));   // window pixel coords
+
+string href = await web.ExecuteScriptAsync("location.href");   // JSON-encoded result
+```
+
+Beyond navigation, the Windows backend surfaces diagnostics via the WebView2 DevTools
+Protocol: `Trace` (full redirect chain + browser log entries — network/CSP failures),
+`ConsoleMessage` (`console.*`), and `PageError` (uncaught JS exceptions, with stack).
+WebView2 async creation completes on the Win32 message pump, which SDL's event loop drives,
+so it composes with the standard render/event loop. Requires an STA thread.
+
 ## Dependencies
 
 - [DIR.Lib](https://www.nuget.org/packages/DIR.Lib) — Rendering primitives + FreeType glyph rasterization
