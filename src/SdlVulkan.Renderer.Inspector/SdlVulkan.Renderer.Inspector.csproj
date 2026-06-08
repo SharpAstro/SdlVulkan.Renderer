@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Published NuGet MCP-server package. A standalone stdio bridge: it discovers running Debug-build
+    SdlVulkan.Renderer apps over UDP multicast and drives them over TCP. It references NOTHING from
+    the framework (it speaks the JSON protocol), so publishing it is independent of the framework's
+    Release footprint (the in-process inspector half is #if DEBUG and never ships).
+
+    Run during development:  dotnet run, from this project directory.
+    Consume from NuGet:      dnx SdlVulkan.Renderer.Inspector (with the dnx auto-confirm flag).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- This project lives outside the framework's Directory.Packages.props subtree, so it pins
+         its own versions rather than using central package management. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+
+    <!-- NuGet MCP-server packaging (consumed via `dnx`). Packed on build so the repo's CI
+         (dotnet build -c Release, then push of all *.nupkg) publishes it like the framework. -->
+    <PackAsTool>true</PackAsTool>
+    <PackageType>McpServer</PackageType>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <PackageId>SdlVulkan.Renderer.Inspector</PackageId>
+    <ToolCommandName>sdlvulkan-inspector</ToolCommandName>
+    <VersionPrefix>6.0.0</VersionPrefix>
+    <Description>MCP server that discovers running Debug-build SDL3+Vulkan apps (built on SdlVulkan.Renderer) on the LAN and lets an AI agent inspect, screenshot, and drive their live UI.</Description>
+    <PackageTags>mcp;ai;sdl;vulkan;debugging;inspector;ui</PackageTags>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/SharpAstro/SdlVulkan.Renderer.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
+    <PackageReference Include="SharpAstro.Png" Version="3.3.361" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include=".mcp/server.json" Pack="true" PackagePath="/.mcp/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>

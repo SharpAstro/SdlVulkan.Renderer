@@ -1,0 +1,43 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schemas/draft/2025-07-09/server.json",
+  "name": "io.github.sharpastro/sdlvulkan-inspector",
+  "description": "Discover running Debug-build SDL3+Vulkan apps (built on SdlVulkan.Renderer) on the local machine and LAN, and inspect/screenshot/drive their live UI.",
+  "version": "6.0.0",
+  "packages": [
+    {
+      "registryType": "nuget",
+      "registryBaseUrl": "https://api.nuget.org/v3/index.json",
+      "identifier": "SdlVulkan.Renderer.Inspector",
+      "version": "6.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--group",
+          "description": "Discovery multicast group (default 239.255.77.90).",
+          "isRequired": false
+        },
+        {
+          "type": "named",
+          "name": "--port",
+          "description": "Discovery multicast port (default 47891).",
+          "isRequired": false
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "SDLVK_INSPECTOR_GROUP",
+          "description": "Discovery multicast group override.",
+          "isRequired": false
+        },
+        {
+          "name": "SDLVK_INSPECTOR_PORT",
+          "description": "Discovery multicast port override.",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

@@ -87,6 +87,15 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// </summary>
     public int CurrentFrame => _currentFrame;
 
+#if DEBUG
+    /// <summary>
+    /// DEBUG-only: index into <c>_swapchainImages</c> of the most recently presented frame.
+    /// Stays valid after <see cref="EndFrame"/> (only <see cref="CurrentFrame"/> advances there),
+    /// so the inspector's render-thread readback can copy the just-presented image.
+    /// </summary>
+    internal uint CurrentSwapchainImageIndex => _currentImageIndex;
+#endif
+
     // Per-frame vertex staging buffers (avoids race between in-flight frames)
     private readonly VkBuffer[] _vertexBuffers = new VkBuffer[MaxFramesInFlight];
     private readonly VkDeviceMemory[] _vertexMemories = new VkDeviceMemory[MaxFramesInFlight];
@@ -418,7 +427,14 @@ public sealed unsafe partial class VulkanContext : IDisposable
             imageColorSpace = VkColorSpaceKHR.SrgbNonLinear,
             imageExtent = extent,
             imageArrayLayers = 1,
+#if DEBUG
+            // TransferSrc lets the DEBUG-only inspector copy the presented frame out for screenshots
+            // (see VulkanContext.SwapchainReadback.cs). B8G8R8A8Unorm is guaranteed to support
+            // TransferSrc on all conformant desktop drivers, so no format fallback is needed.
+            imageUsage = VkImageUsageFlags.ColorAttachment | VkImageUsageFlags.TransferSrc,
+#else
             imageUsage = VkImageUsageFlags.ColorAttachment,
+#endif
             imageSharingMode = VkSharingMode.Exclusive,
             preTransform = caps.currentTransform,
             compositeAlpha = VkCompositeAlphaFlagsKHR.Opaque,
