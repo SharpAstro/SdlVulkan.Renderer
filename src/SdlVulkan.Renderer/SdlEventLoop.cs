@@ -70,6 +70,12 @@ public sealed class SdlEventLoop
     /// <summary>Number of windows currently registered.</summary>
     public int WindowCount => _viewList.Count;
 
+#if DEBUG
+    /// <summary>DEBUG-only: the single-window primary view, for the debug inspector's input
+    /// injection + frame capture. Null when built with the multi-window constructor.</summary>
+    internal SdlWindowView? DebugPrimaryView => _primary;
+#endif
+
     // --- Loop-level callbacks (process-wide, not per-window) ---
 
     /// <summary>
