@@ -60,8 +60,12 @@ public sealed class InspectorTools
         var payload = Convert.FromBase64String(result.GetProperty("base64").GetString() ?? "");
         var rgba = format == "rgba+gzip" ? Gunzip(payload) : payload;
         var png = PngWriter.Encode(rgba, width, height);
-        // ImageContentBlock.Data is ReadOnlyMemory<byte> (the SDK base64-encodes on the wire).
-        return new ImageContentBlock { Data = png, MimeType = "image/png" };
+        // ImageContentBlock.Data holds the base64-encoded UTF-8 bytes that go on the wire verbatim
+        // as the `data` string (DecodedData, the raw-bytes view, is get-only). So encode the PNG to
+        // base64 text ourselves and store its UTF-8 bytes; assigning raw PNG bytes here makes the SDK
+        // emit them as the `data` string directly, which fails the client's base64 validation.
+        var base64 = Convert.ToBase64String(png);
+        return new ImageContentBlock { Data = Encoding.UTF8.GetBytes(base64), MimeType = "image/png" };
     }
 
     [McpServerTool, Description("Synthesize a left mouse click at pixel coordinates (routes through the same input path as a real SDL click).")]
