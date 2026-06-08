@@ -39,7 +39,7 @@ public sealed class DebugInspector : IDisposable
     private sealed record DescribeCommand : InspectorCommand;
     private sealed record ScreenshotCommand : InspectorCommand;
     private sealed record ListSignalsCommand : InspectorCommand;
-    private sealed record ClickCommand(float X, float Y) : InspectorCommand;
+    private sealed record ClickCommand(float X, float Y, InputModifier Mods = InputModifier.None) : InspectorCommand;
     private sealed record ClickLabelCommand(string Label) : InspectorCommand;
     private sealed record KeyCommand(InputKey Key, InputModifier Mods) : InspectorCommand;
     private sealed record TextCommand(string Text) : InspectorCommand;
@@ -196,7 +196,12 @@ public sealed class DebugInspector : IDisposable
         "describe" => new DescribeCommand(),
         "screenshot" => new ScreenshotCommand(),
         "signals" => new ListSignalsCommand(),
-        "click" => new ClickCommand(p.GetProperty("x").GetSingle(), p.GetProperty("y").GetSingle()),
+        "click" => new ClickCommand(
+            p.GetProperty("x").GetSingle(),
+            p.GetProperty("y").GetSingle(),
+            p.TryGetProperty("mods", out var cm) && cm.ValueKind == JsonValueKind.String
+                ? Enum.Parse<InputModifier>(cm.GetString() ?? "None", ignoreCase: true)
+                : InputModifier.None),
         "clickLabel" => new ClickLabelCommand(p.GetProperty("label").GetString() ?? ""),
         "key" => new KeyCommand(
             Enum.Parse<InputKey>(p.GetProperty("key").GetString() ?? "", ignoreCase: true),
@@ -293,7 +298,7 @@ public sealed class DebugInspector : IDisposable
         DescribeCommand => ExecuteDescribe(),
         ScreenshotCommand => ExecuteScreenshot(),
         ListSignalsCommand => ExecuteListSignals(),
-        ClickCommand c => ExecuteClickAt(c.X, c.Y),
+        ClickCommand c => ExecuteClickAt(c.X, c.Y, c.Mods),
         ClickLabelCommand c => ExecuteClickLabel(c.Label),
         KeyCommand c => ExecuteKey(c.Key, c.Mods),
         TextCommand c => ExecuteText(c.Text),
@@ -374,10 +379,10 @@ public sealed class DebugInspector : IDisposable
         w.WriteEndArray();
     });
 
-    private string ExecuteClickAt(float x, float y)
+    private string ExecuteClickAt(float x, float y, InputModifier mods = InputModifier.None)
     {
         _view.OnMouseMove?.Invoke(x, y); // update cached pointer position (some consumers read it on MouseUp)
-        _view.OnMouseDown?.Invoke(1, x, y, 1, InputModifier.None);
+        _view.OnMouseDown?.Invoke(1, x, y, 1, mods);
         _view.OnMouseUp?.Invoke(1);
         _view.RequestRedraw();
         return "\"ok\"";

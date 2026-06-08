@@ -68,15 +68,16 @@ public sealed class InspectorTools
         return new ImageContentBlock { Data = Encoding.UTF8.GetBytes(base64), MimeType = "image/png" };
     }
 
-    [McpServerTool, Description("Synthesize a left mouse click at pixel coordinates (routes through the same input path as a real SDL click).")]
+    [McpServerTool, Description("Synthesize a left mouse click at pixel coordinates (routes through the same input path as a real SDL click). Pass mods to hold a keyboard modifier during the click, e.g. Ctrl for a Ctrl+click.")]
     public static async Task<string> click(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("X pixel coordinate.")] float x,
         [Description("Y pixel coordinate.")] float y,
+        [Description("InputModifier name held during the click (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None.")] string mods = "None",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "click", new { x, y }, ct);
+        var result = await socket.SendAsync(target, "click", new { x, y, mods }, ct);
         return result.GetString() ?? "ok";
     }
 
