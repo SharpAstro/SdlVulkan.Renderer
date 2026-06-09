@@ -149,6 +149,27 @@ public sealed unsafe partial class VulkanContext
     }
 
     /// <summary>
+    /// Recreate the offscreen render target at a new size, keeping the device, command buffers,
+    /// sync objects, vertex buffers, and the renderer's font atlases intact — so glyphs stay warm
+    /// across differently-sized pages in a multi-page raster/export job (a fresh context per page
+    /// would re-rasterize every glyph). Count1 (no MSAA) only, which is what the offscreen
+    /// raster/export path uses; CleanupOffscreenTarget doesn't free MSAA attachments.
+    /// </summary>
+    public void ResizeOffscreen(uint width, uint height)
+    {
+        if (!_isOffscreen) throw new InvalidOperationException("ResizeOffscreen requires CreateOffscreen");
+        if (MsaaSamples != VkSampleCountFlags.Count1)
+            throw new InvalidOperationException("ResizeOffscreen supports Count1 offscreen targets only");
+        if (width == _offscreenWidth && height == _offscreenHeight) return;
+
+        DeviceApi.vkDeviceWaitIdle(); // no in-flight frame may reference the target we're about to destroy
+        CleanupOffscreenTarget();
+        _offscreenWidth = width;
+        _offscreenHeight = height;
+        CreateOffscreenTarget(width, height);
+    }
+
+    /// <summary>
     /// Offscreen counterpart of <see cref="BeginFrame"/>. Waits on the frame fence, resets
     /// the command buffer, and returns it ready for recording. No swapchain acquire.
     /// </summary>
