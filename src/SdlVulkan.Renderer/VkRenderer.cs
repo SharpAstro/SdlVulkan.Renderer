@@ -195,6 +195,20 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// Resize the offscreen render target (offscreen contexts only) and update the projection to
+    /// match. Unlike <see cref="Resize"/> this rebuilds the single VkImage target, not a swapchain,
+    /// and leaves the glyph atlases intact — for multi-page offscreen raster/export where pages
+    /// differ in size but should share a warm atlas.
+    /// </summary>
+    public void ResizeOffscreen(uint width, uint height)
+    {
+        _width = width;
+        _height = height;
+        Surface.ResizeOffscreen(width, height);
+        UpdateProjection();
+    }
+
+    /// <summary>
     /// Drop the current frame's command buffer reference and ask the underlying context to
     /// rebuild its sync objects and swapchain. Use from an outer try/catch when a Vulkan call
     /// (typically vkQueueSubmit/Present) throws mid-frame, so the next frame can start clean
