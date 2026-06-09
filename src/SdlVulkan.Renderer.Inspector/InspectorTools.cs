@@ -92,10 +92,10 @@ public sealed class InspectorTools
         return result.GetString() ?? "ok";
     }
 
-    [McpServerTool, Description("Inject a key press. Key is an InputKey name (e.g. Return, Escape, Tab, F3, A). Mods is an InputModifier name (None, Ctrl, Shift, Alt, or combos like CtrlShift).")]
+    [McpServerTool, Description("Inject a key press through the SAME path as a real SDL keypress, so it reaches a focused text field / search box (e.g. Enter commits an open search). Key is a DIR.Lib InputKey name (see the key param). Mods is None/Ctrl/Shift/Alt or a combo like CtrlShift / 'Ctrl+Alt'.")]
     public static async Task<string> press_key(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
-        [Description("InputKey name.")] string key,
-        [Description("InputModifier name (default None).")] string mods = "None",
+        [Description("InputKey name: Enter, Escape, Tab, Space, Backspace, Delete, Up/Down/Left/Right, Home/End, F1-F12, A-Z, D0-D9, Plus/Minus/Period/Comma/etc. Aliases accepted: Return=Enter, Esc=Escape, ArrowUp/Down/Left/Right, Spacebar=Space, 0-9=D0-D9.")] string key,
+        [Description("Modifier(s) held: None, Ctrl, Shift, Alt, or a combo like CtrlShift / 'Ctrl+Alt'. Default None.")] string mods = "None",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
