@@ -199,21 +199,82 @@ public sealed class DebugInspector : IDisposable
         "click" => new ClickCommand(
             p.GetProperty("x").GetSingle(),
             p.GetProperty("y").GetSingle(),
-            p.TryGetProperty("mods", out var cm) && cm.ValueKind == JsonValueKind.String
-                ? Enum.Parse<InputModifier>(cm.GetString() ?? "None", ignoreCase: true)
-                : InputModifier.None),
+            ResolveModifier(p.TryGetProperty("mods", out var cm) && cm.ValueKind == JsonValueKind.String ? cm.GetString() : null)),
         "clickLabel" => new ClickLabelCommand(p.GetProperty("label").GetString() ?? ""),
         "key" => new KeyCommand(
-            Enum.Parse<InputKey>(p.GetProperty("key").GetString() ?? "", ignoreCase: true),
-            p.TryGetProperty("mods", out var m) && m.ValueKind == JsonValueKind.String
-                ? Enum.Parse<InputModifier>(m.GetString() ?? "None", ignoreCase: true)
-                : InputModifier.None),
+            ResolveInputKey(p.GetProperty("key").GetString() ?? ""),
+            ResolveModifier(p.TryGetProperty("mods", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null)),
         "text" => new TextCommand(p.GetProperty("s").GetString() ?? ""),
         "postSignal" => new PostSignalCommand(
             p.GetProperty("name").GetString() ?? "",
             p.TryGetProperty("args", out var a) ? a.Clone() : default),
         _ => throw new ArgumentException($"unknown method: {method}")
     };
+
+    // Resolve a "key" command string to an InputKey.
+    //
+    // IMPORTANT (so the next person doesn't re-debug this): a synthesized key
+    // travels the EXACT SAME path as a hardware keypress. ExecuteKey calls
+    // _view.OnKeyDown(key, mods); SdlEventLoop invokes that very delegate for a
+    // real SDL KeyDown (Scancode.ToInputKey). So an injected key reaches the
+    // focused text field / search box identically to a human keypress -- there
+    // is NO separate text-field routing to special-case. e.g. pressing Enter
+    // while the sky-map search box is focused commits it, exactly like a user.
+    //
+    // The only footgun is the NAME: keys are DIR.Lib.InputKey values --
+    // Enter (NOT "Return"), Escape, Tab, Space, Up/Down/Left/Right, F1-F12,
+    // A-Z, D0-D9, Plus/Minus/... We accept the common natural aliases below so
+    // "Return"/"Esc"/"ArrowUp"/"1" just work, and an unknown name returns a
+    // clear error listing the valid set rather than an opaque parse failure.
+    private static InputKey ResolveInputKey(string raw)
+    {
+        var name = raw.Trim();
+        if (name.Length == 0)
+            throw new ArgumentException("key is required (an InputKey name, e.g. Enter, Escape, Tab, A, F3)");
+
+        var canonical = name.ToLowerInvariant() switch
+        {
+            "return" or "ret" or "cr" => "Enter",
+            "esc" => "Escape",
+            "spacebar" or "spc" => "Space",
+            "del" => "Delete",
+            "bksp" or "bs" => "Backspace",
+            "pgup" => "PageUp",
+            "pgdn" or "pgdown" => "PageDown",
+            "arrowup" => "Up",
+            "arrowdown" => "Down",
+            "arrowleft" => "Left",
+            "arrowright" => "Right",
+            "0" or "1" or "2" or "3" or "4" or "5" or "6" or "7" or "8" or "9" => "D" + name,
+            _ => name,
+        };
+
+        if (Enum.TryParse<InputKey>(canonical, ignoreCase: true, out var key))
+            return key;
+
+        throw new ArgumentException(
+            $"unknown key '{raw}'. Valid InputKey names: {string.Join(", ", Enum.GetNames<InputKey>())}. " +
+            "Aliases accepted: Return=Enter, Esc=Escape, Spacebar=Space, Del=Delete, " +
+            "PgUp/PgDn=PageUp/PageDown, ArrowUp/Down/Left/Right, 0-9=D0-D9.");
+    }
+
+    // Resolve a modifier string to InputModifier flags. Tolerant of how a caller
+    // spells a combo: "Ctrl", "ctrl+shift", "Ctrl, Shift", "CtrlShift" and
+    // "Control" all work (Enum.Parse only accepts the comma-separated [Flags]
+    // form, so "CtrlShift" -- which our tool docs advertise -- would otherwise
+    // throw). Matches known tokens as substrings, so order/separator/case-free.
+    private static InputModifier ResolveModifier(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return InputModifier.None;
+        var s = raw.ToLowerInvariant();
+        if (s is "none" or "0") return InputModifier.None;
+
+        var mod = InputModifier.None;
+        if (s.Contains("ctrl") || s.Contains("control")) mod |= InputModifier.Ctrl;
+        if (s.Contains("shift")) mod |= InputModifier.Shift;
+        if (s.Contains("alt") || s.Contains("option")) mod |= InputModifier.Alt;
+        return mod;
+    }
 
     // ---------------- UDP multicast discovery responder (background thread) ----------------
 
