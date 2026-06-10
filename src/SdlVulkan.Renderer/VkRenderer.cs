@@ -946,7 +946,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         while (_sdfPageVertices.Count <= page)
             _sdfPageVertices.Add(new List<float>(24 * 64));
         var pageList = _sdfPageVertices[page];
-        for (var i = 0; i < 24; i++) pageList.Add(verts[i]);
+        pageList.AddRange(verts);
         _glyphBatchVertexCount += 6;
     }
 
@@ -1001,7 +1001,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             inkY = baselineY + bx * sinR - by * cosR;
         }
 
-        AddBatchedSdfGlyph(fontPath, character, charCode, inkX, inkY, rotation, hint, xScale);
+        // The glyph is already resolved above for its bearings — hand it straight to the
+        // internal overload instead of the fontPath one, which would look it up again.
+        AddBatchedSdfGlyph(in glyph, inkX, inkY, rotation, xScale);
     }
 
     /// <summary>
@@ -1237,13 +1239,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (_pipelines is null || _sdfFontAtlas is null || text.IsEmpty)
             return;
 
-        var api = Surface.DeviceApi;
-        var textStr = text.ToString();
-        var lines = textStr.Split('\n');
+        // Split on '\n' without materializing a string or string[] — DrawText runs every
+        // frame for every UI label, so this path must stay allocation-free.
+        var lineCount = text.Count('\n') + 1;
 
         var glyphScale = VkSdfFontAtlas.GetGlyphScale(fontSize);
         var lineHeight = fontSize * 1.3f;
-        var totalHeight = lines.Length * lineHeight;
+        var totalHeight = lineCount * lineHeight;
 
         var layoutX = (float)layout.UpperLeft.X;
         var layoutY = (float)layout.UpperLeft.Y;
@@ -1264,10 +1266,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         BeginSdfGlyphBatch(fontColor, fontSize);
         var inSdfBatch = true;
 
-        for (var lineIdx = 0; lineIdx < lines.Length; lineIdx++)
+        var remaining = text;
+        for (var lineIdx = 0; lineIdx < lineCount; lineIdx++)
         {
-            var line = lines[lineIdx];
-            if (string.IsNullOrEmpty(line)) continue;
+            var nl = remaining.IndexOf('\n');
+            var line = nl < 0 ? remaining : remaining[..nl];
+            if (nl >= 0) remaining = remaining[(nl + 1)..];
+            if (line.IsEmpty) continue;
 
             // Compute visual text metrics (scaled from SDF raster size to display size)
             var advanceSum = 0f;

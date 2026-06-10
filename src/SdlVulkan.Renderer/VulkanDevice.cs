@@ -306,13 +306,22 @@ public sealed unsafe class VulkanDevice : IDisposable
         DeviceApi.vkUpdateDescriptorSets(1, &write, 0, null);
     }
 
+    // A device's memory properties never change — query the 504-byte struct once instead of
+    // round-tripping into the ICD on every buffer/image allocation.
+    private VkPhysicalDeviceMemoryProperties _memProperties;
+    private bool _memPropertiesCached;
+
     public uint FindMemoryType(uint typeFilter, VkMemoryPropertyFlags properties)
     {
-        InstanceApi.vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, out var memProperties);
-        for (uint i = 0; i < memProperties.memoryTypeCount; i++)
+        if (!_memPropertiesCached)
+        {
+            InstanceApi.vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, out _memProperties);
+            _memPropertiesCached = true;
+        }
+        for (uint i = 0; i < _memProperties.memoryTypeCount; i++)
         {
             if ((typeFilter & (1u << (int)i)) != 0 &&
-                (memProperties.memoryTypes[(int)i].propertyFlags & properties) == properties)
+                (_memProperties.memoryTypes[(int)i].propertyFlags & properties) == properties)
                 return i;
         }
         throw new InvalidOperationException("Failed to find suitable memory type");
