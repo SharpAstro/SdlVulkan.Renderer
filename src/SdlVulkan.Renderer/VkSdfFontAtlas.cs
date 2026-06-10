@@ -102,6 +102,9 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         public readonly VkBuffer[] UploadBuffers = new VkBuffer[VulkanContext.MaxFramesInFlight];
         public readonly VkDeviceMemory[] UploadMemories = new VkDeviceMemory[VulkanContext.MaxFramesInFlight];
         public readonly ulong[] UploadSizes = new ulong[VulkanContext.MaxFramesInFlight];
+        // Persistently mapped pointer per slot (HostCoherent memory — legal to keep mapped
+        // for the buffer's lifetime; vkFreeMemory unmaps implicitly).
+        public readonly IntPtr[] UploadMapped = new IntPtr[VulkanContext.MaxFramesInFlight];
     }
 
     private readonly List<Page> _pages = new();
@@ -377,23 +380,21 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         var regionH = page.DirtyY1 - page.DirtyY0;
         var pixelCount = regionW * regionH;
 
-        // Extract dirty region into contiguous buffer (1 byte per pixel)
-        var data = new byte[pixelCount];
-        for (var row = 0; row < regionH; row++)
-        {
-            var srcOffset = (page.DirtyY0 + row) * _pageDim + page.DirtyX0;
-            var dstOffset = row * regionW;
-            Buffer.BlockCopy(page.Staging, srcOffset, data, dstOffset, regionW);
-        }
-
         var bufferSize = (ulong)pixelCount;
         EnsureUploadBuffer(page, slot, bufferSize);
 
-        void* mapped;
-        _ctx.DeviceApi.vkMapMemory(page.UploadMemories[slot], 0, bufferSize, 0, &mapped);
-        fixed (byte* pData = data)
-            Buffer.MemoryCopy(pData, mapped, bufferSize, bufferSize);
-        _ctx.DeviceApi.vkUnmapMemory(page.UploadMemories[slot]);
+        // Copy the dirty region (1 byte per pixel) row-by-row straight into the persistently
+        // mapped upload buffer — no intermediate heap array (large dirty regions would land on
+        // the LOH) and no map/unmap round-trip per flush (memory is HostCoherent).
+        var dst = (byte*)page.UploadMapped[slot];
+        fixed (byte* pStaging = page.Staging)
+        {
+            for (var row = 0; row < regionH; row++)
+            {
+                var srcOffset = (page.DirtyY0 + row) * _pageDim + page.DirtyX0;
+                Buffer.MemoryCopy(pStaging + srcOffset, dst + row * regionW, regionW, regionW);
+            }
+        }
 
         // First flush of a page: its image is still Undefined, so transition from there.
         // Subsequent flushes transition from ShaderReadOnly.
@@ -744,5 +745,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         api.vkAllocateMemory(&allocInfo, null, out page.UploadMemories[slot]).CheckResult();
         api.vkBindBufferMemory(page.UploadBuffers[slot], page.UploadMemories[slot], 0);
         page.UploadSizes[slot] = size;
+
+        // Map once for the buffer's lifetime; FlushPage writes through this pointer every
+        // flush instead of paying a vkMapMemory/vkUnmapMemory round-trip each time.
+        void* mapped;
+        api.vkMapMemory(page.UploadMemories[slot], 0, size, 0, &mapped).CheckResult();
+        page.UploadMapped[slot] = (IntPtr)mapped;
     }
 }

@@ -61,6 +61,9 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     private readonly VkBuffer[] _uploadBuffers = new VkBuffer[VulkanContext.MaxFramesInFlight];
     private readonly VkDeviceMemory[] _uploadMemories = new VkDeviceMemory[VulkanContext.MaxFramesInFlight];
     private readonly ulong[] _uploadBufferSizes = new ulong[VulkanContext.MaxFramesInFlight];
+    // Persistently mapped pointer per slot (HostCoherent memory — legal to keep mapped
+    // for the buffer's lifetime; vkFreeMemory unmaps implicitly).
+    private readonly IntPtr[] _uploadMapped = new IntPtr[VulkanContext.MaxFramesInFlight];
 
     public VkImageView ImageView => _imageView;
     public VkSampler Sampler => _sampler;
@@ -157,15 +160,6 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         var regionH = _dirtyY1 - _dirtyY0;
         var pixelCount = regionW * regionH;
 
-        // Extract the dirty region into a contiguous buffer
-        var rgba = new byte[pixelCount * 4];
-        for (var row = 0; row < regionH; row++)
-        {
-            var srcOffset = ((_dirtyY0 + row) * _atlasWidth + _dirtyX0) * 4;
-            var dstOffset = row * regionW * 4;
-            Buffer.BlockCopy(_staging, srcOffset, rgba, dstOffset, regionW * 4);
-        }
-
         var bufferSize = (ulong)(pixelCount * 4);
 
         // Pick this frame's upload slot. BeginFrame has already waited on the
@@ -173,11 +167,19 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         var slot = _ctx.CurrentFrame;
         EnsureUploadBuffer(slot, bufferSize);
 
-        void* mapped;
-        _ctx.DeviceApi.vkMapMemory(_uploadMemories[slot], 0, bufferSize, 0, &mapped);
-        fixed (byte* pRgba = rgba)
-            Buffer.MemoryCopy(pRgba, mapped, bufferSize, bufferSize);
-        _ctx.DeviceApi.vkUnmapMemory(_uploadMemories[slot]);
+        // Copy the dirty region row-by-row straight into the persistently mapped upload
+        // buffer — no intermediate heap array (large dirty regions would land on the LOH)
+        // and no map/unmap round-trip per flush (memory is HostCoherent).
+        var dst = (byte*)_uploadMapped[slot];
+        fixed (byte* pStaging = _staging)
+        {
+            for (var row = 0; row < regionH; row++)
+            {
+                var srcOffset = ((_dirtyY0 + row) * _atlasWidth + _dirtyX0) * 4;
+                var rowBytes = regionW * 4;
+                Buffer.MemoryCopy(pStaging + srcOffset, dst + row * rowBytes, rowBytes, rowBytes);
+            }
+        }
 
         // First Flush after CreateImage: the image is still in Undefined layout, so transition from
         // there (a fresh image has no prior contents to preserve). Subsequent flushes come from
@@ -442,6 +444,12 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkAllocateMemory(&allocInfo, null, out _uploadMemories[slot]).CheckResult();
         api.vkBindBufferMemory(_uploadBuffers[slot], _uploadMemories[slot], 0);
         _uploadBufferSizes[slot] = size;
+
+        // Map once for the buffer's lifetime; Flush writes through this pointer every
+        // flush instead of paying a vkMapMemory/vkUnmapMemory round-trip each time.
+        void* mapped;
+        api.vkMapMemory(_uploadMemories[slot], 0, size, 0, &mapped).CheckResult();
+        _uploadMapped[slot] = (IntPtr)mapped;
     }
 
     private void ResetDirtyRegion()
