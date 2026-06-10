@@ -419,6 +419,30 @@ public sealed unsafe partial class VulkanContext : IDisposable
         SwapchainWidth = extent.width;
         SwapchainHeight = extent.height;
 
+        // Prefer Mailbox over Fifo when the driver offers it: Fifo (vsync) can block
+        // vkAcquireNextImageKHR for up to a full vblank interval, adding up to ~16 ms of
+        // input-to-pixel latency while actively rendering (zoom/pan). Mailbox replaces the
+        // queued image instead of waiting — stale intermediate frames are worthless for an
+        // interactive viewer. Fifo is the spec-guaranteed fallback. The event loop is
+        // idle-suppressing, so Mailbox does not turn the app into a busy renderer.
+        var presentMode = VkPresentModeKHR.Fifo;
+        uint pmCount;
+        InstanceApi.vkGetPhysicalDeviceSurfacePresentModesKHR(PhysicalDevice, _surface, &pmCount, null);
+        if (pmCount > 0)
+        {
+            Span<VkPresentModeKHR> modes = stackalloc VkPresentModeKHR[(int)pmCount];
+            fixed (VkPresentModeKHR* pModes = modes)
+                InstanceApi.vkGetPhysicalDeviceSurfacePresentModesKHR(PhysicalDevice, _surface, &pmCount, pModes);
+            foreach (var mode in modes)
+            {
+                if (mode == VkPresentModeKHR.Mailbox)
+                {
+                    presentMode = VkPresentModeKHR.Mailbox;
+                    break;
+                }
+            }
+        }
+
         VkSwapchainCreateInfoKHR swapCI = new()
         {
             surface = _surface,
@@ -438,7 +462,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             imageSharingMode = VkSharingMode.Exclusive,
             preTransform = caps.currentTransform,
             compositeAlpha = VkCompositeAlphaFlagsKHR.Opaque,
-            presentMode = VkPresentModeKHR.Fifo,
+            presentMode = presentMode,
             clipped = true,
             oldSwapchain = VkSwapchainKHR.Null
         };

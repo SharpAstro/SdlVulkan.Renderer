@@ -67,7 +67,29 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// The active command buffer for the current frame. Only valid between BeginFrame and EndFrame.
     /// Allows side-car pipelines to record custom draw commands within the same render pass.
     /// </summary>
-    public VkCommandBuffer CurrentCommandBuffer => _currentCmd;
+    public VkCommandBuffer CurrentCommandBuffer
+    {
+        get
+        {
+            // A side-car may bind its own pipeline into this command buffer — the renderer's
+            // redundant-bind cache can no longer assume its pipeline is still bound.
+            _lastBoundPipeline = VkPipeline.Null;
+            return _currentCmd;
+        }
+    }
+
+    // Last pipeline bound into the current command buffer. vkCmdBindPipeline is a real
+    // state-change token on the GPU command processor (a tile flush on mobile GPUs), and
+    // page-content rendering binds the same Flat/Stroke pipeline hundreds of times in a row.
+    // Push constants are always (re-)pushed by every draw — only the bind is deduplicated.
+    private VkPipeline _lastBoundPipeline;
+
+    private void BindPipeline(VkPipeline pipeline)
+    {
+        if (pipeline == _lastBoundPipeline) return;
+        Surface.DeviceApi.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, pipeline);
+        _lastBoundPipeline = pipeline;
+    }
 
     /// <summary>
     /// Measures the size of the given text in pixels at the specified font size.
@@ -145,6 +167,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         OnPreRenderPass?.Invoke(_currentCmd);
 
         Surface.BeginRenderPass(_currentCmd, clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f);
+        _lastBoundPipeline = VkPipeline.Null; // fresh command buffer — nothing is bound
         return true;
     }
 
@@ -177,6 +200,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         Surface.BeginOffscreenRenderPass(_currentCmd,
             clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f);
+        _lastBoundPipeline = VkPipeline.Null; // fresh command buffer — nothing is bound
         return true;
     }
 
@@ -217,6 +241,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void RecoverFromGpuError()
     {
         _currentCmd = VkCommandBuffer.Null;
+        _lastBoundPipeline = VkPipeline.Null;
         Surface.RecoverFromGpuError(_width, _height);
         UpdateProjection();
     }
@@ -241,7 +266,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.FlatPipeline);
+        BindPipeline(_pipelines.FlatPipeline);
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
@@ -252,10 +277,56 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
     }
 
+    // Scratch vertex accumulator for FillRectangles — reused across calls to avoid a per-call
+    // allocation. Render-thread only, like all draw APIs.
+    private readonly List<float> _rectScratch = new();
+
     public override void FillRectangles(ReadOnlySpan<(RectInt Rect, DIR.Lib.RGBAColor32 Color)> rectangles)
     {
-        foreach (var (rect, color) in rectangles)
-            FillRectangle(rect, color);
+        if (_pipelines is null || rectangles.IsEmpty) return;
+
+        var api = Surface.DeviceApi;
+
+        // Batch consecutive same-color rectangles into one vertex run + one draw. Draw order
+        // is preserved (rectangles may overlap), so only ADJACENT runs merge — which already
+        // collapses the common UI case (rows, grids, highlight sets) to a handful of draws
+        // instead of bind+push+draw per rectangle.
+        var start = 0;
+        while (start < rectangles.Length)
+        {
+            var color = rectangles[start].Color;
+            var end = start + 1;
+            while (end < rectangles.Length && rectangles[end].Color == color)
+                end++;
+
+            _rectScratch.Clear();
+            for (var i = start; i < end; i++)
+            {
+                var r = rectangles[i].Rect;
+                var x0 = (float)r.UpperLeft.X;
+                var y0 = (float)r.UpperLeft.Y;
+                var x1 = (float)r.LowerRight.X;
+                var y1 = (float)r.LowerRight.Y;
+                _rectScratch.AddRange([x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1]);
+            }
+
+            SetColor(color);
+            var offset = Surface.WriteVertices(CollectionsMarshal.AsSpan(_rectScratch));
+            if (offset != uint.MaxValue)
+            {
+                BindPipeline(_pipelines.FlatPipeline);
+                fixed (float* pPC = _pushConstants)
+                    api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                        VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+                var buffer = Surface.VertexBuffer;
+                var vkOffset = (ulong)offset;
+                api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+                api.vkCmdDraw(_currentCmd, (uint)((end - start) * 6), 1, 0, 0);
+            }
+
+            start = end;
+        }
     }
 
     /// <summary>
@@ -273,7 +344,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.FlatPipeline);
+        BindPipeline(_pipelines.FlatPipeline);
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
@@ -313,7 +384,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         pc[18] = color.Blue / 255f;
         pc[19] = color.Alpha / 255f;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.FlatPipeline);
+        BindPipeline(_pipelines.FlatPipeline);
         fixed (float* pPC = pc)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
@@ -350,7 +421,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         pc[18] = color.Blue / 255f;
         pc[19] = color.Alpha / 255f;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, pipelineOverride ?? _pipelines.FlatPipeline);
+        BindPipeline(pipelineOverride ?? _pipelines.FlatPipeline);
         fixed (float* pPC = pc)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
@@ -386,7 +457,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         pc[19] = color.Alpha / 255f;
         pc[20] = halfWidth;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.StrokePipeline);
+        BindPipeline(_pipelines.StrokePipeline);
         fixed (float* pPC = pc)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
@@ -426,7 +497,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         pc[19] = color.Alpha / 255f;
         pc[20] = halfWidth;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.StrokePipeline);
+        BindPipeline(_pipelines.StrokePipeline);
         fixed (float* pPC = pc)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
@@ -476,7 +547,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.PagePipeline);
+        BindPipeline(_pipelines.PagePipeline);
 
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
@@ -526,7 +597,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.PagePipeline);
+        BindPipeline(_pipelines.PagePipeline);
 
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
@@ -646,7 +717,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var vertOffset = Surface.WriteVertices(vertices);
         if (vertOffset == uint.MaxValue) return;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.TexturedPipeline);
+        BindPipeline(_pipelines.TexturedPipeline);
 
         var descriptorSet = Surface.DescriptorSet;
         api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
@@ -1053,7 +1124,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             // pipeline + push constants once, then issue ONE bind(page descriptor)+draw per page.
             // Rebinding descriptor sets between draws is legal Vulkan and Adreno-safe — pages are
             // never destroyed mid-frame, unlike the old Grow() image swap.
-            api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines!.SdfPipeline);
+            BindPipeline(_pipelines!.SdfPipeline);
             fixed (float* pPC = _pushConstants)
                 api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                     VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
@@ -1077,7 +1148,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         // Bitmap atlas path: a single contiguous vertex range, one draw (unchanged).
         if (_glyphBatchVertexCount == 0 || _glyphBatchStartOffset == uint.MaxValue) return;
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines!.TexturedPipeline);
+        BindPipeline(_pipelines!.TexturedPipeline);
         var bmpDescriptor = Surface.DescriptorSet;
         api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
             Surface.PipelineLayout, 0, 1, &bmpDescriptor, 0, null);
@@ -1135,16 +1206,46 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     public override void DrawRectangle(in RectInt rect, DIR.Lib.RGBAColor32 strokeColor, int strokeWidth)
     {
+        if (_pipelines is null) return;
+
+        var api = Surface.DeviceApi;
         var x0 = (float)rect.UpperLeft.X;
         var y0 = (float)rect.UpperLeft.Y;
         var x1 = (float)rect.LowerRight.X;
         var y1 = (float)rect.LowerRight.Y;
         var sw = (float)strokeWidth;
 
-        FillRectangle(new RectInt((rect.LowerRight.X, (int)(y0 + sw)), (rect.UpperLeft.X, rect.UpperLeft.Y)), strokeColor);
-        FillRectangle(new RectInt((rect.LowerRight.X, rect.LowerRight.Y), ((int)x0, (int)(y1 - sw))), strokeColor);
-        FillRectangle(new RectInt(((int)(x0 + sw), (int)(y1 - sw)), (rect.UpperLeft.X, (int)(y0 + sw))), strokeColor);
-        FillRectangle(new RectInt((rect.LowerRight.X, (int)(y1 - sw)), ((int)(x1 - sw), (int)(y0 + sw))), strokeColor);
+        // All four sides share the pipeline and color — emit one 24-vertex draw instead of
+        // four FillRectangle calls (4x bind + push constants + bind buffers + draw).
+        Span<float> verts = stackalloc float[48];
+        WriteQuad(verts, 0, x0, y0, x1, y0 + sw);             // top
+        WriteQuad(verts, 12, x0, y1 - sw, x1, y1);            // bottom
+        WriteQuad(verts, 24, x0, y0 + sw, x0 + sw, y1 - sw);  // left
+        WriteQuad(verts, 36, x1 - sw, y0 + sw, x1, y1 - sw);  // right
+
+        SetColor(strokeColor);
+        var offset = Surface.WriteVertices(verts);
+        if (offset == uint.MaxValue) return;
+
+        BindPipeline(_pipelines.FlatPipeline);
+        fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, 24, 1, 0, 0);
+    }
+
+    private static void WriteQuad(Span<float> dst, int at, float x0, float y0, float x1, float y1)
+    {
+        dst[at + 0] = x0; dst[at + 1] = y0;
+        dst[at + 2] = x1; dst[at + 3] = y0;
+        dst[at + 4] = x1; dst[at + 5] = y1;
+        dst[at + 6] = x0; dst[at + 7] = y0;
+        dst[at + 8] = x1; dst[at + 9] = y1;
+        dst[at + 10] = x0; dst[at + 11] = y1;
     }
 
     public override void FillEllipse(in RectInt rect, DIR.Lib.RGBAColor32 fillColor)
@@ -1172,7 +1273,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.EllipsePipeline);
+        BindPipeline(_pipelines.EllipsePipeline);
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
@@ -1221,7 +1322,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
-        api.vkCmdBindPipeline(_currentCmd, VkPipelineBindPoint.Graphics, _pipelines.EllipsePipeline);
+        BindPipeline(_pipelines.EllipsePipeline);
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
