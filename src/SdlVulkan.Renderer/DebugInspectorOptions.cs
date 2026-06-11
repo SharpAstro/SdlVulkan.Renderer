@@ -37,7 +37,9 @@ public sealed class DebugInspectorOptions
     /// Maps a signal name to an action that builds AND posts the signal from a JSON argument element.
     /// The consumer closes over its own SignalBus (so the signal is posted with its concrete compile-time
     /// type, which is what the bus dispatches on). Invoked on the render thread.
-    /// Example: <c>["TakePreview"] = el =&gt; bus.Post(new TakePreviewSignal(el.GetProperty("ota").GetInt32(), ...))</c>.
+    /// Read the JSON args with the <see cref="DebugSignalArgs"/> optional readers so a missing key falls
+    /// back to the signal's default, e.g.
+    /// <c>["TakePreview"] = el =&gt; bus.Post(new TakePreviewSignal(el.OptInt("ota") ?? 0, el.OptDouble("exp") ?? 1.0))</c>.
     /// </summary>
     public IReadOnlyDictionary<string, Action<JsonElement>>? SignalFactories { get; init; }
 
@@ -85,5 +87,39 @@ public sealed class DebugStateWriter
 
     /// <summary>Writes a numeric property (integral values render without a decimal point).</summary>
     public void Set(string name, double value) => _writer.WriteNumber(name, value);
+}
+
+/// <summary>
+/// Optional-value readers for the JSON args passed to a <see cref="DebugInspectorOptions.SignalFactories"/>
+/// entry (the <c>{}</c> object from <c>post_signal</c>). The read-side mirror of
+/// <see cref="DebugStateWriter"/>: a factory lambda reads typed optionals instead of reimplementing
+/// <see cref="JsonElement"/> parsing per app. Every reader returns null when the key is absent, JSON
+/// null, or the wrong kind, so the signal can fall back to its compile-time default
+/// (<c>el.OptInt("ota") ?? 0</c>).
+/// </summary>
+public static class DebugSignalArgs
+{
+    extension(JsonElement e)
+    {
+        /// <summary>The numeric value of <paramref name="name"/>, or null if absent / not a number.</summary>
+        public double? OptDouble(string name)
+            => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var p)
+               && p.ValueKind == JsonValueKind.Number ? p.GetDouble() : null;
+
+        /// <summary>The 32-bit integer value of <paramref name="name"/>, or null if absent / not a number.</summary>
+        public int? OptInt(string name)
+            => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var p)
+               && p.ValueKind == JsonValueKind.Number ? p.GetInt32() : null;
+
+        /// <summary>The boolean value of <paramref name="name"/>, or null if absent / not a boolean.</summary>
+        public bool? OptBool(string name)
+            => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var p)
+               && p.ValueKind is JsonValueKind.True or JsonValueKind.False ? p.GetBoolean() : null;
+
+        /// <summary>The string value of <paramref name="name"/>, or null if absent / not a string.</summary>
+        public string? OptString(string name)
+            => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var p)
+               && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+    }
 }
 #endif
