@@ -50,6 +50,14 @@ public sealed class DebugInspector : IDisposable
     private sealed record KeyCommand(InputKey Key, InputModifier Mods) : InspectorCommand;
     private sealed record TextCommand(string Text) : InspectorCommand;
     private sealed record PostSignalCommand(string Name, JsonElement Args) : InspectorCommand;
+    /// <summary>Synthesize a mouse-wheel scroll at (X, Y). ScrollY &gt; 0 is wheel-up (zoom in in most views).</summary>
+    private sealed record ScrollCommand(float X, float Y, float ScrollY) : InspectorCommand;
+    /// <summary>Synthesize a press-drag-release from (X1,Y1) to (X2,Y2) with <see cref="Steps"/> interpolated
+    /// motion events between, so integrate-per-move pan handlers see a smooth path rather than a teleport.</summary>
+    private sealed record DragCommand(float X1, float Y1, float X2, float Y2, InputModifier Mods, int Steps) : InspectorCommand;
+    /// <summary>Read back the loop's rolling average frame time (the same EWMA that drives the
+    /// [rdiag] frame.slow log), so jank can be measured numerically instead of by eye.</summary>
+    private sealed record FrameStatsCommand : InspectorCommand;
     /// <summary>Idle for <see cref="Frames"/> rendered frames (e.g. to let async work settle).
     /// Only meaningful as a step inside a <see cref="BatchCommand"/>.</summary>
     private sealed record WaitCommand(int Frames) : InspectorCommand;
@@ -77,6 +85,7 @@ public sealed class DebugInspector : IDisposable
 
     private readonly DebugInspectorOptions _opts;
     private readonly SdlWindowView _view;
+    private readonly SdlEventLoop _loop; // for frame-timing readback (frameStats)
     private readonly ConcurrentQueue<InspectorCommand> _queue = new();
     private readonly TcpListener _listener;
     private readonly string _startedAtUtc;
@@ -86,10 +95,11 @@ public sealed class DebugInspector : IDisposable
     private Task? _acceptTask;
     private Task? _discoveryTask;
 
-    private DebugInspector(SdlWindowView view, DebugInspectorOptions opts)
+    private DebugInspector(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
     {
         _opts = opts;
         _view = view;
+        _loop = loop;
         _startedAtUtc = DateTimeOffset.UtcNow.ToString("o");
         _listener = new TcpListener(opts.BindAddress, opts.Port);
         _listener.Start();
@@ -104,7 +114,7 @@ public sealed class DebugInspector : IDisposable
     /// </summary>
     public static DebugInspector Attach(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
     {
-        var inspector = new DebugInspector(view, opts);
+        var inspector = new DebugInspector(loop, view, opts);
         inspector.Start();
 
         // Lambda-compose the pump onto OnPostFrame (the framework's own wiring style) so the
@@ -235,6 +245,18 @@ public sealed class DebugInspector : IDisposable
             ResolveInputKey(p.GetProperty("key").GetString() ?? ""),
             ResolveModifier(p.TryGetProperty("mods", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null)),
         "text" => new TextCommand(p.GetProperty("s").GetString() ?? ""),
+        "scroll" => new ScrollCommand(
+            p.GetProperty("x").GetSingle(),
+            p.GetProperty("y").GetSingle(),
+            p.GetProperty("scrollY").GetSingle()),
+        "drag" => new DragCommand(
+            p.GetProperty("x1").GetSingle(),
+            p.GetProperty("y1").GetSingle(),
+            p.GetProperty("x2").GetSingle(),
+            p.GetProperty("y2").GetSingle(),
+            ResolveModifier(p.TryGetProperty("mods", out var dm) && dm.ValueKind == JsonValueKind.String ? dm.GetString() : null),
+            p.TryGetProperty("steps", out var ds) && ds.ValueKind == JsonValueKind.Number ? Math.Clamp(ds.GetInt32(), 1, 64) : 8),
+        "frameStats" => new FrameStatsCommand(),
         "postSignal" => new PostSignalCommand(
             p.GetProperty("name").GetString() ?? "",
             p.TryGetProperty("args", out var a) ? a.Clone() : default),
@@ -449,7 +471,9 @@ public sealed class DebugInspector : IDisposable
             else
             {
                 try { b.Results.Add(ExecuteCommand(step)); }
-                catch (Exception ex) { b.Results.Add(JsonSerializer.Serialize($"error: {ex.Message}")); }
+                // Encode the error fragment via Utf8JsonWriter (ToJson) like every other result,
+                // not JsonSerializer.Serialize -- the reflection-based serializer trips IL2026/IL3050.
+                catch (Exception ex) { b.Results.Add(ToJson(w => w.WriteStringValue($"error: {ex.Message}"))); }
             }
         }
 
@@ -472,6 +496,9 @@ public sealed class DebugInspector : IDisposable
         ClickLabelCommand c => ExecuteClickLabel(c.Label),
         KeyCommand c => ExecuteKey(c.Key, c.Mods),
         TextCommand c => ExecuteText(c.Text),
+        ScrollCommand c => ExecuteScroll(c.X, c.Y, c.ScrollY),
+        DragCommand c => ExecuteDrag(c.X1, c.Y1, c.X2, c.Y2, c.Mods, c.Steps),
+        FrameStatsCommand => ExecuteFrameStats(),
         PostSignalCommand c => ExecutePostSignal(c.Name, c.Args),
         WaitCommand => "\"waited\"", // only reached if used outside a batch; harmless no-op
         _ => throw new ArgumentException($"unknown command: {cmd.GetType().Name}")
@@ -585,6 +612,39 @@ public sealed class DebugInspector : IDisposable
         _view.RequestRedraw();
         return "\"ok\"";
     }
+
+    private string ExecuteScroll(float x, float y, float scrollY)
+    {
+        _view.OnMouseMove?.Invoke(x, y); // position the pointer first -- wheel handlers zoom around it
+        _view.OnMouseWheel?.Invoke(scrollY, x, y);
+        _view.RequestRedraw();
+        return "\"ok\"";
+    }
+
+    private string ExecuteDrag(float x1, float y1, float x2, float y2, InputModifier mods, int steps)
+    {
+        // Same path as a real drag: move-to-start, button-down, interpolated motion, button-up.
+        // Pan handlers that integrate per motion event (e.g. the sky map's unproject-based pan)
+        // need the intermediate steps -- a single jump start->end would under-pan or misbehave.
+        _view.OnMouseMove?.Invoke(x1, y1);
+        _view.OnMouseDown?.Invoke(1, x1, y1, 1, mods);
+        for (var i = 1; i <= steps; i++)
+        {
+            var t = (float)i / steps;
+            _view.OnMouseMove?.Invoke(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
+        }
+        _view.OnMouseUp?.Invoke(1);
+        _view.RequestRedraw();
+        return "\"ok\"";
+    }
+
+    private string ExecuteFrameStats() => ToJson(w =>
+    {
+        w.WriteStartObject();
+        w.WriteNumber("avgFrameMs", _loop.DebugFrameAvgMs);
+        w.WriteNumber("slowFrameFloorMs", SdlEventLoop.DebugSlowFrameFloorMs);
+        w.WriteEndObject();
+    });
 
     private string ExecutePostSignal(string name, JsonElement args)
     {

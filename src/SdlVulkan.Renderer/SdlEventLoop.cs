@@ -43,6 +43,13 @@ public sealed class SdlEventLoop
     private const double SlowFrameFloorMs = 40;  // stay quiet below this — normal frames don't log
     private const double SlowFrameFactor = 3;    // flag a spike that's >3x the rolling average...
     private const double HardStallMs = 150;      // ...or any outright freeze, regardless of average
+
+    /// <summary>Rolling average real frame time (ms) — the EWMA that drives the frame.slow log.
+    /// Exposed for the DebugInspector's frameStats command so jank can be measured numerically.</summary>
+    internal double DebugFrameAvgMs => _frameAvgMs;
+
+    /// <summary>The floor below which frames are considered normal (no slow-frame log).</summary>
+    internal static double DebugSlowFrameFloorMs => SlowFrameFloorMs;
 #endif
 
     /// <summary>Multi-window constructor. Add windows with <see cref="AddWindow"/>.</summary>

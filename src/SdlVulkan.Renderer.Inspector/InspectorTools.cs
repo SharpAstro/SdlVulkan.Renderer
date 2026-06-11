@@ -115,15 +115,54 @@ public sealed class InspectorTools
         return result.GetString() ?? "ok";
     }
 
+    [McpServerTool, Description("Synthesize a mouse-wheel scroll at pixel (x, y), routed through the same path as a real SDL wheel event. scrollY > 0 is wheel-up (zoom IN in most views, e.g. the sky map / FITS viewer); negative zooms out. The view zooms around (x, y). Magnitude ~1 per notch.")]
+    public static async Task<string> scroll(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("X pixel coordinate (the view zooms around this point).")] float x,
+        [Description("Y pixel coordinate.")] float y,
+        [Description("Wheel delta: positive = up / zoom-in, negative = down / zoom-out. ~1 per notch.")] float scrollY,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "scroll", new { x, y, scrollY }, ct);
+        return result.GetString() ?? "ok";
+    }
+
+    [McpServerTool, Description("Synthesize a left-button press-drag-release from (x1,y1) to (x2,y2) -- e.g. to pan the sky map or FITS viewer. Emits interpolated motion events between the endpoints so integrate-per-move pan handlers see a smooth path, not a teleport. Pass mods to hold a modifier during the drag.")]
+    public static async Task<string> drag(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Start X pixel.")] float x1,
+        [Description("Start Y pixel.")] float y1,
+        [Description("End X pixel.")] float x2,
+        [Description("End Y pixel.")] float y2,
+        [Description("InputModifier held during the drag (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None.")] string mods = "None",
+        [Description("Interpolated motion events between start and end (1-64). Default 8.")] int steps = 8,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "drag", new { x1, y1, x2, y2, mods, steps }, ct);
+        return result.GetString() ?? "ok";
+    }
+
+    [McpServerTool, Description("Read the app's rolling-average frame time in milliseconds (the EWMA that drives the frame.slow diagnostic) plus the slow-frame floor. Measure jank numerically: sample this, drive a pan/zoom (ideally via batch so frames render between steps), sample again. Returns {avgFrameMs, slowFrameFloorMs}.")]
+    public static async Task<string> frame_stats(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "frameStats", null, ct);
+        return result.GetRawText();
+    }
+
     [McpServerTool, Description(
         "Run a SEQUENCE of inspector actions in ONE round-trip, one per rendered frame -- a real "
         + "frame renders between steps, so e.g. a zoom takes effect before the next step reads "
         + "state. Returns a JSON array of per-step result fragments (same shape each tool returns "
         + "individually). Prefer this over many separate calls: it avoids per-call latency and "
         + "drives deterministic measurement sequences. Each step is {\"method\":\"...\",\"params\":{...}} "
-        + "where method is one of key, click, clickLabel, text, describe, screenshot, postSignal, "
-        + "signals, ping, or 'wait' with params {\"frames\":N} to idle N rendered frames (e.g. to let "
-        + "async work settle). Nested batch is not allowed. NOTE: a 'screenshot' step returns raw "
+        + "where method is one of key, click, clickLabel, text, scroll, drag, frameStats, describe, "
+        + "screenshot, postSignal, signals, ping, or 'wait' with params {\"frames\":N} to idle N rendered "
+        + "frames (e.g. to let async work settle). Nested batch is not allowed. NOTE: a 'screenshot' step returns raw "
         + "rgba+gzip JSON, not an image -- use the standalone screenshot tool when you want the picture.")]
     public static async Task<string> batch(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("JSON array of steps. Example: [{\"method\":\"key\",\"params\":{\"key\":\"Minus\"}},{\"method\":\"wait\",\"params\":{\"frames\":3}},{\"method\":\"describe\"}]")] string stepsJson,
