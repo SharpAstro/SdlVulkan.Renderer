@@ -115,6 +115,29 @@ public sealed class InspectorTools
         return result.GetString() ?? "ok";
     }
 
+    [McpServerTool, Description(
+        "Run a SEQUENCE of inspector actions in ONE round-trip, one per rendered frame -- a real "
+        + "frame renders between steps, so e.g. a zoom takes effect before the next step reads "
+        + "state. Returns a JSON array of per-step result fragments (same shape each tool returns "
+        + "individually). Prefer this over many separate calls: it avoids per-call latency and "
+        + "drives deterministic measurement sequences. Each step is {\"method\":\"...\",\"params\":{...}} "
+        + "where method is one of key, click, clickLabel, text, describe, screenshot, postSignal, "
+        + "signals, ping, or 'wait' with params {\"frames\":N} to idle N rendered frames (e.g. to let "
+        + "async work settle). Nested batch is not allowed. NOTE: a 'screenshot' step returns raw "
+        + "rgba+gzip JSON, not an image -- use the standalone screenshot tool when you want the picture.")]
+    public static async Task<string> batch(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("JSON array of steps. Example: [{\"method\":\"key\",\"params\":{\"key\":\"Minus\"}},{\"method\":\"wait\",\"params\":{\"frames\":3}},{\"method\":\"describe\"}]")] string stepsJson,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        using var doc = JsonDocument.Parse(stepsJson);
+        if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            throw new ArgumentException("stepsJson must be a JSON array of {method, params} steps");
+        var result = await socket.SendAsync(target, "batch", new { steps = doc.RootElement }, ct);
+        return result.GetRawText();
+    }
+
     [McpServerTool, Description("List the named signals this instance accepts via post_signal.")]
     public static async Task<string> list_signals(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,

@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -34,6 +35,11 @@ public sealed class DebugInspector : IDisposable
     private abstract record InspectorCommand
     {
         public TaskCompletionSource<string> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>How long the socket side waits for this command to drain on the render
+        /// thread before giving up. A single command drains within a frame or two; a batch
+        /// runs one step per rendered frame, so it overrides this to scale with its length.</summary>
+        public virtual TimeSpan Timeout => TimeSpan.FromSeconds(10);
     }
     private sealed record PingCommand : InspectorCommand;
     private sealed record DescribeCommand : InspectorCommand;
@@ -44,6 +50,30 @@ public sealed class DebugInspector : IDisposable
     private sealed record KeyCommand(InputKey Key, InputModifier Mods) : InspectorCommand;
     private sealed record TextCommand(string Text) : InspectorCommand;
     private sealed record PostSignalCommand(string Name, JsonElement Args) : InspectorCommand;
+    /// <summary>Idle for <see cref="Frames"/> rendered frames (e.g. to let async work settle).
+    /// Only meaningful as a step inside a <see cref="BatchCommand"/>.</summary>
+    private sealed record WaitCommand(int Frames) : InspectorCommand;
+    /// <summary>A sequence of commands executed one-per-rendered-frame, so a real frame renders
+    /// between each step (a zoom/pan takes effect before the next step reads state). Returns a
+    /// JSON array of the per-step result fragments.</summary>
+    private sealed record BatchCommand(IReadOnlyList<InspectorCommand> Steps) : InspectorCommand
+    {
+        // ~1 frame per step plus the wait frames; pad generously and cap. This is just the
+        // socket's patience -- the event loop stays responsive throughout regardless.
+        public override TimeSpan Timeout => TimeSpan.FromSeconds(Math.Min(300,
+            15 + Steps.Count + Steps.OfType<WaitCommand>().Sum(w => w.Frames) / 30.0));
+    }
+
+    // In-progress batch, advanced one step per frame by DrainCommands (null when idle).
+    private BatchState? _activeBatch;
+    private sealed class BatchState(IReadOnlyList<InspectorCommand> steps, TaskCompletionSource<string> result)
+    {
+        public readonly IReadOnlyList<InspectorCommand> Steps = steps;
+        public readonly TaskCompletionSource<string> Result = result;
+        public readonly List<string> Results = [];
+        public int Index;
+        public int WaitFrames;
+    }
 
     private readonly DebugInspectorOptions _opts;
     private readonly SdlWindowView _view;
@@ -175,7 +205,7 @@ public sealed class DebugInspector : IDisposable
             _queue.Enqueue(cmd);
             _view.RequestRedraw(); // wake the loop so DrainCommands runs (OnPostFrame only fires on a rendered frame)
 
-            var fragment = await cmd.Result.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+            var fragment = await cmd.Result.Task.WaitAsync(cmd.Timeout, ct);
             return $"{{\"id\":{id},\"result\":{fragment}}}";
         }
         catch (Exception ex)
@@ -208,8 +238,32 @@ public sealed class DebugInspector : IDisposable
         "postSignal" => new PostSignalCommand(
             p.GetProperty("name").GetString() ?? "",
             p.TryGetProperty("args", out var a) ? a.Clone() : default),
+        "wait" => new WaitCommand(p.TryGetProperty("frames", out var wf) && wf.ValueKind == JsonValueKind.Number
+            ? Math.Clamp(wf.GetInt32(), 1, 600) : 1),
+        "batch" => BuildBatch(p),
         _ => throw new ArgumentException($"unknown method: {method}")
     };
+
+    // Parses {steps:[{method,params}, ...]} into a BatchCommand. Each step is built through the
+    // same BuildCommand path as a standalone request; nesting a batch inside a batch is rejected
+    // (the one-step-per-frame pump only tracks a single active batch).
+    private static BatchCommand BuildBatch(JsonElement p)
+    {
+        if (!p.TryGetProperty("steps", out var steps) || steps.ValueKind != JsonValueKind.Array)
+            throw new ArgumentException("batch requires a 'steps' array of {method, params}");
+        var list = new List<InspectorCommand>(steps.GetArrayLength());
+        foreach (var step in steps.EnumerateArray())
+        {
+            var m = step.GetProperty("method").GetString() ?? "";
+            if (m == "batch")
+                throw new ArgumentException("nested batch is not supported");
+            step.TryGetProperty("params", out var sp);
+            list.Add(BuildCommand(m, sp));
+        }
+        if (list.Count == 0)
+            throw new ArgumentException("batch 'steps' must be non-empty");
+        return new BatchCommand(list);
+    }
 
     // Resolve a "key" command string to an InputKey.
     //
@@ -346,11 +400,66 @@ public sealed class DebugInspector : IDisposable
     /// </summary>
     private void DrainCommands()
     {
+        // A batch owns its frames: advance one step (or burn one wait-frame) and return, so a
+        // real frame renders before the next step. New single commands queued meanwhile drain
+        // once the batch completes.
+        if (_activeBatch is not null)
+        {
+            AdvanceBatch();
+            return;
+        }
+
         while (_queue.TryDequeue(out var cmd))
         {
+            if (cmd is BatchCommand b)
+            {
+                _activeBatch = new BatchState(b.Steps, b.Result);
+                AdvanceBatch();
+                return;
+            }
             try { cmd.Result.TrySetResult(ExecuteCommand(cmd)); }
             catch (Exception ex) { cmd.Result.TrySetException(ex); }
         }
+    }
+
+    /// <summary>
+    /// Executes the next step of <see cref="_activeBatch"/> (one per call = one per rendered
+    /// frame), or burns a pending wait-frame. Completes the batch's result with a JSON array of
+    /// per-step fragments once all steps are done. A failing step records an error fragment and
+    /// the batch continues -- one bad step doesn't abort the sequence.
+    /// </summary>
+    private void AdvanceBatch()
+    {
+        var b = _activeBatch!;
+        if (b.WaitFrames > 0)
+        {
+            b.WaitFrames--;
+            _view.RequestRedraw();
+            return;
+        }
+
+        if (b.Index < b.Steps.Count)
+        {
+            var step = b.Steps[b.Index++];
+            if (step is WaitCommand w)
+            {
+                b.WaitFrames = Math.Max(0, w.Frames - 1);
+                b.Results.Add("\"waited\"");
+            }
+            else
+            {
+                try { b.Results.Add(ExecuteCommand(step)); }
+                catch (Exception ex) { b.Results.Add(JsonSerializer.Serialize($"error: {ex.Message}")); }
+            }
+        }
+
+        if (b.Index >= b.Steps.Count && b.WaitFrames == 0)
+        {
+            b.Result.TrySetResult("[" + string.Join(",", b.Results) + "]");
+            _activeBatch = null;
+            return;
+        }
+        _view.RequestRedraw(); // more steps / wait-frames remain -- keep the loop awake
     }
 
     private string ExecuteCommand(InspectorCommand cmd) => cmd switch
@@ -364,6 +473,7 @@ public sealed class DebugInspector : IDisposable
         KeyCommand c => ExecuteKey(c.Key, c.Mods),
         TextCommand c => ExecuteText(c.Text),
         PostSignalCommand c => ExecutePostSignal(c.Name, c.Args),
+        WaitCommand => "\"waited\"", // only reached if used outside a batch; harmless no-op
         _ => throw new ArgumentException($"unknown command: {cmd.GetType().Name}")
     };
 
