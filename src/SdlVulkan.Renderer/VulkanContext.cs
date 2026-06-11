@@ -25,9 +25,18 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// </summary>
     public const int MaxFramesInFlight = 2;
     // Cap the per-frame in-flight fence wait (ns) so a never-signaled fence can't hard-freeze the loop.
-    // 2s is hundreds of times a normal frame; only a stuck GPU / non-signaling driver reaches it, and a
-    // timeout is routed into the same GPU-error recovery the event loop uses (recreate sync + swapchain).
-    private const ulong FenceWaitTimeoutNs = 2_000_000_000UL;
+    // 500ms is still tens of times a normal frame; only a stuck or starved GPU reaches it. The FIRST
+    // timeout flips the context into "stuck" mode, where subsequent BeginFrame attempts poll the SAME
+    // fence with a short wait instead - each retry is then nearly free, so the event loop keeps pumping
+    // input between attempts (see SdlEventLoop's Timeout handling) instead of going blind for the full
+    // cap. A successful wait (or RecoverFromGpuError rebuilding the sync objects) clears stuck mode.
+    // A timeout is NOT destructive by itself: the loop only escalates into the sync+swapchain rebuild
+    // after the fence has been stuck for a sustained period - a fence that is merely late (heavy frame,
+    // TDR in progress, or a DirectML/ONNX compute job hogging the same hardware) signals on a later
+    // poll and rendering resumes with zero teardown.
+    private const ulong FenceWaitTimeoutNs = 500_000_000UL;
+    private const ulong FenceStuckPollTimeoutNs = 10_000_000UL;
+    private bool _fenceWaitStuck;
 
     /// <summary>The shared device backing this window. GPU resources reused across windows (font
     /// atlases, textures, pipelines) are created against this rather than the context.</summary>
@@ -204,6 +213,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         }
         CreateSyncObjects();
         _currentFrame = 0;
+        _fenceWaitStuck = false; // fresh fences start signaled — leave stuck-mode polling
 
         CleanupSwapchain();
         CreateSwapchain(width, height);
@@ -216,13 +226,21 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // Bounded wait. We rely on the submit signaling this fence — including on drivers (Adreno
         // X1-85) where vkQueueSubmit returns a bogus error yet still signals normally. If a fence is
         // genuinely never signaled, an unbounded wait here would hard-freeze the loop with no escape,
-        // so cap it and throw on timeout: the event loop's catch routes that into RecoverFromGpuError
-        // (recreate sync objects + swapchain) exactly like a submit failure. A real device-loss comes
-        // back as a negative result (DEVICE_LOST), which CheckResult turns into the same recovery path.
-        var waitResult = DeviceApi.vkWaitForFences(1, &fence, true, FenceWaitTimeoutNs);
+        // so cap it and throw on timeout. The throw happens BEFORE any frame state is mutated (no
+        // fence reset, no command-buffer reset, no acquire), so re-entering BeginFrame just waits on
+        // the same fence again — that is what makes the event loop's non-destructive retry safe. While
+        // stuck, retries use the short poll timeout so the loop stays responsive between attempts (see
+        // FenceWaitTimeoutNs comment). A real device-loss comes back as a negative result (DEVICE_LOST),
+        // which CheckResult turns into the destructive recovery path.
+        var waitResult = DeviceApi.vkWaitForFences(1, &fence, true,
+            _fenceWaitStuck ? FenceStuckPollTimeoutNs : FenceWaitTimeoutNs);
         if (waitResult == VkResult.Timeout)
-            throw new VkException(waitResult, "in-flight fence wait timed out (>2s) — recovering");
+        {
+            _fenceWaitStuck = true;
+            throw new VkException(waitResult, "in-flight fence wait timed out — GPU late or stuck");
+        }
         waitResult.CheckResult();
+        _fenceWaitStuck = false;
 
         var result = DeviceApi.vkAcquireNextImageKHR(Swapchain, ulong.MaxValue,
             _imageAvailableSemaphores[_currentFrame], VkFence.Null, out _currentImageIndex);
