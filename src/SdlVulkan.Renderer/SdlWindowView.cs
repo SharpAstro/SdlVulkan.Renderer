@@ -76,6 +76,14 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     internal int RecoverStreak;
     internal uint LastRecoverW, LastRecoverH;
 
+    // GPU fence-timeout pacing, per window (see SdlEventLoop.RenderView's catch). While the
+    // in-flight fence is late the loop retries rendering on a timestamp backoff instead of
+    // blocking or sleeping, so SDL events keep pumping and the window stays responsive.
+    // FenceStuckSinceTick anchors the escalation deadline (0 = not stuck); NextRenderAttemptTick
+    // gates the next render attempt for BOTH the gentle retry and the recovery-storm backoff.
+    internal long FenceStuckSinceTick;
+    internal long NextRenderAttemptTick;
+
     /// <summary>Number of active touch fingers on this window. Use to suppress mouse drag during pinch.</summary>
     public int ActiveFingerCount => ActiveFingers.Count;
 

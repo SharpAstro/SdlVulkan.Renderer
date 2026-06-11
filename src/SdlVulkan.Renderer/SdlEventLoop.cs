@@ -26,6 +26,15 @@ public sealed class SdlEventLoop
 
     private static readonly ulong MouseRedrawInterval = GetPerformanceFrequency() / 30; // ~30fps
 
+    // GPU fence-timeout handling (see RenderView's catch). A late fence is retried NON-destructively
+    // on this cadence — the context has switched to short fence polls after the first timeout, so each
+    // attempt is nearly free and the loop keeps dispatching SDL events in between (the window stays
+    // responsive, movable, and closable while the GPU catches up). Only when the fence stays stuck for
+    // the full escalation window (the never-signaling-fence case) does the loop fall through to the
+    // destructive sync+swapchain rebuild.
+    private const int FenceRetryBackoffMs = 50;
+    private const long FenceEscalateMs = 2500;
+
 #if DEBUG
     // Slow-frame diagnostics: a rolling average of real frame time (BeginFrame->EndFrame) plus a
     // threshold, so ANY stall (atlas evict/grow drain, heavy tessellation, a present hitch) logs one
@@ -132,9 +141,14 @@ public sealed class SdlEventLoop
 
         while (_running && !ct.IsCancellationRequested)
         {
+            // A view inside a retry/recovery backoff window keeps NeedsRedraw armed but must not
+            // force the non-blocking PollEvent path (that would busy-spin until the backoff expires).
+            // Falling through to WaitEventTimeout(16) wakes the loop every ~16ms to re-check, which
+            // both bounds the backoff granularity and keeps event dispatch prompt.
+            var nowTick = Environment.TickCount64;
             var anyNeedsRedraw = false;
             foreach (var v in _viewList)
-                if (v.NeedsRedraw) { anyNeedsRedraw = true; break; }
+                if (v.NeedsRedraw && nowTick >= v.NextRenderAttemptTick) { anyNeedsRedraw = true; break; }
 
             Event evt;
             var hadEvent = anyNeedsRedraw
@@ -163,6 +177,9 @@ public sealed class SdlEventLoop
             {
                 var v = _viewList[i];
                 if (!v.NeedsRedraw) continue;
+                // Inside a retry/recovery backoff: keep NeedsRedraw armed and skip this iteration —
+                // events were already dispatched above, so the window stays responsive while waiting.
+                if (Environment.TickCount64 < v.NextRenderAttemptTick) continue;
                 v.NeedsRedraw = false;
                 if (RenderView(v))
                     renderedAny = true;
@@ -195,27 +212,82 @@ public sealed class SdlEventLoop
                 return false;
             }
 
+#if DEBUG
+            var beginDone = Stopwatch.GetTimestamp();
+#endif
             v.OnRender?.Invoke();
+#if DEBUG
+            var renderDone = Stopwatch.GetTimestamp();
+#endif
 
             renderer.EndFrame();
 
 #if DEBUG
-            // Whole-frame time (the BeginFrame atlas evict/grow drain included). Flag a frame
-            // that's over the floor AND a big spike over the rolling average, or any hard freeze.
+            // Whole-frame time, split into the three sections so a slow frame is attributable
+            // at a glance: 'begin' is BeginFrame (in-flight fence wait + acquire + atlas
+            // evict/grow drain) - a high value here means the GPU is the bottleneck (the fence
+            // from MaxFramesInFlight ago hadn't signaled yet), not the app. 'render' is the
+            // consumer's OnRender (app-side CPU work: tessellation, overlay math, text).
+            // 'end' is EndFrame (submit + present). Flag a frame that's over the floor AND a
+            // big spike over the rolling average, or any hard freeze.
             var frameMs = Stopwatch.GetElapsedTime(frameStart).TotalMilliseconds;
             var prevAvg = _frameAvgMs;
             _frameAvgMs = prevAvg <= 0 ? frameMs : prevAvg * 0.9 + frameMs * 0.1;
             if (frameMs > SlowFrameFloorMs && (prevAvg <= 0 || frameMs > prevAvg * SlowFrameFactor || frameMs > HardStallMs))
-                RenderDiag.Log("frame.slow", $"{frameMs:F0}ms avg={prevAvg:F0}ms");
+            {
+                var beginMs = Stopwatch.GetElapsedTime(frameStart, beginDone).TotalMilliseconds;
+                var renderMs = Stopwatch.GetElapsedTime(beginDone, renderDone).TotalMilliseconds;
+                var endMs = Stopwatch.GetElapsedTime(renderDone).TotalMilliseconds;
+                RenderDiag.Log("frame.slow",
+                    $"{frameMs:F0}ms (begin={beginMs:F0} render={renderMs:F0} end={endMs:F0}) avg={prevAvg:F0}ms");
+            }
 #endif
 
             if (renderer.FontAtlasDirty)
                 v.NeedsRedraw = true;
 
+            if (v.FenceStuckSinceTick != 0)
+            {
+                // The fence signaled after one or more late polls — the GPU was busy, not broken.
+                // Log the one-line resume so a "late" episode is visible end-to-end in the log.
+                Console.Error.WriteLine($"[SdlEventLoop] GPU fence recovered after {Environment.TickCount64 - v.FenceStuckSinceTick}ms (window {v.Window.WindowId}); no teardown needed.");
+                v.FenceStuckSinceTick = 0;
+            }
+            v.NextRenderAttemptTick = 0;
+            v.RecoverStreak = 0; // a clean frame ends any recovery storm accounting
+
             return true;
         }
         catch (VkException vk)
         {
+            var now = Environment.TickCount64;
+
+            // A fence-wait Timeout means the GPU is LATE, not (yet) broken: BeginFrame throws before
+            // any frame state is mutated, so re-entering it just waits on the same fence again. Retry
+            // non-destructively on a short backoff — the context has switched to ~10ms fence polls, so
+            // each attempt is nearly free and the loop keeps dispatching events in between. A merely
+            // busy GPU (heavy frame, TDR recovery, a compute job sharing the hardware) signals on a
+            // later poll and rendering resumes with ZERO teardown. Only a fence stuck past the
+            // escalation window (the never-signaling case the timeout was originally added for, e.g.
+            // the Adreno atlas-swap bug) falls through to the destructive sync+swapchain rebuild —
+            // tearing the swapchain down on the FIRST timeout is what used to sustain recovery storms.
+            if (vk.Result == VkResult.Timeout)
+            {
+                if (v.FenceStuckSinceTick == 0)
+                {
+                    v.FenceStuckSinceTick = now;
+                    Console.Error.WriteLine($"[SdlEventLoop] GPU fence late (window {v.Window.WindowId}); retrying without teardown.");
+                }
+                if (now - v.FenceStuckSinceTick < FenceEscalateMs)
+                {
+                    v.NextRenderAttemptTick = now + FenceRetryBackoffMs;
+                    v.NeedsRedraw = true;
+                    return false;
+                }
+                Console.Error.WriteLine($"[SdlEventLoop] GPU fence stuck for {now - v.FenceStuckSinceTick}ms (window {v.Window.WindowId}); escalating to full recovery.");
+                v.FenceStuckSinceTick = 0;
+            }
+
             // A Vulkan call threw mid-frame — most commonly vkQueueSubmit/Present in EndFrame
             // returning a non-success status that CheckResult turns into a throw (ErrorOutOfDateKHR
             // after a window resize during submit, or driver bugs that surface
@@ -226,7 +298,6 @@ public sealed class SdlEventLoop
             {
                 // Track consecutive recoveries (errors within 1s of each other) so we can back off
                 // a runaway recover->fail->recover loop instead of spinning at frame rate.
-                var now = Environment.TickCount64;
                 v.RecoverStreak = (now - v.LastRecoverTick < 1000) ? v.RecoverStreak + 1 : 0;
                 v.LastRecoverTick = now;
 
@@ -245,11 +316,12 @@ public sealed class SdlEventLoop
                 }
                 v.NeedsRedraw = true;
 
-                // If recovery keeps failing, throttle the retry rate with an increasing sleep (capped
-                // at 1s) so we don't hammer the GPU. The loop still polls events between attempts, so
-                // the window stays closable.
+                // If recovery keeps failing, throttle the retry rate with an increasing delay (capped
+                // at 1s) so we don't hammer the GPU. Timestamp backoff, NOT Thread.Sleep: the loop
+                // keeps dispatching SDL events between attempts, so the window stays responsive and
+                // closable the whole time.
                 if (v.RecoverStreak >= 4)
-                    System.Threading.Thread.Sleep((int)Math.Min(1000, 100 * (v.RecoverStreak - 3)));
+                    v.NextRenderAttemptTick = Environment.TickCount64 + Math.Min(1000, 100 * (v.RecoverStreak - 3));
             }
             catch (Exception inner)
             {
