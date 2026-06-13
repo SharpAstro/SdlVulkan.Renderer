@@ -35,6 +35,11 @@ public sealed class SdlEventLoop
     private const int FenceRetryBackoffMs = 50;
     private const long FenceEscalateMs = 2500;
 
+    // After this many swapchain recoveries in quick succession (each within 1s of the previous) the
+    // recovery clearly isn't sticking — the workload keeps re-wedging the GPU. Fire OnRenderDegraded
+    // so the app can shed load (switch to a cheap view, reset a runaway). 2 => the 3rd quick recovery.
+    private const int RenderDegradedStreakThreshold = 2;
+
 #if DEBUG
     // Slow-frame diagnostics: a rolling average of real frame time (BeginFrame->EndFrame) plus a
     // threshold, so ANY stall (atlas evict/grow drain, heavy tessellation, a present hitch) logs one
@@ -125,6 +130,9 @@ public sealed class SdlEventLoop
     public Action<string>? OnTextInput { get => Primary.OnTextInput; set => Primary.OnTextInput = value; }
     public Action<string>? OnDropFile { get => Primary.OnDropFile; set => Primary.OnDropFile = value; }
     public Func<bool>? CheckNeedsRedraw { get => Primary.CheckNeedsRedraw; set => Primary.CheckNeedsRedraw = value; }
+
+    /// <summary>Primary window's render-degraded (load-shed) callback. See <see cref="SdlWindowView.OnRenderDegraded"/>.</summary>
+    public Action? OnRenderDegraded { get => Primary.OnRenderDegraded; set => Primary.OnRenderDegraded = value; }
 
     /// <summary>Active touch fingers on the primary window.</summary>
     public int ActiveFingerCount => Primary.ActiveFingerCount;
@@ -262,6 +270,7 @@ public sealed class SdlEventLoop
             }
             v.NextRenderAttemptTick = 0;
             v.RecoverStreak = 0; // a clean frame ends any recovery storm accounting
+            v.RenderDegradedNotified = false; // re-arm the load-shed request for the next storm
 
             return true;
         }
@@ -307,6 +316,18 @@ public sealed class SdlEventLoop
                 // a runaway recover->fail->recover loop instead of spinning at frame rate.
                 v.RecoverStreak = (now - v.LastRecoverTick < 1000) ? v.RecoverStreak + 1 : 0;
                 v.LastRecoverTick = now;
+
+                // Recovery isn't sticking (repeated wedge+recover within 1s) — ask the app to shed load
+                // (switch to a cheap/safe view, reset the runaway that's re-wedging the GPU). Fire once
+                // per storm; the clean-frame path above clears RenderDegradedNotified to re-arm it.
+                if (v.RecoverStreak >= RenderDegradedStreakThreshold && !v.RenderDegradedNotified)
+                {
+                    v.RenderDegradedNotified = true;
+                    Console.Error.WriteLine(
+                        $"[SdlEventLoop] render degraded (recover streak {v.RecoverStreak}, window {v.Window.WindowId}); requesting load-shed.");
+                    try { v.OnRenderDegraded?.Invoke(); }
+                    catch (Exception ex) { Console.Error.WriteLine($"[SdlEventLoop] OnRenderDegraded handler threw: {ex.GetType().Name}: {ex.Message}"); }
+                }
 
                 v.Window.GetSizeInPixels(out var sw, out var sh);
                 if (sw > 0 && sh > 0)

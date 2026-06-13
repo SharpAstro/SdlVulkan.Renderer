@@ -64,6 +64,16 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// </summary>
     public Func<bool>? CheckNeedsRedraw { get; set; }
 
+    /// <summary>
+    /// Called (on the render thread, once per recovery storm) when this window's GPU work has had to
+    /// recover from a fence stall / mid-frame error repeatedly in quick succession — i.e. the swapchain
+    /// recovery isn't sticking because the workload keeps re-wedging the GPU. The consumer should SHED
+    /// LOAD: switch to a cheap/safe view (e.g. a notifications tab) and reset whatever produced the
+    /// runaway (e.g. clamp a runaway zoom) so the next frame is trivial and the GPU drains. Fires again
+    /// only after a clean frame has ended the storm.
+    /// </summary>
+    public Action? OnRenderDegraded { get; set; }
+
     // --- per-window loop state (managed by SdlEventLoop) ---
     internal bool NeedsRedraw = true;
     internal float MouseX, MouseY;
@@ -75,6 +85,9 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     internal long LastRecoverTick;
     internal int RecoverStreak;
     internal uint LastRecoverW, LastRecoverH;
+    // Set when OnRenderDegraded has fired for the current storm; cleared by a clean frame so the
+    // load-shed request fires once per storm rather than every recovery iteration.
+    internal bool RenderDegradedNotified;
 
     // GPU fence-timeout pacing, per window (see SdlEventLoop.RenderView's catch). While the
     // in-flight fence is late the loop retries rendering on a timestamp backoff instead of

@@ -552,6 +552,18 @@ public sealed class DebugInspector : IDisposable
     {
         var ctx = _view.Renderer.Context;
         var rgba = ctx.ReadbackSwapchainRgba();
+        if (rgba is null)
+        {
+            // Readback was skipped/aborted (GPU wedged or the bounded readback wait timed out).
+            // Surface a structured error instead of crashing or blocking — the inspector caller
+            // can retry once the GPU recovers.
+            return ToJson(w =>
+            {
+                w.WriteStartObject();
+                w.WriteString("error", "screenshot unavailable: GPU stalled or readback timed out");
+                w.WriteEndObject();
+            });
+        }
         var width = (int)ctx.SwapchainWidth;
         var height = (int)ctx.SwapchainHeight;
         // RGBA of a UI is mostly flat color, so gzip shrinks the wire payload ~10-50x before base64.

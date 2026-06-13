@@ -633,9 +633,10 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         // Destroy every extra page (1..N-1); page 0 is reset in place. Those pages' descriptor sets may
         // still be referenced by the previous frame's draws, so a single device-idle is needed here —
         // but this is the ONLY remaining drain and fires only when all MaxPages are full (≈never).
+        // Bounded (was an unbounded vkDeviceWaitIdle): prior in-flight frames only, capped, skip-when-stuck.
         if (_pages.Count > 1)
         {
-            _ctx.DeviceApi.vkDeviceWaitIdle();
+            _ctx.TryWaitPriorFramesIdle("sdf atlas evict-all");
             for (var i = _pages.Count - 1; i >= 1; i--)
             {
                 DestroyPage(_pages[i]);
