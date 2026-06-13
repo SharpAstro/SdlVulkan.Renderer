@@ -35,6 +35,16 @@ public sealed unsafe class VulkanDevice : IDisposable
     public VkDescriptorSet DescriptorSet { get; }
     public VkPipelineLayout PipelineLayout { get; }
 
+    /// <summary>
+    /// True when the GPU is known wedged — the owning <see cref="VulkanContext"/>'s per-frame fence
+    /// has been timing out. The context is the sole writer (it mirrors its own fence-stuck state
+    /// here). Device-level teardown and cross-component render-thread drains consult this to skip an
+    /// unbounded <c>vkDeviceWaitIdle</c> that would otherwise hang the UI thread on a stuck device.
+    /// For a device shared by several windows this reflects the most recent context update; the
+    /// single-window host (TianWen) is exact.
+    /// </summary>
+    public bool IsGpuStuck { get; internal set; }
+
     /// <summary>MSAA sample count (Count1 = no MSAA). Uniform across all windows on this device —
     /// the render pass and the pre-baked pipelines bake it in, so every swapchain sharing this
     /// device renders at the same sample count.</summary>
@@ -409,8 +419,13 @@ public sealed unsafe class VulkanDevice : IDisposable
         _disposed = true;
 
         // Drain any in-flight work before tearing down device-level objects. Safe to call again
-        // here even if an owning context already waited — vkDeviceWaitIdle is idempotent.
-        DeviceApi.vkDeviceWaitIdle();
+        // here even if an owning context already waited — vkDeviceWaitIdle is idempotent. Skip it
+        // when the GPU is known wedged: an unbounded wait on a stuck device would hang the quit
+        // (the "Not responding" failure mode the recovery path was hardened against).
+        if (!IsGpuStuck)
+        {
+            DeviceApi.vkDeviceWaitIdle();
+        }
 
         DeviceApi.vkDestroyPipelineLayout(PipelineLayout);
         DeviceApi.vkDestroyDescriptorSetLayout(DescriptorSetLayout);

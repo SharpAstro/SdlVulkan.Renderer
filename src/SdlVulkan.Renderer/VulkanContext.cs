@@ -36,7 +36,32 @@ public sealed unsafe partial class VulkanContext : IDisposable
     // poll and rendering resumes with zero teardown.
     private const ulong FenceWaitTimeoutNs = 500_000_000UL;
     private const ulong FenceStuckPollTimeoutNs = 10_000_000UL;
-    private bool _fenceWaitStuck;
+    // Cap (ns) for the device drain on the UI-thread recovery/resize paths (see TryDrainDevice).
+    // 1s is well past any legitimate frame; reaching it means the GPU is genuinely wedged, in
+    // which case we force the teardown rather than block the UI thread on an unbounded wait.
+    private const ulong DrainTimeoutNs = 1_000_000_000UL;
+
+    // Per-window fence-stuck state. Wrapped in a property so the one setter is the single writer
+    // that also mirrors the state onto the shared device (_dev.IsGpuStuck) — that way device-level
+    // teardown and cross-component render-thread drains can consult one known-good signal, and no
+    // call site can set the fence state without the device flag following it.
+    private bool _fenceWaitStuckBacking;
+    private bool _fenceWaitStuck
+    {
+        get => _fenceWaitStuckBacking;
+        set
+        {
+            _fenceWaitStuckBacking = value;
+            _dev.IsGpuStuck = value;
+        }
+    }
+
+    /// <summary>
+    /// True when this window's GPU work is known wedged (its per-frame fence is timing out). Lets
+    /// render-thread consumers (e.g. buffer-swap drains) skip an unbounded device wait that would
+    /// hang while the GPU is stuck.
+    /// </summary>
+    public bool IsGpuStuck => _fenceWaitStuck;
 
     /// <summary>The shared device backing this window. GPU resources reused across windows (font
     /// atlases, textures, pipelines) are created against this rather than the context.</summary>
@@ -184,7 +209,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     public void RecreateSwapchain(uint width, uint height)
     {
-        DeviceApi.vkDeviceWaitIdle();
+        // Bounded drain (see TryDrainDevice): a resize that races a wedged GPU must not hang the
+        // UI thread on an unbounded vkDeviceWaitIdle.
+        TryDrainDevice(DrainTimeoutNs, "swapchain recreate");
         CleanupSwapchain();
         CreateSwapchain(width, height);
     }
@@ -200,10 +227,17 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// </summary>
     public void RecoverFromGpuError(uint width, uint height)
     {
-        // vkDeviceWaitIdle drains any in-flight work. If the previous frame's submit
-        // failed before signaling its fence, the next BeginFrame would otherwise block
-        // forever on vkWaitForFences — recreating the sync objects below sidesteps that.
-        DeviceApi.vkDeviceWaitIdle();
+        // Drain in-flight work before recreating the sync objects below. If the previous frame's
+        // submit failed before signaling its fence, the next BeginFrame would otherwise block
+        // forever on vkWaitForFences — recreating the sync objects sidesteps that.
+        //
+        // This used to be an unbounded vkDeviceWaitIdle, but on a genuinely wedged GPU (the fence
+        // never signals — a TDR, or a frame that overran the event loop's fence-escalation window)
+        // that blocks the UI thread forever and the window goes "Not responding" (the user is then
+        // forced to kill it). TryDrainDevice caps the wait and forces the teardown on timeout: a
+        // clean rebuild-after-timeout is recoverable (or at worst surfaces as a recovery failure the
+        // event loop turns into a clean exit), whereas the unbounded wait could not escape the hang.
+        TryDrainDevice(DrainTimeoutNs, "GPU-error recovery");
 
         for (var i = 0; i < MaxFramesInFlight; i++)
         {
@@ -217,6 +251,44 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
         CleanupSwapchain();
         CreateSwapchain(width, height);
+    }
+
+    /// <summary>
+    /// Bounded replacement for <c>vkDeviceWaitIdle</c> on the UI-thread recovery/resize paths.
+    /// An unbounded device-wait-idle on a wedged GPU (fence never signals) blocks the calling
+    /// thread forever, freezing the window. This waits on all in-flight fences with a hard cap
+    /// and returns <c>false</c> on timeout so the caller can force its teardown anyway — the
+    /// caller is about to destroy + recreate the sync objects and swapchain regardless, so a
+    /// timed-out drain degrades to a recoverable rebuild (or a clean exit) instead of a hang.
+    /// </summary>
+    private bool TryDrainDevice(ulong timeoutNs, string context)
+    {
+        // Guard on the GPU's known-good state. When the per-frame fence is already known stuck,
+        // BeginFrame has been timing out — which is exactly how the event loop escalated into
+        // recovery — so the GPU is wedged and a drain here would just burn the full timeout before
+        // failing. Skip straight to the teardown (the fences are recreated next regardless). Only
+        // attempt the drain when the GPU still looks alive: the other recovery trigger is a
+        // mid-frame submit/present error with a healthy fence, where draining in-flight work before
+        // destroying sync objects is both safe and useful.
+        if (_fenceWaitStuck)
+        {
+            Console.Error.WriteLine(
+                $"[VulkanContext] GPU already known stuck; skipping drain before {context}.");
+            return false;
+        }
+
+        var fences = stackalloc VkFence[MaxFramesInFlight];
+        for (var i = 0; i < MaxFramesInFlight; i++)
+        {
+            fences[i] = _inFlightFences[i];
+        }
+        if (DeviceApi.vkWaitForFences(MaxFramesInFlight, fences, true, timeoutNs) == VkResult.Timeout)
+        {
+            Console.Error.WriteLine(
+                $"[VulkanContext] GPU did not idle within {timeoutNs / 1_000_000}ms during {context}; forcing teardown.");
+            return false;
+        }
+        return true;
     }
 
     public VkCommandBuffer BeginFrame(out bool resized)
@@ -377,7 +449,13 @@ public sealed unsafe partial class VulkanContext : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        DeviceApi.vkDeviceWaitIdle();
+        // Drain before teardown so we don't destroy resources the GPU is still reading — but skip
+        // it when the GPU is already known stuck (an unbounded vkDeviceWaitIdle on a wedged device
+        // would hang the quit, the same "Not responding" failure mode the recovery path avoids).
+        if (!_fenceWaitStuck)
+        {
+            DeviceApi.vkDeviceWaitIdle();
+        }
 
         CleanupSwapchain();
         if (_isOffscreen) CleanupOffscreenTarget();
