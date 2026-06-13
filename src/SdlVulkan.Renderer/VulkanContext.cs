@@ -291,6 +291,46 @@ public sealed unsafe partial class VulkanContext : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Bounded "wait for prior in-flight frames" for the font-atlas grow/evict drains, which must
+    /// ensure no previously-submitted frame is still sampling the atlas image before it is swapped or
+    /// destroyed (the Adreno use-after-free hazard those drains were added for). Waits on every
+    /// in-flight fence EXCEPT the current frame's: the atlas grow runs mid-record (between BeginFrame
+    /// and EndFrame), so the current frame's fence is unsignaled and not yet submitted — waiting on it
+    /// would always time out. Capped at <see cref="DrainTimeoutNs"/> and skipped when the GPU is
+    /// already known stuck, so a rare atlas grow coinciding with a wedged GPU can't hard-freeze the
+    /// render thread the way the old unbounded <c>vkDeviceWaitIdle</c> here could. On a healthy GPU it
+    /// is equivalent (the prior frame's fence signals promptly), so the Adreno protection is preserved.
+    /// </summary>
+    internal bool TryWaitPriorFramesIdle(string context)
+    {
+        if (_fenceWaitStuck)
+        {
+            Console.Error.WriteLine($"[VulkanContext] GPU already known stuck; skipping {context} drain.");
+            return false;
+        }
+        var fences = stackalloc VkFence[MaxFramesInFlight];
+        var n = 0;
+        for (var i = 0; i < MaxFramesInFlight; i++)
+        {
+            if (i != _currentFrame)
+            {
+                fences[n++] = _inFlightFences[i];
+            }
+        }
+        if (n == 0)
+        {
+            return true; // single frame in flight -> no prior frame can reference the atlas
+        }
+        if (DeviceApi.vkWaitForFences((uint)n, fences, true, DrainTimeoutNs) == VkResult.Timeout)
+        {
+            Console.Error.WriteLine(
+                $"[VulkanContext] {context} drain timed out after {DrainTimeoutNs / 1_000_000}ms; proceeding (atlas swap may race a wedged GPU that is about to be recovered).");
+            return false;
+        }
+        return true;
+    }
+
     public VkCommandBuffer BeginFrame(out bool resized)
     {
         resized = false;

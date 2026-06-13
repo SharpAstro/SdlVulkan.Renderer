@@ -18,9 +18,18 @@ public sealed unsafe partial class VulkanContext
     /// Copies the most recently presented swapchain image into a freshly-allocated RGBA byte array
     /// (R,G,B,A per pixel, top-to-bottom). Blocks until the GPU finishes the copy. DEBUG-only.
     /// </summary>
-    internal byte[] ReadbackSwapchainRgba()
+    internal byte[]? ReadbackSwapchainRgba()
     {
         if (_isOffscreen) throw new InvalidOperationException("ReadbackSwapchainRgba requires a swapchain context");
+
+        // Never pile a queue submit + GPU wait onto a GPU that is already known wedged: that is
+        // exactly how an inspector screenshot turned a recoverable stall into a render-thread hang.
+        // Returns null; the caller surfaces a "readback unavailable" result instead of crashing.
+        if (_fenceWaitStuck)
+        {
+            Console.Error.WriteLine("[VulkanContext] screenshot readback skipped: GPU known stuck.");
+            return null;
+        }
 
         var imageIndex = _currentImageIndex;
         var image = _swapchainImages[imageIndex];
@@ -75,9 +84,22 @@ public sealed unsafe partial class VulkanContext
             VkPipelineStageFlags.Transfer, VkPipelineStageFlags.BottomOfPipe);
 
         DeviceApi.vkEndCommandBuffer(cmd);
+
+        // Bounded wait (was an unbounded vkQueueWaitIdle): submit with a fence and cap the wait so a
+        // saturated/wedged GPU cannot hang the render thread here. On timeout, abort the readback and
+        // intentionally leak the in-flight command buffer + fence + staging buffer rather than free
+        // resources the GPU may still be reading -- this path is DEBUG-only and we are already in a
+        // degraded state where a one-off leak is far cheaper than a freeze.
         VkSubmitInfo si = new() { commandBufferCount = 1, pCommandBuffers = &cmd };
-        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &si, VkFence.Null).CheckResult();
-        DeviceApi.vkQueueWaitIdle(GraphicsQueue);
+        DeviceApi.vkCreateFence(VkFenceCreateFlags.None, out var readbackFence).CheckResult();
+        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &si, readbackFence).CheckResult();
+        if (DeviceApi.vkWaitForFences(1, &readbackFence, true, DrainTimeoutNs) == VkResult.Timeout)
+        {
+            Console.Error.WriteLine(
+                $"[VulkanContext] screenshot readback timed out after {DrainTimeoutNs / 1_000_000}ms; aborting (GPU saturated).");
+            return null;
+        }
+        DeviceApi.vkDestroyFence(readbackFence);
         DeviceApi.vkFreeCommandBuffers(CommandPool, 1, &cmd);
 
         // Map and copy out. B8G8R8A8 -> convert to R8G8B8A8 for caller convenience.
