@@ -38,8 +38,11 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// <summary>Called on mouse wheel. Parameters: scrollY, mouseX, mouseY. Return true if consumed.</summary>
     public Func<float, float, float, bool>? OnMouseWheel { get; set; }
 
-    /// <summary>Called on trackpad/touch pinch. Parameters: scale (absolute since start), centerX, centerY (pixels).</summary>
-    public Action<float, float, float>? OnPinch { get; set; }
+    /// <summary>Called on trackpad/touch pinch. Parameters: scale (absolute since start), anchorX, anchorY
+    /// (pixels), source. For a touchscreen (<see cref="PinchSource.Touchscreen"/>) the anchor is the real
+    /// finger midpoint; for a touchpad (<see cref="PinchSource.Touchpad"/>) it is the mouse cursor, since
+    /// touchpad touch coordinates are touchpad-relative and don't map to a screen location.</summary>
+    public Action<float, float, float, PinchSource>? OnPinch { get; set; }
 
     /// <summary>Called when a pinch gesture ends (fingers lifted).</summary>
     public Action? OnPinchEnd { get; set; }

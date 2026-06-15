@@ -125,7 +125,7 @@ public sealed class SdlEventLoop
     public Func<float, float, bool>? OnMouseMove { get => Primary.OnMouseMove; set => Primary.OnMouseMove = value; }
     public Action<byte>? OnMouseUp { get => Primary.OnMouseUp; set => Primary.OnMouseUp = value; }
     public Func<float, float, float, bool>? OnMouseWheel { get => Primary.OnMouseWheel; set => Primary.OnMouseWheel = value; }
-    public Action<float, float, float>? OnPinch { get => Primary.OnPinch; set => Primary.OnPinch = value; }
+    public Action<float, float, float, PinchSource>? OnPinch { get => Primary.OnPinch; set => Primary.OnPinch = value; }
     public Action? OnPinchEnd { get => Primary.OnPinchEnd; set => Primary.OnPinchEnd = value; }
     public Action<string>? OnTextInput { get => Primary.OnTextInput; set => Primary.OnTextInput = value; }
     public Action<string>? OnDropFile { get => Primary.OnDropFile; set => Primary.OnDropFile = value; }
@@ -486,8 +486,27 @@ public sealed class SdlEventLoop
                     var dist = GetFingerDistance(vf);
                     // Absolute scale since pinch began (not relative per-frame)
                     var scale = dist / vf.PinchStartDist;
-                    var (cx, cy) = GetFingerCenter(vf);
-                    vf.OnPinch?.Invoke(scale, cx, cy);
+
+                    // Classify the touch device so consumers can anchor sensibly. A DIRECT device
+                    // (touchscreen) reports coordinates relative to the window, so the finger midpoint
+                    // is a real on-screen point -- anchor zoom there. An INDIRECT device (laptop
+                    // trackpad) reports touchpad-relative coordinates that don't map to the screen, so
+                    // the midpoint is meaningless; report the mouse cursor instead (what every other
+                    // app does) and tag it Touchpad so consumers can choose to centre.
+                    float cx, cy;
+                    PinchSource source;
+                    if (GetTouchDeviceType(tfe.TouchID) == TouchDeviceType.Direct)
+                    {
+                        (cx, cy) = GetFingerCenter(vf);
+                        source = PinchSource.Touchscreen;
+                    }
+                    else
+                    {
+                        cx = vf.MouseX;
+                        cy = vf.MouseY;
+                        source = PinchSource.Touchpad;
+                    }
+                    vf.OnPinch?.Invoke(scale, cx, cy, source);
                     vf.PinchStartDist = dist; // relative per-frame for scroll conversion
                     vf.NeedsRedraw = true;
                 }

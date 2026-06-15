@@ -16,7 +16,7 @@ env:
   # 6.0: multi-window — one VulkanDevice shared across windows (SdlVulkanApp); VulkanContext split into
   #      device-level (VulkanDevice) + per-window state; multi-window SdlEventLoop. Breaking: standalone
   #      consumers move to SdlVulkanApp. Adds opt-in SDF glyph disk cache + window placement/morph API.
-  VERSION_PREFIX: 6.2.${{ github.run_number }}
+  VERSION_PREFIX: 6.3.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
