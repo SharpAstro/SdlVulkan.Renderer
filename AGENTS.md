@@ -75,5 +75,4 @@ Side-car pipelines with their own `VkPipelineLayout` can define any push constan
 - `VkPipelineSet.cs` — GLSL→SPIR-V compilation + pipeline creation (Flat, Textured, Ellipse, Page, Stroke, SDF, blend variants)
 - `VkTexture.cs` — per-image Vulkan texture with blocking and deferred upload modes
 - `SdlEventLoop.cs` — event-driven render loop with resize handling
-- `VkMenuWidget.cs` — self-contained menu UI widget implementing `IWidget`
 - `SdlInputMapping.cs` — SDL3 scancode/keymod → DIR.Lib `InputKey`/`InputModifier` mapping
