@@ -22,7 +22,8 @@ env:
   #      BeginThumbnailCapture/EndThumbnailCapture/TryGetThumbnailCapture) — re-issues already-
   #      tessellated geometry into an offscreen target at thumbnail scale, non-blocking readback.
   #      Plus SDF atlas per-page LRU eviction (replaces EvictAll thrash) + bounded disk-load drain.
-  VERSION_PREFIX: 6.6.${{ github.run_number }}
+  # 6.7: lockstep rebuild against DIR.Lib 6.0 (layout namespace + Layout.Builder DSL).
+  VERSION_PREFIX: 6.7.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
