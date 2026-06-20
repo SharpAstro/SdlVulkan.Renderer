@@ -96,6 +96,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         public byte[] Staging = [];                       // 1 byte per pixel, _pageDim²
         public int CursorX, CursorY, RowHeight;
         public int DirtyX0, DirtyY0, DirtyX1, DirtyY1;
+        // LRU bookkeeping for per-page eviction. LastUsedFrame is stamped whenever a glyph on this
+        // page is drawn (GetGlyph hit) or inserted; Keys lists the glyphs placed here so eviction can
+        // drop exactly this page's entries from _glyphs without scanning the whole dictionary.
+        public long LastUsedFrame;
+        public readonly List<GlyphKey> Keys = new();
         // Image starts UNDEFINED; the first FlushPage transitions from there, not ShaderReadOnly.
         public bool NeedsInitialTransition;
         // Per-frame upload ring — slot k reused only after BeginFrame waited on its fence.
@@ -111,6 +116,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     private int _pageDim;          // fixed square page size (power of two)
     private bool _needsEviction;
     private VkSampler _sampler;    // shared across all pages (identical params)
+    private long _frameTick;       // monotonic, ++ each BeginFrame — drives per-page LRU
+    private int _activePageIdx;    // page currently being filled (last appended OR last LRU-reused)
 
     public int PageCount => _pages.Count;
     public VkDescriptorSet GetPageDescriptorSet(int pageIndex) => _pages[pageIndex].DescriptorSet;
@@ -122,8 +129,9 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         {
             if (_needsEviction) return true;
             // Pending async rasterization (or not-yet-inserted results) means the page isn't final —
-            // report dirty so the event loop keeps redrawing and the deferred glyphs pop in.
-            if (!_pendingRasterized.IsEmpty || !_rasterizeInFlight.IsEmpty) return true;
+            // report dirty so the event loop keeps redrawing and the deferred glyphs pop in. Same for
+            // bounded disk-load tails still draining over frames.
+            if (!_pendingRasterized.IsEmpty || !_rasterizeInFlight.IsEmpty || !_pendingDiskLoads.IsEmpty) return true;
             foreach (var p in _pages)
                 if (p.DirtyX0 < p.DirtyX1 && p.DirtyY0 < p.DirtyY1) return true;
             return false;
@@ -179,6 +187,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         page.DescriptorSet = _ctx.AllocateDescriptorSet();
         _ctx.UpdateDescriptorSet(page.DescriptorSet, page.ImageView, _sampler);
         _pages.Add(page);
+        _activePageIdx = _pages.Count - 1;
+        page.LastUsedFrame = _frameTick;
         RenderDiag.Log("sdf.newpage", $"page {_pages.Count - 1} allocated {_pageDim}x{_pageDim}");
         return page;
     }
@@ -202,8 +212,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
     public void BeginFrame()
     {
+        _frameTick++;
         if (_needsEviction)
         {
+            // All pages were hot last frame (working set genuinely > MaxPages in one frame — rare).
+            // Per-page LRU couldn't free a safe page, so fall back to the full wipe.
             EvictAll();
             _needsEviction = false;
         }
@@ -241,17 +254,44 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     // Render-thread only — InsertRasterized mutates atlas/staging/cursor state.
     private void DrainPendingDiskLoads()
     {
-        while (_pendingDiskLoads.TryDequeue(out var load))
+        // Bounded exactly like DrainPendingRasterized: at most MaxGlyphInsertsPerFrame inserts (and
+        // therefore one bounded staging blit + dirty-region upload) per frame. A big .sdfg holds
+        // thousands of glyphs; loading them all in one frame is a tens-of-MB single-command-buffer
+        // upload that wedges the GPU. The tail re-queues and drains over the next frames (IsDirty keeps
+        // the loop awake until empty), so the worst case is a brief progressive fill, never a stall.
+        var budget = MaxGlyphInsertsPerFrame;
+        while (budget > 0 && _pendingDiskLoads.TryDequeue(out var load))
         {
-            var inserted = 0;
-            foreach (var e in load.Entries)
+            var i = 0;
+            var atlasFull = false;
+            for (; i < load.Entries.Count && budget > 0; i++)
             {
+                var e = load.Entries[i];
                 var key = new GlyphKey(load.Font, SdfRasterSize, e.Character, e.CharCode);
                 if (_glyphs.ContainsKey(key)) continue;
                 InsertRasterized(key, e.Bitmap);
-                inserted++;
+                budget--;
+                if (_needsEviction)
+                {
+                    // Atlas filled and nothing cold could be recycled. Do NOT EvictAll to cram in the
+                    // rest — a big .sdfg holds far more glyphs than any view shows, and EvictAll clears
+                    // _diskLoadedFonts → the font reloads → refills → wipes again (the on-open busy-spin).
+                    // Drop this font's remaining cached glyphs; the ones actually drawn fault in on
+                    // demand via the draw path, where per-page LRU keeps just the working set resident.
+                    _needsEviction = false;
+                    atlasFull = true;
+                    i++;
+                    RenderDiag.Log("sdf.diskload", $"{load.Font}: atlas full at entry {i}/{load.Entries.Count} — rest on demand");
+                    break;
+                }
             }
-            RenderDiag.Log("sdf.diskload", $"{load.Font}: inserted {inserted}/{load.Entries.Count} (async)");
+            // Hit the per-frame budget mid-font (not full): resume the unprocessed tail next frame.
+            if (!atlasFull && i < load.Entries.Count)
+            {
+                var tail = new List<DiskGlyphEntry>(load.Entries.Count - i);
+                for (var j = i; j < load.Entries.Count; j++) tail.Add(load.Entries[j]);
+                _pendingDiskLoads.Enqueue((load.Font, tail));
+            }
         }
     }
 
@@ -272,6 +312,14 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         var key = new GlyphKey(fontPath, SdfRasterSize, character, charCode);
         if (_glyphs.TryGetValue(key, out var existing))
         {
+            // Touch the page this glyph lives on so per-page LRU keeps the on-screen working set
+            // resident and only evicts pages that have gone cold (Width==0 is the blank sentinel —
+            // it has no page).
+            if (existing.Width > 0)
+            {
+                DecodePage(existing, out var pg, out _, out _);
+                if ((uint)pg < (uint)_pages.Count) _pages[pg].LastUsedFrame = _frameTick;
+            }
             if (skipUnflushed && _unflushedGlyphs.Contains(key))
                 return existing with { Width = 0 };
             return existing;
@@ -466,7 +514,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         // A glyph bigger than a whole page can never be placed (shouldn't happen at 128px raster).
         if (glyphWidth > _pageDim || glyphHeight > _pageDim) return default;
 
-        var pageIdx = _pages.Count - 1;
+        var pageIdx = _activePageIdx;
         var page = _pages[pageIdx];
 
         // Advance to a new row if the glyph overflows the current row.
@@ -478,20 +526,31 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         }
 
         // Overflows the page → APPEND A NEW PAGE (no grow, no vkDeviceWaitIdle, no re-upload of
-        // existing pages). Only when all pages are full do we fall back to a (deferred) evict-all.
+        // existing pages). At the page cap, recycle the least-recently-used page IN PLACE (per-page
+        // LRU) instead of wiping all pages — this keeps the hot on-screen working set resident, so a
+        // glyph-heavy CJK doc no longer thrashes (EvictAll → refill-all → redraw busy-spin). EvictAll
+        // survives only as the all-pages-hot fallback (working set > MaxPages in a single frame).
         if (page.CursorY + glyphHeight > _pageDim)
         {
-            if (_pages.Count >= MaxPages)
+            if (_pages.Count < MaxPages)
             {
-                // Log once per full-episode (not per rejected glyph). Caller treats Width=0 as
-                // not-yet-available and retries next frame, exactly like the old grow/evict path.
+                page = AllocateNewPage();   // sets _activePageIdx
+                pageIdx = _activePageIdx;
+            }
+            else if (TryEvictLruPage(out pageIdx))
+            {
+                page = _pages[pageIdx];     // cursor reset + _activePageIdx set by TryEvictLruPage
+            }
+            else
+            {
+                // Every page was touched within the last MaxFramesInFlight frames — nothing safe to
+                // recycle. Caller treats Width=0 as not-yet-available and retries after the fallback
+                // EvictAll runs next BeginFrame.
                 if (!_needsEviction)
-                    RenderDiag.Log("sdf.pagecap", $"all {MaxPages} pages full glyphs={_glyphs.Count} — evict deferred");
+                    RenderDiag.Log("sdf.pagecap", $"all {MaxPages} pages hot glyphs={_glyphs.Count} — evict-all fallback");
                 _needsEviction = true;
                 return default;
             }
-            pageIdx = _pages.Count;
-            page = AllocateNewPage();
         }
 
         // Blit single-channel SDF data into this page's staging buffer.
@@ -524,9 +583,49 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
         _glyphs[key] = glyphInfo;
         _unflushedGlyphs.Add(key);
+        page.Keys.Add(key);              // for O(page) eviction without scanning all of _glyphs
+        page.LastUsedFrame = _frameTick; // freshly written → hot
         page.CursorX += glyphWidth + 1;
         page.RowHeight = Math.Max(page.RowHeight, glyphHeight);
         return glyphInfo;
+    }
+
+    /// <summary>
+    /// Per-page LRU eviction: when all pages are full, reset the least-recently-used page IN PLACE and
+    /// reuse it (keeping every other page's glyphs), rather than wiping the whole atlas. Only a page no
+    /// in-flight frame can still be sampling is eligible — its LastUsedFrame must be strictly older than
+    /// MaxFramesInFlight, which (because the caller already waited that slot's fence in BeginFrame) means
+    /// its GPU work has retired, so the image bytes can be overwritten with no device wait. The stale
+    /// pixels below the reset cursor are never sampled again — their glyph keys were removed from
+    /// _glyphs — so there's no need to clear the page or re-upload it; new glyphs overwrite from the top.
+    /// Returns false when every page is hot (genuinely &gt; MaxPages working set this frame), leaving the
+    /// caller to fall back to EvictAll.
+    /// </summary>
+    private bool TryEvictLruPage(out int pageIdx)
+    {
+        pageIdx = -1;
+        var oldest = long.MaxValue;
+        for (var i = 0; i < _pages.Count; i++)
+        {
+            var lru = _pages[i].LastUsedFrame;
+            if (lru >= _frameTick - VulkanContext.MaxFramesInFlight) continue; // hot / possibly in-flight
+            if (lru < oldest) { oldest = lru; pageIdx = i; }
+        }
+        if (pageIdx < 0) return false;
+
+        var page = _pages[pageIdx];
+        foreach (var k in page.Keys)
+        {
+            _glyphs.Remove(k);
+            _unflushedGlyphs.Remove(k);
+        }
+        RenderDiag.Log("sdf.evictpage",
+            $"recycled page {pageIdx} (dropped {page.Keys.Count} cold glyphs, {_glyphs.Count} remain)");
+        page.Keys.Clear();
+        page.CursorX = 0; page.CursorY = 0; page.RowHeight = 0;
+        page.LastUsedFrame = _frameTick;
+        _activePageIdx = pageIdx;
+        return true;
     }
 
     /// <summary>
@@ -648,9 +747,12 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         // re-uploads the cleared pixels. Its image is already valid (no new initial transition needed).
         var p0 = _pages[0];
         p0.CursorX = 0; p0.CursorY = 0; p0.RowHeight = 0;
+        p0.Keys.Clear();
+        p0.LastUsedFrame = _frameTick;
         Array.Clear(p0.Staging, 0, p0.Staging.Length);
         p0.DirtyX0 = 0; p0.DirtyY0 = 0;
         p0.DirtyX1 = _pageDim; p0.DirtyY1 = _pageDim;
+        _activePageIdx = 0;
     }
 
     private void CreateImage(Page page, int width, int height)

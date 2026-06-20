@@ -18,7 +18,11 @@ env:
   #      consumers move to SdlVulkanApp. Adds opt-in SDF glyph disk cache + window placement/morph API.
   # 6.4: rebuilt against DIR.Lib 5.0 (layout engine + PixelMenuWidget); removes VkMenuWidget
   #      (superseded by DIR.Lib's surface-agnostic PixelMenuWidget).
-  VERSION_PREFIX: 6.4.${{ github.run_number }}
+  # 6.5: live-device thumbnail capture (VulkanContext.ThumbnailCapture + VkRenderer
+  #      BeginThumbnailCapture/EndThumbnailCapture/TryGetThumbnailCapture) — re-issues already-
+  #      tessellated geometry into an offscreen target at thumbnail scale, non-blocking readback.
+  #      Plus SDF atlas per-page LRU eviction (replaces EvictAll thrash) + bounded disk-load drain.
+  VERSION_PREFIX: 6.5.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

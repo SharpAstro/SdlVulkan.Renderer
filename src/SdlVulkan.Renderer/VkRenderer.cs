@@ -13,6 +13,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     private uint _height;
     private VkCommandBuffer _currentCmd;
 
+    // Saved swapchain projection dims while a thumbnail capture redirects _width/_height (below).
+    private uint _savedWidth;
+    private uint _savedHeight;
+    private bool _inThumbnailCapture;
+
     // Push constant data: mat4 (16 floats) + vec4 color (4 floats) + float innerRadius (1 float) = 84 bytes
     private readonly float[] _pushConstants = new float[21];
 
@@ -178,6 +183,68 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         Surface.EndFrame(_currentCmd);
     }
+
+    // ---- Live-device thumbnail capture (see VulkanContext.ThumbnailCapture.cs) ----
+
+    /// <summary>
+    /// Allocate the live-device thumbnail capture target once, up front (never mid steady-state).
+    /// Size it to the largest thumbnail you will request — per-page captures use a (w,h) sub-rect.
+    /// </summary>
+    public bool EnsureThumbnailTarget(uint maxW, uint maxH) => Surface.EnsureThumbnailTarget(maxW, maxH);
+
+    /// <summary>True while a capture is recorded-but-unconsumed or a finished snapshot awaits fetch.</summary>
+    public bool ThumbnailCaptureBusy => Surface.ThumbnailCaptureBusy;
+
+    /// <summary>
+    /// Opens the thumbnail capture render pass on the current frame's command buffer and redirects the
+    /// projection to a (w,h) target, so subsequent DrawPersistent* / glyph / textured draws land in the
+    /// offscreen thumbnail target at thumbnail scale (page origin 0,0). MUST be called from the
+    /// OnPreRenderPass hook (before the main render pass) and bracketed by <see cref="EndThumbnailCapture"/>.
+    /// Returns false (and changes nothing) if the target isn't ready or a capture is already in flight.
+    /// </summary>
+    public bool BeginThumbnailCapture(uint w, uint h)
+    {
+        if (_currentCmd == VkCommandBuffer.Null || _inThumbnailCapture) return false;
+        if (!Surface.BeginThumbnailCapturePass(_currentCmd, w, h)) return false;
+
+        _savedWidth = _width;
+        _savedHeight = _height;
+        _width = w;
+        _height = h;
+        // Refresh the cached screen-space projection matrix: glyph and textured-quad (image) draws
+        // read _pushConstants, not _width/_height inline (only DrawPersistent* recompute inline), so
+        // without this text and images would be projected at the swapchain scale into the thumbnail.
+        UpdateProjection();
+        // The command buffer is fresh this frame (reset in BeginFrame) but _lastBoundPipeline still
+        // holds the previous frame's pipeline and isn't cleared until after the main BeginRenderPass.
+        // Force a real bind on the first capture draw so we don't skip binding into an empty cmd.
+        _lastBoundPipeline = VkPipeline.Null;
+        _inThumbnailCapture = true;
+        return true;
+    }
+
+    /// <summary>
+    /// Closes the capture pass opened by <see cref="BeginThumbnailCapture"/>, records the readback
+    /// copy, and restores the swapchain projection. The captured pixels become available
+    /// (non-blocking, a couple of frames later) via <see cref="TryGetThumbnailCapture"/>.
+    /// </summary>
+    public void EndThumbnailCapture()
+    {
+        if (!_inThumbnailCapture) return;
+        Surface.EndThumbnailCapturePassAndCopy(_currentCmd);
+        _width = _savedWidth;
+        _height = _savedHeight;
+        UpdateProjection(); // restore the swapchain-scale projection for the main render pass
+        _lastBoundPipeline = VkPipeline.Null; // main render pass will rebind from scratch
+        _inThumbnailCapture = false;
+    }
+
+    /// <summary>
+    /// Fetches the most recent finished capture (RGBA, top-to-bottom rows). Call once per frame (e.g.
+    /// from OnPreFlush). Returns false if none is ready.
+    /// </summary>
+    public bool TryGetThumbnailCapture(out byte[] rgba, out int width, out int height)
+        => Surface.TryGetThumbnailReadback(out rgba, out width, out height);
 
     /// <summary>
     /// Offscreen equivalent of <see cref="BeginFrame"/>. Requires the backing context was

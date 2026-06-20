@@ -354,6 +354,11 @@ public sealed unsafe partial class VulkanContext : IDisposable
         waitResult.CheckResult();
         _fenceWaitStuck = false;
 
+        // The fence for _currentFrame is now signaled (just waited, not yet reset). If a thumbnail
+        // capture's copy rode this fence index, its GPU work is complete — snapshot it now without
+        // any extra GPU wait. Done before the reset below so the fence is still in its signaled state.
+        ConsumeThumbnailReadback();
+
         var result = DeviceApi.vkAcquireNextImageKHR(Swapchain, ulong.MaxValue,
             _imageAvailableSemaphores[_currentFrame], VkFence.Null, out _currentImageIndex);
 
@@ -499,6 +504,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
         CleanupSwapchain();
         if (_isOffscreen) CleanupOffscreenTarget();
+        CleanupThumbnailTarget();
 
         for (var i = 0; i < MaxFramesInFlight; i++)
         {
