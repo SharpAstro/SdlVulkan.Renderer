@@ -28,7 +28,10 @@ public static class SdlInputMapping
             Scancode.Backspace => InputKey.Backspace,
             Scancode.Delete => InputKey.Delete,
             >= Scancode.A and <= Scancode.Z => (InputKey)((int)InputKey.A + (scancode - Scancode.A)),
-            >= Scancode.Alpha1 and <= Scancode.Alpha0 => (InputKey)((int)InputKey.D1 + (scancode - Scancode.Alpha1)),
+            // Alpha0 must come first: SDL orders the digit-row scancodes 1..9 then 0 (Alpha0 = Alpha9 + 1),
+            // so folding it into the Alpha1..Alpha9 arithmetic would land on D9+1 == F1, not D0.
+            Scancode.Alpha0 => InputKey.D0,
+            >= Scancode.Alpha1 and <= Scancode.Alpha9 => (InputKey)((int)InputKey.D1 + (scancode - Scancode.Alpha1)),
             >= Scancode.F1 and <= Scancode.F12 => (InputKey)((int)InputKey.F1 + (scancode - Scancode.F1)),
             Scancode.Equals => InputKey.Plus,
             Scancode.Minus => InputKey.Minus,
