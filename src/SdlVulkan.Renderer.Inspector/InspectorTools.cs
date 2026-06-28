@@ -155,6 +155,51 @@ public sealed class InspectorTools
     }
 
     [McpServerTool, Description(
+        "Render-thread watchdog: is the app's RENDER THREAD pumping or wedged? The inspector executes "
+        + "EVERY command (including ping) ON the render thread, so a ping that round-trips proves the "
+        + "render loop completed a frame and drained its queue; a ping that does NOT return within the "
+        + "short budget means the render thread is blocked (a hang / Not-Responding) even though the "
+        + "process is still alive. Returns ALIVE (with round-trip ms) / BLOCKED / DEAD -- and on BLOCKED "
+        + "the exact dotnet-stack command to capture the frozen frame. Set watchSeconds>0 to poll until "
+        + "it wedges (or the window elapses still-alive) in a single call -- the lightweight watchdog. "
+        + "Use this, not screenshot/describe, to decide IF the render thread is stuck (those also block "
+        + "when it is).")]
+    public static async Task<string> render_liveness(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Per-ping budget in milliseconds before declaring the render thread blocked (default 1500).")] int timeoutMs = 1500,
+        [Description("If > 0, poll repeatedly for up to this many seconds, returning as soon as the render thread blocks (or the window elapses still-alive). 0 = a single probe.")] double watchSeconds = 0,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var budget = TimeSpan.FromMilliseconds(Math.Clamp(timeoutMs, 100, 10_000));
+
+        if (watchSeconds <= 0)
+            return FormatLiveness(await socket.ProbeRenderAsync(target, budget, ct), target);
+
+        // Watch mode: poll until it wedges/dies or the window elapses. One round-trip per budget, so the
+        // poll cadence naturally backs off to the budget length; the call returns the moment it flips.
+        var end = DateTime.UtcNow.AddSeconds(Math.Clamp(watchSeconds, 1, 600));
+        var probes = 0;
+        while (DateTime.UtcNow < end)
+        {
+            var r = await socket.ProbeRenderAsync(target, budget, ct);
+            probes++;
+            if (r.Status != RenderLiveness.Alive)
+                return $"{FormatLiveness(r, target)} (after {probes} probe(s))";
+            await Task.Delay(budget, ct);
+        }
+        return $"ALIVE: render thread stayed responsive for ~{watchSeconds:F0}s ({probes} probes, pid {target.Pid})";
+    }
+
+    private static string FormatLiveness(RenderProbeResult r, InspectorInstance target) => r.Status switch
+    {
+        RenderLiveness.Alive => $"ALIVE: {r.Detail} in {r.RttMs:F0} ms (pid {target.Pid})",
+        RenderLiveness.Blocked => $"BLOCKED: {r.Detail} (pid {target.Pid}). Capture the frozen frame: dotnet-stack report -p {target.Pid}",
+        RenderLiveness.Dead => $"DEAD: {r.Detail} (pid {target.Pid})",
+        _ => $"{r.Status}: {r.Detail} (pid {target.Pid})",
+    };
+
+    [McpServerTool, Description(
         "Run a SEQUENCE of inspector actions in ONE round-trip, one per rendered frame -- a real "
         + "frame renders between steps, so e.g. a zoom takes effect before the next step reads "
         + "state. Returns a JSON array of per-step result fragments (same shape each tool returns "
