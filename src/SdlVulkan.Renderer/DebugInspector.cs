@@ -9,6 +9,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using DIR.Lib;
+using Layout = DIR.Lib.Layout;
 
 namespace SdlVulkan.Renderer;
 
@@ -43,6 +44,7 @@ public sealed class DebugInspector : IDisposable
     }
     private sealed record PingCommand : InspectorCommand;
     private sealed record DescribeCommand : InspectorCommand;
+    private sealed record DescribeLayoutCommand : InspectorCommand;
     private sealed record ScreenshotCommand : InspectorCommand;
     private sealed record ListSignalsCommand : InspectorCommand;
     private sealed record ClickCommand(float X, float Y, InputModifier Mods = InputModifier.None) : InspectorCommand;
@@ -115,6 +117,14 @@ public sealed class DebugInspector : IDisposable
     public static DebugInspector Attach(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
     {
         var inspector = new DebugInspector(loop, view, opts);
+
+        // Supplying a layout callback opts this process into PixelWidgetBase layout capture, so widgets
+        // retain their arranged tree for describeLayout. Off by default (zero paint overhead otherwise).
+        if (opts.GetLayout is not null)
+        {
+            LayoutInspection.Enabled = true;
+        }
+
         inspector.Start();
 
         // Lambda-compose the pump onto OnPostFrame (the framework's own wiring style) so the
@@ -234,6 +244,7 @@ public sealed class DebugInspector : IDisposable
     {
         "ping" => new PingCommand(),
         "describe" => new DescribeCommand(),
+        "describeLayout" => new DescribeLayoutCommand(),
         "screenshot" => new ScreenshotCommand(),
         "signals" => new ListSignalsCommand(),
         "click" => new ClickCommand(
@@ -490,6 +501,7 @@ public sealed class DebugInspector : IDisposable
     {
         PingCommand => "\"pong\"",
         DescribeCommand => ExecuteDescribe(),
+        DescribeLayoutCommand => ExecuteDescribeLayout(),
         ScreenshotCommand => ExecuteScreenshot(),
         ListSignalsCommand => ExecuteListSignals(),
         ClickCommand c => ExecuteClickAt(c.X, c.Y, c.Mods),
@@ -546,6 +558,81 @@ public sealed class DebugInspector : IDisposable
         HitResult.ListItemHit li => ("listitem", $"{li.ListId}[{li.Index}]"),
         HitResult.SliderHit s => ("slider", s.SliderIndex.ToString()),
         _ => (hit.GetType().Name, null) // covers SlotHit<T> and any app-specific HitResult subtype
+    };
+
+    // Serializes the FULL arranged layout tree (not just the clickable subset). Each node carries its
+    // tree depth (so the flat pre-order list reconstructs the nesting), kind, rect, plus the content /
+    // background / hit chrome the painter drew. Empty when GetLayout is unset or the app draws without
+    // the layout DSL.
+    private string ExecuteDescribeLayout()
+    {
+        var nodes = _opts.GetLayout?.Invoke() ?? [];
+        return ToJson(w =>
+        {
+            w.WriteStartObject();
+            w.WriteNumber("count", nodes.Count);
+            w.WriteStartArray("nodes");
+            foreach (var an in nodes)
+            {
+                var node = an.Node;
+                var r = an.Bounds;
+                w.WriteStartObject();
+                w.WriteNumber("depth", an.Depth);
+                w.WriteString("kind", LayoutKind(node));
+                w.WriteNumber("x", r.X);
+                w.WriteNumber("y", r.Y);
+                w.WriteNumber("w", r.Width);
+                w.WriteNumber("h", r.Height);
+
+                switch (node)
+                {
+                    case Layout.Node.Stack stack: w.WriteString("axis", stack.Axis.ToString()); break;
+                    case Layout.Node.Split split: w.WriteString("axis", split.Axis.ToString()); break;
+                    case Layout.Node.Grid grid: w.WriteNumber("columns", grid.Columns); break;
+                }
+
+                if (node is Layout.Node.Leaf leaf)
+                {
+                    switch (leaf.Content)
+                    {
+                        case Layout.Content.Text text:
+                            w.WriteString("text", text.Value);
+                            w.WriteNumber("fontSize", text.FontSize);
+                            break;
+                        case Layout.Content.Fill fill when fill.Key is { } key:
+                            w.WriteString("fillKey", key);
+                            break;
+                    }
+                }
+
+                if (node.Background is { } bg)
+                {
+                    w.WriteString("bg", $"#{bg.Red:X2}{bg.Green:X2}{bg.Blue:X2}{bg.Alpha:X2}");
+                }
+
+                if (node.Hit is { } hit)
+                {
+                    var (role, label) = RoleLabel(hit);
+                    w.WriteString("hitRole", role);
+                    if (label is not null) w.WriteString("hitLabel", label);
+                }
+
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            w.WriteEndObject();
+        });
+    }
+
+    private static string LayoutKind(Layout.Node node) => node switch
+    {
+        Layout.Node.Stack => "Stack",
+        Layout.Node.Dock => "Dock",
+        Layout.Node.Grid => "Grid",
+        Layout.Node.Overlay => "Overlay",
+        Layout.Node.Split => "Split",
+        Layout.Node.Leaf => "Leaf",
+        _ => node.GetType().Name,
     };
 
     private string ExecuteScreenshot()

@@ -2,6 +2,7 @@
 using System.Net;
 using System.Text.Json;
 using DIR.Lib;
+using Layout = DIR.Lib.Layout;
 
 namespace SdlVulkan.Renderer;
 
@@ -32,6 +33,18 @@ public sealed class DebugInspectorOptions
     /// <see cref="DebugStateWriter"/> (no JSON plumbing, no string round-trip). Render thread.
     /// </summary>
     public Action<DebugStateWriter>? AppState { get; init; }
+
+    /// <summary>
+    /// Returns the arranged layout nodes to serialize for <c>describeLayout</c> -- the FULL
+    /// <see cref="Layout.ArrangedNode{T}"/> tree (every painted node with its depth, rect, kind,
+    /// content, background, and any click binding), not just the clickable subset
+    /// <see cref="GetRegions"/> surfaces. Aggregate the chrome's + active tab's
+    /// <c>PixelWidgetBase.GetCapturedLayout()</c> here. Supplying this callback flips on
+    /// <see cref="LayoutInspection"/> in <see cref="DebugInspector.Attach(SdlEventLoop, SdlWindowView, DebugInspectorOptions)"/>
+    /// so widgets retain their arranged tree. Invoked on the render thread inside the command pump,
+    /// so reading the per-frame capture is race-free.
+    /// </summary>
+    public Func<IReadOnlyList<Layout.ArrangedNode<float>>>? GetLayout { get; init; }
 
     /// <summary>
     /// Maps a signal name to an action that builds AND posts the signal from a JSON argument element.

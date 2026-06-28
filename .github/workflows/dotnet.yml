@@ -25,7 +25,10 @@ env:
   # 6.7: lockstep rebuild against DIR.Lib 6.0 (layout namespace + Layout.Builder DSL).
   # 6.8: inspector render-thread watchdog -- render_liveness MCP tool + ProbeRenderAsync (ALIVE/BLOCKED/DEAD
   #      via a short-budget ping that round-trips ON the render thread; detects a wedged render loop).
-  VERSION_PREFIX: 6.8.${{ github.run_number }}
+  # 6.9: inspector describe_layout MCP tool -- serializes the FULL arranged DIR.Lib.Layout tree (depth +
+  #      kind + rect + content/bg/hit chrome), not just the clickable subset describe_ui shows. Needs
+  #      DIR.Lib's ArrangedNode.Depth + PixelWidgetBase.GetCapturedLayout + LayoutInspection (DIR.Lib 6.0.x).
+  VERSION_PREFIX: 6.9.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

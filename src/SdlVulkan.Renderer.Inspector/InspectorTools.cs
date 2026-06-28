@@ -47,6 +47,23 @@ public sealed class InspectorTools
         return result.GetRawText();
     }
 
+    [McpServerTool, Description(
+        "Returns the live ARRANGED LAYOUT tree: the FULL DIR.Lib.Layout node tree the app painted this "
+        + "frame, not just the clickable subset describe_ui shows. Each node has depth (root=0, pre-order "
+        + "so a parent precedes its children), kind (Stack/Dock/Grid/Overlay/Split/Leaf), rect (x/y/w/h), "
+        + "axis (Stack/Split), columns (Grid), text+fontSize (Text leaves), fillKey (custom-widget Fill "
+        + "leaves), bg (#RRGGBBAA), and hitRole/hitLabel when the node is clickable. Use this to debug "
+        + "layout/placement -- clipping, gaps, why a panel is the size it is, nesting -- which describe_ui "
+        + "cannot show. Empty if the app draws without the layout DSL.")]
+    public static async Task<string> describe_layout(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "describeLayout", null, ct);
+        return result.GetRawText();
+    }
+
     [McpServerTool, Description("Capture a PNG screenshot of the instance's current window frame.")]
     public static async Task<ImageContentBlock> screenshot(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
