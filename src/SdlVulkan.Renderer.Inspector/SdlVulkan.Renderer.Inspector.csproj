@@ -39,7 +39,7 @@
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
-    <PackageReference Include="SharpAstro.Png" Version="3.3.361" />
+    <PackageReference Include="SharpAstro.Png" Version="3.4.*" />
   </ItemGroup>
 
   <ItemGroup>
