@@ -30,6 +30,10 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
 
     private readonly VulkanContext _ctx;
     private readonly ManagedFontRasterizer _rasterizer;
+
+    /// <summary>The shared rasterizer this atlas resolves/rasterizes through — also what the
+    /// renderer hands an <see cref="ITextShaper"/> so shaping keys off the same font state.</summary>
+    internal ManagedFontRasterizer Rasterizer => _rasterizer;
     private readonly Dictionary<GlyphKey, GlyphInfo> _glyphs = new();
     private readonly HashSet<GlyphKey> _unflushedGlyphs = new();
 
