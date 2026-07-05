@@ -7,9 +7,15 @@ namespace SdlVulkan.Renderer;
 
 internal sealed unsafe class VkFontAtlas : IDisposable
 {
-    // CharCode is included in the key for CID subset fonts where the same Unicode
-    // character may need different glyph indices. For non-CID fonts, charCode is -1.
-    private readonly record struct GlyphKey(string Font, float Size, Rune Character, int CharCode);
+    // Glyphs are keyed by resolved identity (A1): the numeric glyph id for OpenType fonts
+    // (Name == null), or the PostScript glyph name for Type1/PFB fonts (Gid == 0). Codepoint→
+    // identity is resolved once at the GetGlyph boundary via ManagedFontRasterizer.
+    // ResolveGlyphIdentity, so the old (charCode, character) CID workaround collapses away.
+    private readonly record struct GlyphKey(string Font, float Size, uint Gid, string? Name);
+
+    // Sentinel Gid for whitespace (no ink; advance derives from the 'n' reference glyph). Kept off
+    // gid 0 (the shared notdef/blank entry) and off any real glyph id so it never collides.
+    private const uint WhitespaceGid = uint.MaxValue;
 
     internal readonly record struct GlyphInfo(float U0, float V0, float U1, float V1, int Width, int Height, float AdvanceX, int BearingX, int BearingY);
 
@@ -115,7 +121,8 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character, bool skipUnflushed = false, int charCode = -1, GlyphMapHint hint = GlyphMapHint.Auto)
     {
         fontSize = QuantizeFontSize(fontSize);
-        var key = new GlyphKey(fontPath, fontSize, character, charCode);
+        // Resolve (character, charCode, hint) → glyph identity once, here at the draw boundary.
+        var key = MakeKey(fontPath, fontSize, character, charCode, hint);
         if (_glyphs.TryGetValue(key, out var existing))
         {
             // Cache hit — safe to draw only if this glyph has been flushed to GPU
@@ -123,10 +130,21 @@ internal sealed unsafe class VkFontAtlas : IDisposable
                 return existing with { Width = 0 }; // metrics preserved for advance, but skip quad
             return existing;
         }
-        var result = RasterizeGlyph(key, charCode, hint);
+        var result = RasterizeGlyph(key);
         if (skipUnflushed && result.Width > 0)
             return result with { Width = 0 }; // just rasterized, not flushed yet — skip quad
         return result;
+    }
+
+    // Resolve a (character, PDF charCode, cmap hint) request to the atlas identity key: the glyph
+    // id for OpenType fonts, the glyph name for Type1/PFB. Whitespace shares one sentinel key (its
+    // advance derives from the 'n' reference glyph in RasterizeGlyph). Size is the quantized size.
+    private GlyphKey MakeKey(string fontPath, float size, Rune character, int charCode, GlyphMapHint hint)
+    {
+        if (Rune.IsWhiteSpace(character))
+            return new GlyphKey(fontPath, size, WhitespaceGid, null);
+        var id = Rasterizer.ResolveGlyphIdentity(fontPath, character, charCode, hint);
+        return new GlyphKey(fontPath, size, id.Gid, id.Type1Name);
     }
 
     /// <summary>
@@ -229,9 +247,9 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkFreeMemory(_imageMemory);
     }
 
-    private GlyphInfo RasterizeGlyph(GlyphKey key, int charCode = -1, GlyphMapHint hint = GlyphMapHint.Auto)
+    private GlyphInfo RasterizeGlyph(GlyphKey key)
     {
-        if (Rune.IsWhiteSpace(key.Character))
+        if (key.Gid == WhitespaceGid)
         {
             var refGlyph = GetGlyph(key.Font, key.Size, new Rune('n'));
             var info = new GlyphInfo(0, 0, 0, 0, 0, 0, refGlyph.AdvanceX, 0, 0);
@@ -239,13 +257,11 @@ internal sealed unsafe class VkFontAtlas : IDisposable
             return info;
         }
 
-        // Use charCode-aware lookup when charCode is available (subset/embedded fonts).
-        // RasterizeGlyphWithCharCode supports multiple cmap strategies via GlyphMapHint.
-        GlyphBitmap bitmap;
-        if (charCode >= 0)
-            bitmap = Rasterizer.RasterizeGlyphWithCharCode(key.Font, key.Size, key.Character, (uint)charCode, hint);
-        else
-            bitmap = Rasterizer.RasterizeGlyph(key.Font, key.Size, key.Character);
+        // Rasterize by the resolved identity in the key: Type1 by glyph name, otherwise by GID.
+        // (RasterizeGlyphByGid tries the color path first, so COLR/CBDT glyphs still resolve here.)
+        var bitmap = key.Name is not null
+            ? Rasterizer.RasterizeGlyphByType1Name(key.Font, key.Size, key.Name)
+            : Rasterizer.RasterizeGlyphByGid(key.Font, key.Size, key.Gid);
         var glyphWidth = bitmap.Width;
         var glyphHeight = bitmap.Height;
 
