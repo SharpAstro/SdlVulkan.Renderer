@@ -28,7 +28,7 @@ env:
   # 6.9: inspector describe_layout MCP tool -- serializes the FULL arranged DIR.Lib.Layout tree (depth +
   #      kind + rect + content/bg/hit chrome), not just the clickable subset describe_ui shows. Needs
   #      DIR.Lib's ArrangedNode.Depth + PixelWidgetBase.GetCapturedLayout + LayoutInspection (DIR.Lib 6.0.x).
-  VERSION_PREFIX: 6.12.${{ github.run_number }}
+  VERSION_PREFIX: 6.13.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
