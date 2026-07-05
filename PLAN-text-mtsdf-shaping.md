@@ -144,16 +144,82 @@ absorbed by the existing async off-render-thread rasterization + disk cache.
   holds — so A4 trails A3, gated by keeping editable widgets on the default
   shaper until it lands.
 
+## The compat contract (what downstream consumers actually see)
+
+`VkFontAtlas`, `VkSdfFontAtlas` (and thus `GlyphKey` and `GlyphInfo`) are
+`internal sealed` — the external glyph surface is exactly:
+
+- Nine public `VkRenderer` methods carrying `(Rune character, int charCode,
+  GlyphMapHint hint)`: `PreWarmGlyph`, `DrawSingleGlyph`,
+  `DrawGlyphAtBaseline`, `AddBatchedGlyph`, `AddBatchedGlyphAtBaseline`,
+  `AddBatchedSdfGlyph`, `AddBatchedSdfGlyphAtBaseline`, `PreWarmSdfGlyph`,
+  `PreWarmSdfGlyphBatch` (`VkRenderer.cs:717-1165`), plus the identity-free
+  batch brackets and `DrawText`/`MeasureText`.
+- `SdfGlyphDiskCache` (fully public, including `AppendGlyph(s)` /
+  `DiskGlyphEntry` carrying the `(CharCode, Rune, Hint)` trio) and the
+  `VkRenderer` constructor's `sdfDiskCache`/`rasterizer` params.
+
+**These signatures are the compat layer for A1**: they stay unchanged and
+resolve `(Rune, charCode, hint)` → GID at entry. A useful side effect: disk
+entries can then store the GID resolved at rasterization time, so bulk cache
+loads no longer need font parsing to reconstruct identity.
+
+## Downstream consumer: pdf-viewer (surveyed 2026-07-05)
+
+Consumption is a **source-level submodule chain** — pdf-viewer →
+`lib/SdlVulkanRenderer` (DrawboardLtd fork) → nested DIR.Lib fork submodule —
+with plain `ProjectReference`s, no NuGet gate. The fork's text-pipeline files
+are byte-identical to upstream at fork `origin/main` (renderer 6.12). Changes
+land only when the submodule pin is bumped, so breaking stages are absorbed
+one pin-bump at a time with compile errors surfacing at bump time.
+
+Findings that shape the plan:
+
+- **pdf-viewer never reaches atlas internals** — every PDF-content glyph goes
+  through the compat surface above (`VectorPageRenderer.cs:1272-1326`,
+  `PreWarmSdfGlyphBatch` dedup key is literally the `(Font, Rune, CharCode,
+  Hint)` 4-tuple). No custom pipelines sample the glyph atlas. A pure
+  signature-compatible refactor builds with **zero pdf-viewer changes**.
+- **`SdfTextThreshold = 0`** (`VectorPageRenderer.cs:1393`): 100 % of PDF text
+  renders through the SDF atlas — Track B changes every text pixel in the
+  shipped viewer, and all RMS golden baselines (`test-baselines.json`, via
+  `PageVulkanRender`) need one `UPDATE_BASELINES=1` regeneration.
+- **One untyped sync point:** `Program.cs:78` hard-codes
+  `new SdfGlyphDiskCache(..., rasterSize: 128f, spread: 4f)` which must match
+  the atlas constants — if Track B changes raster size, this must move in
+  lockstep (mismatch is only silently invalidated, not an error).
+- **Three charCode→glyph resolution strategies coexist** and the A1 boundary
+  resolver must reproduce all three: CID-direct via `/CIDToGIDMap`
+  (`ContentStreamParser.cs:1420-1427` — the PDF.Lib backend *already passes
+  resolved GIDs* as `charCode` with `CharCodeIsGID`), TrueType-subset cmap
+  search with a deliberate SPUA codepoint trick for symbolic fonts
+  (`VectorPageRenderer.cs:1301-1312`, forces Unicode-lookup misses), and
+  Type1 encoding-vector/glyph-name lookup. Additionally,
+  `TextGlyphCommand.CharCode`/`IsCidFont` carry **different semantics per
+  backend** (PDF.Lib: resolved GID + treat-as-GID flag; SDK: raw charCode +
+  actual font type) — do not conflate them at the new boundary.
+- **Precedent regression:** the fork's `test-baselines.json:2` documents that
+  a 3.4→3.5 renderer+Fonts.Lib bump broke CID Identity-H glyph routing on
+  customer CAD PDFs — and RMS diffing is known to under-detect wrong-glyph
+  bugs (`Cjk0522GlyphSelection.cs`). Gate any A-stage bump on:
+  `Cjk0522GlyphSelection`, `PageVulkanRender` (both backends, all dpis), and
+  `PerFontGlyphCompare`.
+- **No text selection/caret code exists in pdf-viewer** (no `TextInputState`
+  usage; search is a page-label index, not content text) — A4's cluster work
+  does not affect this consumer at all.
+
 ## Breakage assessment
 
 | Blast radius | Verdict |
 |---|---|
-| Public draw APIs (`DrawText`/`MeasureText`, `VkRenderer`) | Signatures unchanged; internals re-plumbed |
+| Public draw APIs (`DrawText`/`MeasureText`, `VkRenderer` glyph methods) | Signatures unchanged (they are the compat layer); internals re-plumbed |
+| pdf-viewer source | Zero changes to compile; `Program.cs:78` raster-size/spread sync if B changes them |
 | Disk caches (`.sdfg`) | One coordinated format bump; self-healing by design |
-| Rendered pixels | Change once (MTSDF corners; kerning only if opted in) |
-| Text-input carets | Only under a HarfBuzz shaper with ligature clusters — gated behind A4 |
+| Rendered pixels | Change once (MTSDF corners; kerning only if opted in) — pdf-viewer regenerates all RMS baselines once |
+| Glyph identity (CID/symbolic/Type1 PDFs) | The real Track A risk — semantic, not compile-time; gated by the fork's glyph-selection tests |
+| Text-input carets | Only under a HarfBuzz shaper with ligature clusters — gated behind A4; no pdf-viewer exposure |
 | Type1/PFB fonts | The one genuine design wart; synthetic-GID vs legacy-key decision needed |
-| Emoji / bitmap atlas path | Untouched |
+| Emoji / bitmap atlas path | Untouched (effectively dead for PDF content anyway at `SdfTextThreshold = 0`) |
 
 ## Sequencing & publish chain
 
