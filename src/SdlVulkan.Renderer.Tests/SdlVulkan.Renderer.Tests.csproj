@@ -37,4 +37,8 @@
     <ProjectReference Include="..\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

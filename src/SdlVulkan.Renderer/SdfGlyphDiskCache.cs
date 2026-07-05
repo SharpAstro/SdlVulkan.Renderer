@@ -6,8 +6,8 @@ using DIR.Lib;
 namespace SdlVulkan.Renderer;
 
 /// <summary>
-/// Disk-persistent cache of rasterized SDF glyph bitmaps. Survives process restarts so
-/// re-opening a document with the same fonts skips the expensive SDF rasterization
+/// Disk-persistent cache of rasterized MTSDF glyph bitmaps. Survives process restarts so
+/// re-opening a document with the same fonts skips the expensive distance-field rasterization
 /// pass (~10 ms per glyph) entirely. Pairs with <see cref="VkSdfFontAtlas"/>: on first
 /// request for a font the atlas pulls every cached glyph in one read and bulk-inserts
 /// them; thereafter, freshly rasterized glyphs are appended to disk for the next session.
@@ -37,14 +37,19 @@ public sealed class SdfGlyphDiskCache : IDisposable
     // so v1 caches hold the garbled glyphs. Bumping the version invalidates every stale
     // .sdfg (header mismatch → truncate + rewrite), forcing a re-rasterize with the fixed
     // glyph mapping. Bump this whenever the charCode→GID mapping logic changes.
-    private const uint FormatVersion = 2;
+    // v3: the atlas moved from single-channel R8 SDF to 4-channel RGBA MTSDF. The per-entry pixel
+    // payload is now width*height*4 (was width*height), so every v2 file is byte-incompatible.
+    // Bumping the version invalidates every stale .sdfg (header mismatch → truncate + rewrite),
+    // forcing a re-rasterize into the new format. Bump this whenever the on-disk pixel layout or the
+    // charCode→GID mapping logic changes.
+    private const uint FormatVersion = 3;
     // Header: magic(4) + version(4) + rasterSize(4) + spread(4) + fontHash(8) + reserved(8) = 32 bytes.
     private const int HeaderSize = 32;
     // Per-entry metadata size *after* the 4-byte length prefix:
     // charCode(4) + character(4) + hint(1)+reserved(3) + width(4) + height(4)
     // + advanceX(4) + bearingX(4) + bearingY(4) = 32 bytes.
     private const int EntryMetaSize = 32;
-    // Defensive upper bound for a single entry's length field; 128x128 SDF is 16 KB so 16 MB is more than ample.
+    // Defensive upper bound for a single entry's length field; a 64x64 RGBA MTSDF glyph is 16 KB so 16 MB is ample.
     private const int MaxReasonableEntryLen = 16 * 1024 * 1024;
 
     public float RasterSize { get; }
@@ -143,7 +148,7 @@ public sealed class SdfGlyphDiskCache : IDisposable
     /// Appends a freshly rasterized glyph to the cache file for <paramref name="fontPath"/>.
     /// Whitespace / zero-size bitmaps are skipped — they're derived at runtime in the atlas.
     /// </summary>
-    public void AppendGlyph(string fontPath, int charCode, Rune character, GlyphMapHint hint, in SdfGlyphBitmap bitmap)
+    public void AppendGlyph(string fontPath, int charCode, Rune character, GlyphMapHint hint, in MtsdfGlyphBitmap bitmap)
     {
         if (_disposed || PauseWrites) return;
         if (!IsAppendable(in bitmap)) return;
@@ -158,7 +163,7 @@ public sealed class SdfGlyphDiskCache : IDisposable
     /// as <see cref="AppendGlyph"/> — small or null bitmaps are silently skipped. The whole
     /// batch is packed into one buffer so the writer thread takes a single hand-off.
     /// </summary>
-    public void AppendGlyphs(string fontPath, IReadOnlyList<(int CharCode, Rune Character, GlyphMapHint Hint, SdfGlyphBitmap Bitmap)> entries)
+    public void AppendGlyphs(string fontPath, IReadOnlyList<(int CharCode, Rune Character, GlyphMapHint Hint, MtsdfGlyphBitmap Bitmap)> entries)
     {
         if (_disposed || PauseWrites || entries.Count == 0) return;
 
@@ -255,11 +260,11 @@ public sealed class SdfGlyphDiskCache : IDisposable
         _writeQueue.Dispose();
     }
 
-    private static bool IsAppendable(in SdfGlyphBitmap bitmap)
+    private static bool IsAppendable(in MtsdfGlyphBitmap bitmap)
     {
         if (bitmap.Width <= 0 || bitmap.Height <= 0) return false;
-        if (bitmap.Alpha is null) return false;
-        return bitmap.Alpha.Length >= bitmap.Width * bitmap.Height;
+        if (bitmap.Rgba is null) return false;
+        return bitmap.Rgba.Length >= bitmap.Width * bitmap.Height * 4;
     }
 
     private FileStream? GetOrOpenAppendStream(string fontPath)
@@ -323,11 +328,11 @@ public sealed class SdfGlyphDiskCache : IDisposable
 
     // Serializes one glyph entry to a self-contained byte buffer (length-prefixed). Runs on the
     // caller's thread (pure in-memory) so the writer thread only does the actual disk write.
-    private static byte[] SerializeEntry(int charCode, Rune character, GlyphMapHint hint, in SdfGlyphBitmap bitmap)
+    private static byte[] SerializeEntry(int charCode, Rune character, GlyphMapHint hint, in MtsdfGlyphBitmap bitmap)
     {
-        var alphaLen = bitmap.Width * bitmap.Height;
-        // entryLen prefix covers everything after itself: 32-byte metadata block + alpha pixels.
-        var entryLen = EntryMetaSize + alphaLen;
+        var pixelLen = bitmap.Width * bitmap.Height * 4;   // RGBA
+        // entryLen prefix covers everything after itself: 32-byte metadata block + rgba pixels.
+        var entryLen = EntryMetaSize + pixelLen;
         var buf = new byte[4 + entryLen];
         var sp = buf.AsSpan();
         BinaryPrimitives.WriteInt32LittleEndian(sp.Slice(0, 4), entryLen);
@@ -341,7 +346,7 @@ public sealed class SdfGlyphDiskCache : IDisposable
         BinaryPrimitives.WriteSingleLittleEndian(sp.Slice(24, 4), bitmap.AdvanceX);
         BinaryPrimitives.WriteInt32LittleEndian(sp.Slice(28, 4), bitmap.BearingX);
         BinaryPrimitives.WriteInt32LittleEndian(sp.Slice(32, 4), bitmap.BearingY);
-        bitmap.Alpha.AsSpan(0, alphaLen).CopyTo(sp.Slice(36, alphaLen));
+        bitmap.Rgba.AsSpan(0, pixelLen).CopyTo(sp.Slice(36, pixelLen));
         return buf;
     }
 
@@ -383,15 +388,15 @@ public sealed class SdfGlyphDiskCache : IDisposable
             var bearingX = BinaryPrimitives.ReadInt32LittleEndian(meta.Slice(24, 4));
             var bearingY = BinaryPrimitives.ReadInt32LittleEndian(meta.Slice(28, 4));
 
-            var alphaLen = entryLen - EntryMetaSize;
-            // Tightly-packed bitmap: alphaLen MUST equal width * height. A mismatch
+            var pixelLen = entryLen - EntryMetaSize;
+            // Tightly-packed RGBA bitmap: pixelLen MUST equal width * height * 4. A mismatch
             // means corruption or a partial write — bail out and skip the rest of the file.
-            if (alphaLen != width * height) break;
-            var alpha = new byte[alphaLen];
-            if (!TryReadExactly(fs, alpha)) break;
+            if (pixelLen != width * height * 4) break;
+            var rgba = new byte[pixelLen];
+            if (!TryReadExactly(fs, rgba)) break;
 
             if (!Rune.TryCreate(characterValue, out var character)) continue;
-            var bitmap = new SdfGlyphBitmap(alpha, width, height, bearingX, bearingY, advanceX, spread);
+            var bitmap = new MtsdfGlyphBitmap(rgba, width, height, bearingX, bearingY, advanceX, spread);
             result.Add(new DiskGlyphEntry(charCode, character, hint, bitmap));
         }
         return result;
@@ -486,4 +491,4 @@ public sealed class SdfGlyphDiskCache : IDisposable
 /// fed straight into <c>VkSdfFontAtlas.InsertRasterized</c> the same way a freshly
 /// rasterized bitmap would be.
 /// </summary>
-public readonly record struct DiskGlyphEntry(int CharCode, Rune Character, GlyphMapHint Hint, SdfGlyphBitmap Bitmap);
+public readonly record struct DiskGlyphEntry(int CharCode, Rune Character, GlyphMapHint Hint, MtsdfGlyphBitmap Bitmap);

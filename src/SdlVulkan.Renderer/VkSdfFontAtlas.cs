@@ -43,31 +43,36 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     // over a handful of frames. _rasterizeInFlight dedups: the visible-glyph set is re-offered every
     // frame, so a key must be rasterized at most once.
     private readonly ConcurrentDictionary<GlyphKey, byte> _rasterizeInFlight = new();
-    private readonly ConcurrentQueue<(GlyphKey Key, int CharCode, GlyphMapHint Hint, SdfGlyphBitmap Bitmap)> _pendingRasterized = new();
+    private readonly ConcurrentQueue<(GlyphKey Key, int CharCode, GlyphMapHint Hint, MtsdfGlyphBitmap Bitmap)> _pendingRasterized = new();
     // Max glyphs inserted (staging blit + dirty-region upload) per frame from the rasterized queue.
     // Bounds per-frame upload so a 2000-glyph CJK page drains over ~frames (IsDirty keeps the loop
     // awake until empty), never in one stall.
     private const int MaxGlyphInsertsPerFrame = 96;
 
-    // The SDF atlas grows by doubling up to this cap. At 128px raster a 4096² atlas holds only
-    // ~1450 glyphs; a glyph-heavy structural drawing (several embedded fonts + symbols) needs
-    // ~1500+, which thrashed the 4096² cap — constant EvictAll → caption flicker AND repeated
-    // synchronous glyph reloads on the render thread → page-change stalls. 8192² (~5800 glyphs,
-    // ~67 MB R8 when grown) holds the working set with headroom. The effective cap (_maxAtlasSize)
-    // is clamped to the device's maxImageDimension2D so this is safe on every GPU / consumer.
+    // Upper bound for a page dimension, clamped to the device limit in the ctor. Pages don't grow
+    // (a full page is left in place and a new one appended), so this only caps the initial page dim;
+    // the default (DefaultInitialAtlasDim = 1024) sits well under it. Working-set headroom comes from
+    // MaxPages, not page size. Kept generous so an unusually large initialWidth is still device-safe.
     private const int MaxAtlasSize = 8192;
     // MaxAtlasSize clamped to the device limit (set in the ctor). Use this, not the const, for grows.
     private readonly int _maxAtlasSize;
     private const float SdfSpread = 4f;
 
+    // Bytes per atlas texel. The atlas stores MTSDF (RGBA8): RGB = per-channel
+    // pseudo-distance, A = true distance. Every staging/upload byte offset is
+    // scaled by this. (Was 1 when the atlas was single-channel R8.)
+    private const int BytesPerTexel = 4;
+
     /// <summary>
-    /// SDF glyphs are rasterized at this fixed size. The GPU scales the quad
-    /// for any requested display size. Because SDF encodes distance, not pixels,
-    /// a single rasterization looks sharp at all display sizes. Raising this size
-    /// gives more sub-pixel fidelity when glyphs are displayed smaller than the
-    /// raster size, at the cost of atlas memory (quadratic).
+    /// MTSDF glyphs are rasterized at this fixed size. The GPU scales the quad
+    /// for any requested display size. Because a distance field encodes distance,
+    /// not pixels, a single rasterization looks sharp at all display sizes — and
+    /// MTSDF keeps corners sharp too, so a smaller raster costs far less fidelity
+    /// than it would for plain SDF. 64px with 4-channel RGBA is memory-neutral vs
+    /// the old 128px single-channel R8 (¼ the page area × 4 bytes = same bytes per
+    /// glyph, same page size, same page cap).
     /// </summary>
-    private const float SdfRasterSize = 128f;
+    private const float SdfRasterSize = 64f;
 
     /// <summary>
     /// Default page dimension. The atlas is a list of fixed-size square pages of this size;
@@ -76,9 +81,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     /// can be recovered exactly from its virtual V coordinate (see <see cref="InsertRasterized"/>
     /// and <see cref="DecodePage"/>).
     /// </summary>
-    private const int DefaultInitialAtlasDim = (int)SdfRasterSize * 16; // 2048
+    private const int DefaultInitialAtlasDim = (int)SdfRasterSize * 16; // 1024 (64px raster × 16)
 
-    // Max resident pages before falling back to evict-all. 16 × 2048² × 1 byte ≈ 64 MB worst case.
+    // Max resident pages before falling back to evict-all. 16 × 1024² × 4 bytes (RGBA) ≈ 64 MB worst
+    // case — identical to the old 16 × 2048² × 1 byte R8 atlas (the 64px raster shrinks pages to 1024²,
+    // the RGBA format restores the 4× per-texel, so per-glyph capacity and the memory cap are unchanged).
     // 8 was tight for glyph-heavy docs (many embedded subset fonts, or CJK with thousands of unique
     // glyphs): the atlas filled every page and then EvictAll thrashed — a vkDeviceWaitIdle drain plus
     // a full glyph re-raster on each scroll (the jank). 16 roughly doubles the working set first.
@@ -93,7 +100,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         public VkDeviceMemory ImageMemory;
         public VkImageView ImageView;
         public VkDescriptorSet DescriptorSet;
-        public byte[] Staging = [];                       // 1 byte per pixel, _pageDim²
+        public byte[] Staging = [];                       // BytesPerTexel per pixel (RGBA), _pageDim²
         public int CursorX, CursorY, RowHeight;
         public int DirtyX0, DirtyY0, DirtyX1, DirtyY1;
         // LRU bookkeeping for per-page eviction. LastUsedFrame is stamped whenever a glyph on this
@@ -180,7 +187,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     {
         var page = new Page
         {
-            Staging = new byte[_pageDim * _pageDim],
+            Staging = new byte[_pageDim * _pageDim * BytesPerTexel],
             DirtyX0 = _pageDim, DirtyY0 = _pageDim, DirtyX1 = 0, DirtyY1 = 0,
         };
         CreateImage(page, _pageDim, _pageDim);
@@ -351,8 +358,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             try
             {
                 var bitmap = charCode >= 0
-                    ? _rasterizer.RasterizeGlyphSdfWithCharCode(key.Font, key.Size, key.Character, (uint)charCode, hint, SdfSpread)
-                    : _rasterizer.RasterizeGlyphSdf(key.Font, key.Size, key.Character, SdfSpread);
+                    ? _rasterizer.RasterizeGlyphMtsdfWithCharCode(key.Font, key.Size, key.Character, (uint)charCode, hint, SdfSpread)
+                    : _rasterizer.RasterizeGlyphMtsdf(key.Font, key.Size, key.Character, SdfSpread);
                 _pendingRasterized.Enqueue((key, charCode, hint, bitmap));
             }
             catch (Exception ex)
@@ -427,20 +434,22 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         var regionW = page.DirtyX1 - page.DirtyX0;
         var regionH = page.DirtyY1 - page.DirtyY0;
         var pixelCount = regionW * regionH;
+        var rowBytes = regionW * BytesPerTexel;
 
-        var bufferSize = (ulong)pixelCount;
+        var bufferSize = (ulong)(pixelCount * BytesPerTexel);
         EnsureUploadBuffer(page, slot, bufferSize);
 
-        // Copy the dirty region (1 byte per pixel) row-by-row straight into the persistently
+        // Copy the dirty region (BytesPerTexel per pixel) row-by-row straight into the persistently
         // mapped upload buffer — no intermediate heap array (large dirty regions would land on
-        // the LOH) and no map/unmap round-trip per flush (memory is HostCoherent).
+        // the LOH) and no map/unmap round-trip per flush (memory is HostCoherent). The upload buffer
+        // is tightly packed (rowBytes stride), so vkCmdCopyBufferToImage uses bufferRowLength = 0.
         var dst = (byte*)page.UploadMapped[slot];
         fixed (byte* pStaging = page.Staging)
         {
             for (var row = 0; row < regionH; row++)
             {
-                var srcOffset = (page.DirtyY0 + row) * _pageDim + page.DirtyX0;
-                Buffer.MemoryCopy(pStaging + srcOffset, dst + row * regionW, regionW, regionW);
+                var srcOffset = ((page.DirtyY0 + row) * _pageDim + page.DirtyX0) * BytesPerTexel;
+                Buffer.MemoryCopy(pStaging + srcOffset, dst + row * rowBytes, rowBytes, rowBytes);
             }
         }
 
@@ -488,11 +497,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         }
 
         // Use WithCharCode variant for CID/embedded-subset fonts whose Unicode cmap
-        // may be absent or unreliable. RasterizeGlyphSdfWithCharCode supports
+        // may be absent or unreliable. RasterizeGlyphMtsdfWithCharCode supports
         // multiple cmap strategies via GlyphMapHint.
         var bitmap = charCode >= 0
-            ? _rasterizer.RasterizeGlyphSdfWithCharCode(key.Font, key.Size, key.Character, (uint)charCode, hint, SdfSpread)
-            : _rasterizer.RasterizeGlyphSdf(key.Font, key.Size, key.Character, SdfSpread);
+            ? _rasterizer.RasterizeGlyphMtsdfWithCharCode(key.Font, key.Size, key.Character, (uint)charCode, hint, SdfSpread)
+            : _rasterizer.RasterizeGlyphMtsdf(key.Font, key.Size, key.Character, SdfSpread);
         var glyphInfo = InsertRasterized(key, bitmap);
         // Persist for the next session. AppendGlyph silently skips invalid/empty bitmaps.
         _diskCache?.AppendGlyph(key.Font, charCode, key.Character, hint, in bitmap);
@@ -505,13 +514,13 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     /// staging, dirty region) + _glyphs/_unflushedGlyphs and may append a new page
     /// — must NOT be called concurrently from multiple threads.
     /// </summary>
-    private GlyphInfo InsertRasterized(GlyphKey key, SdfGlyphBitmap bitmap)
+    private GlyphInfo InsertRasterized(GlyphKey key, MtsdfGlyphBitmap bitmap)
     {
         var glyphWidth = bitmap.Width;
         var glyphHeight = bitmap.Height;
 
         if (glyphWidth == 0 || glyphHeight == 0) return default;
-        // A glyph bigger than a whole page can never be placed (shouldn't happen at 128px raster).
+        // A glyph bigger than a whole page can never be placed (shouldn't happen at 64px raster).
         if (glyphWidth > _pageDim || glyphHeight > _pageDim) return default;
 
         var pageIdx = _activePageIdx;
@@ -553,12 +562,13 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             }
         }
 
-        // Blit single-channel SDF data into this page's staging buffer.
+        // Blit 4-channel MTSDF data into this page's staging buffer (BytesPerTexel per pixel).
+        var rowBytes = glyphWidth * BytesPerTexel;
         for (var row = 0; row < glyphHeight; row++)
         {
-            var srcOffset = row * glyphWidth;
-            var dstOffset = (page.CursorY + row) * _pageDim + page.CursorX;
-            Buffer.BlockCopy(bitmap.Alpha, srcOffset, page.Staging, dstOffset, glyphWidth);
+            var srcOffset = row * rowBytes;
+            var dstOffset = ((page.CursorY + row) * _pageDim + page.CursorX) * BytesPerTexel;
+            Buffer.BlockCopy(bitmap.Rgba, srcOffset, page.Staging, dstOffset, rowBytes);
         }
 
         page.DirtyX0 = Math.Min(page.DirtyX0, page.CursorX);
@@ -692,8 +702,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
                 try
                 {
                     var bitmap = charCode >= 0
-                        ? _rasterizer.RasterizeGlyphSdfWithCharCode(atlasKey.Font, atlasKey.Size, atlasKey.Character, (uint)charCode, hint, SdfSpread)
-                        : _rasterizer.RasterizeGlyphSdf(atlasKey.Font, atlasKey.Size, atlasKey.Character, SdfSpread);
+                        ? _rasterizer.RasterizeGlyphMtsdfWithCharCode(atlasKey.Font, atlasKey.Size, atlasKey.Character, (uint)charCode, hint, SdfSpread)
+                        : _rasterizer.RasterizeGlyphMtsdf(atlasKey.Font, atlasKey.Size, atlasKey.Character, SdfSpread);
                     _pendingRasterized.Enqueue((atlasKey, charCode, hint, bitmap));
                 }
                 catch (Exception ex)
@@ -762,7 +772,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         VkImageCreateInfo imageCI = new()
         {
             imageType = VkImageType.Image2D,
-            format = VkFormat.R8Unorm,
+            format = VkFormat.R8G8B8A8Unorm,
             extent = new VkExtent3D((uint)width, (uint)height, 1),
             mipLevels = 1,
             arrayLayers = 1,
@@ -788,11 +798,12 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         // buffer on some drivers (VK_ERROR_INITIALIZATION_FAILED from the next vkQueueSubmit).
         page.NeedsInitialTransition = true;
 
-        // Swizzle R channel into all RGBA channels so the sampler reads the SDF
-        // value consistently regardless of which component the shader samples
+        // Identity swizzle: the shader samples the full RGBA MTSDF (RGB pseudo-distance
+        // for median reconstruction, A true distance). No component broadcast — that was
+        // only needed when the atlas was single-channel R8.
         var viewCI = new VkImageViewCreateInfo(
-            page.Image, VkImageViewType.Image2D, VkFormat.R8Unorm,
-            new VkComponentMapping(VkComponentSwizzle.R, VkComponentSwizzle.R, VkComponentSwizzle.R, VkComponentSwizzle.R),
+            page.Image, VkImageViewType.Image2D, VkFormat.R8G8B8A8Unorm,
+            new VkComponentMapping(VkComponentSwizzle.Identity, VkComponentSwizzle.Identity, VkComponentSwizzle.Identity, VkComponentSwizzle.Identity),
             new VkImageSubresourceRange(VkImageAspectFlags.Color, 0, 1, 0, 1));
         api.vkCreateImageView(&viewCI, null, out page.ImageView).CheckResult();
     }

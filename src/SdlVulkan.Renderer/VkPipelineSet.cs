@@ -158,25 +158,30 @@ public sealed unsafe class VkPipelineSet : IDisposable
         }
         """;
 
-    // SDF text pipeline: samples a signed distance field atlas. The distance value
-    // is smoothstepped in the fragment shader to produce resolution-independent
-    // anti-aliased text edges. Uses the same vertex layout as TexturedPipeline.
+    // MTSDF text pipeline: samples a multi-channel signed distance field atlas
+    // (RGBA8; RGB = per-channel pseudo-distance, A = true distance). The edge is
+    // reconstructed from median(r,g,b), which keeps sharp corners crisp where a
+    // single-channel SDF would round them off. Uses the same vertex layout as
+    // TexturedPipeline.
     //
     // Edge softness is driven by fwidth(dist) — the screen-space derivative of the
-    // distance value — which automatically adapts the smoothstep band to ±0.5 screen
-    // pixels at any zoom/font size. This is the canonical SDF AA technique and is
-    // much sharper than a single fixed edge constant, especially at small sizes.
+    // reconstructed distance — which automatically adapts the smoothstep band to
+    // ±0.5 screen pixels at any zoom/font size. This is the canonical MTSDF AA
+    // technique and is much sharper than a single fixed edge constant.
     //
-    // The sdfEdge push-constant slot is retained for push-constant layout compatibility
-    // but is currently ignored by the shader.
+    // The alpha channel (true distance) is available for outline / glow / weight
+    // effects; the base text pass reconstructs coverage from the RGB median only.
+    // The sdfEdge push-constant slot is retained for push-constant layout
+    // compatibility but is currently ignored by the shader.
     private const string SdfFragmentSource = """
         #version 450
         layout(location = 0) in vec2 vTexCoord;
         layout(push_constant) uniform PC { mat4 proj; vec4 color; float sdfEdge; } pc;
         layout(set = 0, binding = 0) uniform sampler2D uTexture;
         layout(location = 0) out vec4 FragColor;
+        float median(vec3 v) { return max(min(v.r, v.g), min(max(v.r, v.g), v.b)); }
         void main() {
-            float dist = texture(uTexture, vTexCoord).r;
+            float dist = median(texture(uTexture, vTexCoord).rgb);
             // Half-width of the smoothstep band in distance units = half a screen pixel.
             // fwidth(dist) is the per-fragment rate of change of dist per screen pixel.
             float w = fwidth(dist) * 0.5 + 1e-4;
