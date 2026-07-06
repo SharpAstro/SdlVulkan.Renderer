@@ -105,70 +105,69 @@ public sealed unsafe class ShapedTextGidTests
     [Fact]
     public void DrawText_RendersShapedGlyphId_NotSourceCodepoint()
     {
-        // Probe once; if there's no ICD, skip (the sub-renders below all assume one is present).
-        if (!TryCreateOffscreenContext(out _, out var probe))
+        if (!TryCreateOffscreenContext(out _, out var ctx))
         {
             Assert.Skip("Vulkan runtime not available on this host");
             return;
         }
-        probe?.Dispose();
 
-        const float size = 44f;
-        var gidM = new ManagedFontRasterizer()
-            .ResolveGlyphIdentity(FontPath, new Rune('M'), -1, GlyphMapHint.Auto).Gid;
-
-        // 'i' shaped so every glyph id becomes 'M' → the draw path must render the wide M.
-        var litShapedI = RenderLitPixels("i", size, r =>
-        {
-            r.TextShaper = new FixedGidShaper(gidM);
-            r.OnPreFlush = () => r.PreWarmSdfGlyphByGid(FontPath, size, gidM);
-        });
-        // Baselines with the default per-rune shaper.
-        var litM = RenderLitPixels("M", size, r =>
-        {
-            r.OnPreFlush = () => r.PreWarmSdfGlyph(FontPath, size, new Rune('M'));
-        });
-        var litI = RenderLitPixels("i", size, r =>
-        {
-            r.OnPreFlush = () => r.PreWarmSdfGlyph(FontPath, size, new Rune('i'));
-        });
-
-        litI.ShouldBeGreaterThan(0, "the source glyph 'i' must actually render (else the test proves nothing)");
-        // GID-direct: shaping 'i' to the 'M' id renders the wide M — far more coverage than 'i'...
-        litShapedI.ShouldBeGreaterThan(litI * 2);
-        // ...and matches drawing 'M' directly (same glyph, same centred position).
-        litShapedI.ShouldBeInRange((int)(litM * 0.85f), (int)(litM * 1.15f));
-    }
-
-    // Runs one offscreen frame: applies <paramref name="configure"/> to the renderer, draws
-    // <paramref name="text"/> centred, reads the framebuffer back, and counts lit (inked) texels.
-    // Assumes an ICD is present (callers probe + skip first).
-    private static int RenderLitPixels(string text, float size, Action<VkRenderer> configure)
-    {
-        TryCreateOffscreenContext(out _, out var ctx).ShouldBeTrue();
+        // One context, reused across all three renders. Creating and destroying several offscreen
+        // Vulkan instances back-to-back segfaults some software ICDs (Mesa lavapipe on arm), so
+        // mirror the single-context lifecycle of MtsdfTextRenderTests and just cycle frames instead.
         try
         {
             using var renderer = new VkRenderer(ctx!, Width, Height);
-            configure(renderer);
+            const float size = 44f;
+            var gidM = new ManagedFontRasterizer()
+                .ResolveGlyphIdentity(FontPath, new Rune('M'), -1, GlyphMapHint.Auto).Gid;
 
-            renderer.BeginOffscreenFrame(new RGBAColor32(0, 0, 0, 255)).ShouldBeTrue();
-            var white = new RGBAColor32(255, 255, 255, 255);
-            var layout = new RectInt(new PointInt((int)Width, (int)Height), new PointInt(0, 0));
-            renderer.DrawText(text, FontPath, size, white, layout, TextAlign.Center, TextAlign.Center);
-            renderer.EndOffscreenFrame();
-            ctx!.WaitOffscreenFrameComplete();
+            // Warm all three glyphs once; they stay cached across the frames below.
+            renderer.OnPreFlush = () =>
+            {
+                renderer.PreWarmSdfGlyph(FontPath, size, new Rune('i'));
+                renderer.PreWarmSdfGlyph(FontPath, size, new Rune('M'));
+                renderer.PreWarmSdfGlyphByGid(FontPath, size, gidM);
+            };
 
-            var rgba = ctx.ReadbackOffscreenRgba();
-            var lit = 0;
-            var pixels = (int)(Width * Height);
-            for (var i = 0; i < pixels; i++)
-                if (rgba[i * 4] > 24) lit++;
-            return lit;
+            // 'i' shaped so every glyph id becomes 'M' → the draw path must render the wide M.
+            renderer.TextShaper = new FixedGidShaper(gidM);
+            var litShapedI = DrawAndCountLit(renderer, ctx!, "i", size);
+
+            // Baselines with the default per-rune shaper.
+            renderer.TextShaper = AdvanceShaper.Default;
+            var litM = DrawAndCountLit(renderer, ctx!, "M", size);
+            var litI = DrawAndCountLit(renderer, ctx!, "i", size);
+
+            litI.ShouldBeGreaterThan(0, "the source glyph 'i' must actually render (else the test proves nothing)");
+            // GID-direct: shaping 'i' to the 'M' id renders the wide M — far more coverage than 'i'...
+            litShapedI.ShouldBeGreaterThan(litI * 2);
+            // ...and matches drawing 'M' directly (same glyph, same centred position).
+            litShapedI.ShouldBeInRange((int)(litM * 0.85f), (int)(litM * 1.15f));
         }
         finally
         {
             ctx?.Dispose();
         }
+    }
+
+    // Draws <paramref name="text"/> centred in one offscreen frame on the shared context, reads the
+    // framebuffer back, and counts lit (inked) texels. The renderer's TextShaper / OnPreFlush are
+    // configured by the caller before each call.
+    private static int DrawAndCountLit(VkRenderer renderer, VulkanContext ctx, string text, float size)
+    {
+        renderer.BeginOffscreenFrame(new RGBAColor32(0, 0, 0, 255)).ShouldBeTrue();
+        var white = new RGBAColor32(255, 255, 255, 255);
+        var layout = new RectInt(new PointInt((int)Width, (int)Height), new PointInt(0, 0));
+        renderer.DrawText(text, FontPath, size, white, layout, TextAlign.Center, TextAlign.Center);
+        renderer.EndOffscreenFrame();
+        ctx.WaitOffscreenFrameComplete();
+
+        var rgba = ctx.ReadbackOffscreenRgba();
+        var lit = 0;
+        var pixels = (int)(Width * Height);
+        for (var i = 0; i < pixels; i++)
+            if (rgba[i * 4] > 24) lit++;
+        return lit;
     }
 
     /// <summary>
