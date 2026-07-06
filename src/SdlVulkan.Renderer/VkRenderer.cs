@@ -141,7 +141,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var width = 0f;
         var maxAscent = 0f;
         var maxDescent = 0f;
-        foreach (var sg in _shapedLine)
+        // ref readonly over the backing array (no List enumerator, no per-glyph struct copy).
+        foreach (ref readonly var sg in CollectionsMarshal.AsSpan(_shapedLine))
         {
             var ch = sg.Source;
             float advance, bearingY, height;
@@ -1504,7 +1505,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             var maxAscent = 0f;
             var maxDescent = 0f;
             var first = true;
-            foreach (var sg in _shapedLine)
+            foreach (ref readonly var sg in CollectionsMarshal.AsSpan(_shapedLine))
             {
                 var mc = sg.Source;
                 // Use bitmap atlas metrics for color glyphs (emoji)
@@ -1551,7 +1552,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
             var baseline = penY + (lineHeight + maxAscent - maxDescent) / 2f;
 
-            foreach (var sg in _shapedLine)
+            foreach (ref readonly var sg in CollectionsMarshal.AsSpan(_shapedLine))
             {
                 var ch = sg.Source;
                 // Color glyphs (emoji, symbols) can't render through the single-channel
