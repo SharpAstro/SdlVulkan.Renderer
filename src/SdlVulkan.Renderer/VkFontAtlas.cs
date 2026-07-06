@@ -123,6 +123,28 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         fontSize = QuantizeFontSize(fontSize);
         // Resolve (character, charCode, hint) → glyph identity once, here at the draw boundary.
         var key = MakeKey(fontPath, fontSize, character, charCode, hint);
+        return GetGlyphByKey(key, skipUnflushed);
+    }
+
+    /// <summary>
+    /// GID-direct variant of <see cref="GetGlyph(string, float, Rune, bool, int, GlyphMapHint)"/>:
+    /// fetches by a pre-resolved glyph identity (the glyph id, or the PostScript name for Type1)
+    /// instead of mapping a codepoint through the font cmap. This is the shaped-text entry point —
+    /// once an <c>ITextShaper</c> has substituted glyphs (ligatures, contextual forms, …) the source
+    /// codepoint no longer identifies the glyph, only the substituted id does. Colour/emoji glyphs
+    /// route here through the bitmap atlas the same way the codepoint path does.
+    /// </summary>
+    public GlyphInfo GetGlyphByGid(string fontPath, float fontSize, uint gid, string? type1Name = null, bool skipUnflushed = false)
+    {
+        fontSize = QuantizeFontSize(fontSize);
+        var key = new GlyphKey(fontPath, fontSize, gid, type1Name);
+        return GetGlyphByKey(key, skipUnflushed);
+    }
+
+    // Shared cache lookup + skipUnflushed logic behind both the codepoint path (GetGlyph) and the
+    // GID-direct path (GetGlyphByGid).
+    private GlyphInfo GetGlyphByKey(GlyphKey key, bool skipUnflushed)
+    {
         if (_glyphs.TryGetValue(key, out var existing))
         {
             // Cache hit — safe to draw only if this glyph has been flushed to GPU

@@ -332,6 +332,32 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         // Resolve (character, charCode, hint) → glyph identity once, here at the draw boundary,
         // and key by it. All SDF glyphs are rasterized at SdfRasterSize; the caller scales the quad.
         var key = MakeKey(fontPath, character, charCode, hint);
+        return GetGlyphByKey(key, Rune.IsWhiteSpace(character), skipUnflushed, rasterizeOnMiss);
+    }
+
+    /// <summary>
+    /// GID-direct variant of <see cref="GetGlyph(string, float, Rune, bool, int, GlyphMapHint, bool)"/>:
+    /// fetches by a pre-resolved glyph identity (the glyph id, or the PostScript name for Type1)
+    /// instead of mapping a codepoint through the font cmap. This is the shaped-text entry point —
+    /// once an <c>ITextShaper</c> has run (GSUB ligatures, Arabic joining, contextual forms, …) the
+    /// source codepoint no longer identifies the glyph, only the substituted id does. There is no
+    /// whitespace sentinel here: a shaper emits the real space glyph id, whose empty ink and hmtx
+    /// advance are already correct (only the codepoint path uses WhitespaceGid + the 'n' reference).
+    /// </summary>
+    public GlyphInfo GetGlyphByGid(string fontPath, uint gid, string? type1Name = null,
+        bool skipUnflushed = false, bool rasterizeOnMiss = true)
+    {
+        EnsureFontLoadedFromDisk(fontPath);
+        var key = new GlyphKey(fontPath, SdfRasterSize, gid, type1Name);
+        return GetGlyphByKey(key, isWhitespace: false, skipUnflushed, rasterizeOnMiss);
+    }
+
+    // Shared cache lookup / per-page LRU touch / background-rasterize / skipUnflushed logic behind
+    // both the codepoint path (GetGlyph) and the GID-direct path (GetGlyphByGid). isWhitespace
+    // suppresses background-queuing on a draw-path miss: whitespace carries no ink and is warmed
+    // synchronously by PreRasterizeBatch, so it never needs queuing here.
+    private GlyphInfo GetGlyphByKey(GlyphKey key, bool isWhitespace, bool skipUnflushed, bool rasterizeOnMiss)
+    {
         if (_glyphs.TryGetValue(key, out var existing))
         {
             // Touch the page this glyph lives on so per-page LRU keeps the on-screen working set
@@ -351,9 +377,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             // Draw path: NEVER rasterize on the render thread. Queue the glyph for background
             // rasterization (deduped) and skip drawing it this frame — it appears once the
             // background result is inserted (DrainPendingRasterized). Width==0 -> caller skips it.
-            // Whitespace carries no ink and is warmed synchronously by PreRasterizeBatch, so it
-            // never needs queuing here.
-            if (!Rune.IsWhiteSpace(character) && _rasterizeInFlight.TryAdd(key, 0))
+            if (!isWhitespace && _rasterizeInFlight.TryAdd(key, 0))
                 QueueRasterizeAsync(key);
             return default;
         }
