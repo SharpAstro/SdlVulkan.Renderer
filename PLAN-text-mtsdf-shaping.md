@@ -132,11 +132,15 @@ absorbed by the existing async off-render-thread rasterization + disk cache.
   `AdvanceShaper` can apply Fonts.Lib's already-parsed-but-never-called
   `GetKerning` — kerned text before any HarfBuzz work (visual churn:
   opt-in flag).
-- **A3 — HarfBuzz satellite (new package).** `SharpAstro.Fonts.HarfBuzz`
+- **A3 — HarfBuzz satellite (new package).** ~~`SharpAstro.Fonts.HarfBuzz`
   wrapping HarfBuzzSharp behind `ITextShaper` (~100 LOC adapter; SUIsei's is
   90). Separate package mirrors the WebView satellite pattern — core stays
   dependency-light. HarfBuzzSharp ships cross-platform natives and is
-  P/Invoke-based (NativeAOT-fine). Opt-in per app/font.
+  P/Invoke-based (NativeAOT-fine). Opt-in per app/font.~~
+  **Superseded (2026-07-06): A3 is now a pure-managed shaping engine of our
+  own — see `PLAN-text-shaping-engine.md`.** The native wrapper reintroduced
+  per-RID native assets (win-arm64 risk) into a deliberately native-free
+  stack; HarfBuzzSharp survives only as a dev-only golden-fixture generator.
 - **A4 — cluster-aware text input (the long tail).** `TextInputState` caret
   math must map through shaped-run cluster indices instead of substring
   re-measure once ligatures exist. Only misbehaves when a real shaper is
