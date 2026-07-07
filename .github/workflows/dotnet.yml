@@ -34,7 +34,11 @@ env:
   #       VkFontAtlas/VkSdfFontAtlas.GetGlyphByGid + VkRenderer.PreWarmSdfGlyphByGid. Opt-in via
   #       renderer.TextShaper (e.g. DIR.Lib.Shaping's ShapingTextShaper); the default AdvanceShaper
   #       per-rune path is byte-identical to before. Bumps DIR.Lib pin 6.5 -> 6.6.
-  VERSION_PREFIX: 6.15.${{ github.run_number }}
+  # 6.16: re-pin DIR.Lib 6.6 -> 6.8. DIR.Lib 6.8's DIR.Lib.Shaping satellite is rebuilt against
+  #       SharpAstro.Fonts.Shaping 1.5.551 (Fonts.Lib F6 zero-alloc bidi + F7 HarfBuzz-style
+  #       coverage-digest lookup skipping, ~3-4x faster shaping). Renderer core is unchanged; apps
+  #       that plug DIR.Lib.Shaping's ShapingTextShaper into renderer.TextShaper get the speedup.
+  VERSION_PREFIX: 6.16.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
