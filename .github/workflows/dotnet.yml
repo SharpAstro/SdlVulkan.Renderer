@@ -38,7 +38,15 @@ env:
   #       SharpAstro.Fonts.Shaping 1.5.551 (Fonts.Lib F6 zero-alloc bidi + F7 HarfBuzz-style
   #       coverage-digest lookup skipping, ~3-4x faster shaping). Renderer core is unchanged; apps
   #       that plug DIR.Lib.Shaping's ShapingTextShaper into renderer.TextShaper get the speedup.
-  VERSION_PREFIX: 6.16.${{ github.run_number }}
+  # 6.17: GPU-wedge resilience. Stuck-fence recovery now runs on a sacrificial background task the
+  #       render thread only polls (on a truly hung GPU the driver can block INSIDE vkFreeMemory /
+  #       teardown — observed on Adreno: the old synchronous recovery froze the render thread
+  #       permanently); deadline blown or repeated stuck escalations → OnGpuWedged (new host
+  #       callback) + clean loop stop. SDF atlas: per-frame upload BYTE budget alongside the glyph
+  #       count cap (MTSDF quadrupled bytes/glyph vs R8), one-frame quarantine for glyphs on a
+  #       just-appended page (first transition and first sample no longer share a submission), and
+  #       a FrameStats wedge breadcrumb logged at fence-stuck escalation.
+  VERSION_PREFIX: 6.17.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

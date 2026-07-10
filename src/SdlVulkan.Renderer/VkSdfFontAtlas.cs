@@ -62,6 +62,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     // Bounds per-frame upload so a 2000-glyph CJK page drains over ~frames (IsDirty keeps the loop
     // awake until empty), never in one stall.
     private const int MaxGlyphInsertsPerFrame = 96;
+    // Companion BYTE bound for the same drains. The count cap alone let the per-frame upload volume
+    // quietly quadruple when the atlas went R8 → MTSDF (4 bytes/texel): 96 glyphs × ~20 KB ≈ 2 MB per
+    // frame during a cold CJK flood, which is the load profile in flight when the 2026-07-10 Adreno
+    // wedge hit. Bound the bytes explicitly so a format change can never scale the storm again.
+    private const int MaxUploadBytesPerFrame = 1 << 20; // 1 MiB
 
     // Upper bound for a page dimension, clamped to the device limit in the ctor. Pages don't grow
     // (a full page is left in place and a new one appended), so this only caps the initial page dim;
@@ -124,6 +129,11 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         public readonly List<GlyphKey> Keys = new();
         // Image starts UNDEFINED; the first FlushPage transitions from there, not ShaderReadOnly.
         public bool NeedsInitialTransition;
+        // Frame tick this page was appended on. Glyphs on a just-appended page are quarantined from
+        // the draw path for that one frame (see GetGlyphByKey): the page's first-ever
+        // Undefined→ShaderReadOnly transition and its first sample otherwise share one submission,
+        // which is exactly where a quirky driver (Adreno) can wedge. One frame of pop-in, invisible.
+        public long CreatedTick;
         // Per-frame upload ring — slot k reused only after BeginFrame waited on its fence.
         public readonly VkBuffer[] UploadBuffers = new VkBuffer[VulkanContext.MaxFramesInFlight];
         public readonly VkDeviceMemory[] UploadMemories = new VkDeviceMemory[VulkanContext.MaxFramesInFlight];
@@ -140,9 +150,24 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     private long _frameTick;       // monotonic, ++ each BeginFrame — drives per-page LRU
     private int _activePageIdx;    // page currently being filled (last appended OR last LRU-reused)
 
+    // Per-frame activity counters (reset in BeginFrame). _frameStagedBytes doubles as the byte-budget
+    // accumulator for the drains; all three feed FrameStats, the wedge breadcrumb the event loop logs
+    // when a fence sticks. _lastPageAppendTick keeps IsDirty true across a page-append frame so the
+    // quarantined glyphs (see Page.CreatedTick) get their redraw next frame.
+    private int _frameStagedBytes;
+    private int _frameGlyphsInserted;
+    private int _framePagesAppended;
+    private long _lastPageAppendTick = -1;
+
     public int PageCount => _pages.Count;
     public VkDescriptorSet GetPageDescriptorSet(int pageIndex) => _pages[pageIndex].DescriptorSet;
     public VkSampler Sampler => _sampler;
+
+    /// <summary>One-line composition of the current frame's atlas activity — the wedge breadcrumb
+    /// the event loop logs when a fence sticks. A GPU hang leaves no GPU-side dump; this is the
+    /// CPU-side echo of what the hung submission was carrying (glyph-upload storm? page append?).</summary>
+    public string FrameStats =>
+        $"+{_frameGlyphsInserted} glyphs / {_frameStagedBytes / 1024} KB staged / +{_framePagesAppended} pages ({_pages.Count} resident, {_glyphs.Count} glyphs)";
 
     public bool IsDirty
     {
@@ -153,6 +178,9 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             // report dirty so the event loop keeps redrawing and the deferred glyphs pop in. Same for
             // bounded disk-load tails still draining over frames.
             if (!_pendingRasterized.IsEmpty || !_rasterizeInFlight.IsEmpty || !_pendingDiskLoads.IsEmpty) return true;
+            // A page appended this frame carries one-frame-quarantined glyphs (Page.CreatedTick):
+            // stay dirty so the loop redraws and they land next frame.
+            if (_lastPageAppendTick == _frameTick) return true;
             foreach (var p in _pages)
                 if (p.DirtyX0 < p.DirtyX1 && p.DirtyY0 < p.DirtyY1) return true;
             return false;
@@ -210,6 +238,9 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         _pages.Add(page);
         _activePageIdx = _pages.Count - 1;
         page.LastUsedFrame = _frameTick;
+        page.CreatedTick = _frameTick;
+        _framePagesAppended++;
+        _lastPageAppendTick = _frameTick;
         RenderDiag.Log("sdf.newpage", $"page {_pages.Count - 1} allocated {_pageDim}x{_pageDim}");
         return page;
     }
@@ -234,6 +265,9 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     public void BeginFrame()
     {
         _frameTick++;
+        _frameStagedBytes = 0;
+        _frameGlyphsInserted = 0;
+        _framePagesAppended = 0;
         if (_needsEviction)
         {
             // All pages were hot last frame (working set genuinely > MaxPages in one frame — rare).
@@ -252,7 +286,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     private void DrainPendingRasterized()
     {
         var inserted = 0;
-        while (inserted < MaxGlyphInsertsPerFrame && _pendingRasterized.TryDequeue(out var r))
+        while (inserted < MaxGlyphInsertsPerFrame && _frameStagedBytes < MaxUploadBytesPerFrame
+               && _pendingRasterized.TryDequeue(out var r))
         {
             _rasterizeInFlight.TryRemove(r.Key, out _);
             if (_glyphs.ContainsKey(r.Key)) continue;       // raced with a disk load / duplicate
@@ -281,11 +316,12 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         // upload that wedges the GPU. The tail re-queues and drains over the next frames (IsDirty keeps
         // the loop awake until empty), so the worst case is a brief progressive fill, never a stall.
         var budget = MaxGlyphInsertsPerFrame;
-        while (budget > 0 && _pendingDiskLoads.TryDequeue(out var load))
+        while (budget > 0 && _frameStagedBytes < MaxUploadBytesPerFrame
+               && _pendingDiskLoads.TryDequeue(out var load))
         {
             var i = 0;
             var atlasFull = false;
-            for (; i < load.Entries.Count && budget > 0; i++)
+            for (; i < load.Entries.Count && budget > 0 && _frameStagedBytes < MaxUploadBytesPerFrame; i++)
             {
                 var e = load.Entries[i];
                 var key = new GlyphKey(load.Font, SdfRasterSize, e.Gid, e.Name);
@@ -366,7 +402,18 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
             if (existing.Width > 0)
             {
                 DecodePage(existing, out var pg, out _, out _);
-                if ((uint)pg < (uint)_pages.Count) _pages[pg].LastUsedFrame = _frameTick;
+                if ((uint)pg < (uint)_pages.Count)
+                {
+                    var page = _pages[pg];
+                    page.LastUsedFrame = _frameTick;
+                    // One-frame quarantine: this glyph's page was appended THIS frame, so its
+                    // first-ever Undefined→ShaderReadOnly transition is being recorded into the same
+                    // submission that would sample it — the same-submission pattern under suspicion
+                    // for the Adreno wedge. Report not-yet-available for one frame (IsDirty keeps the
+                    // loop redrawing, so it lands next frame; pop-in is a single ~16ms frame).
+                    if (skipUnflushed && page.CreatedTick == _frameTick)
+                        return existing with { Width = 0 };
+                }
             }
             if (skipUnflushed && _unflushedGlyphs.Contains(key))
                 return existing with { Width = 0 };
@@ -629,6 +676,9 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
         page.DirtyY0 = Math.Min(page.DirtyY0, page.CursorY);
         page.DirtyX1 = Math.Max(page.DirtyX1, page.CursorX + glyphWidth);
         page.DirtyY1 = Math.Max(page.DirtyY1, page.CursorY + glyphHeight);
+
+        _frameGlyphsInserted++;
+        _frameStagedBytes += rowBytes * glyphHeight; // drives the per-frame byte budget + breadcrumb
 
         // U is page-local (every page shares the same width). V is the VIRTUAL y over the
         // MaxPages-tall stack so the page index is recoverable from V alone (see DecodePage).

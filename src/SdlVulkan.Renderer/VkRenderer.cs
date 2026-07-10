@@ -346,6 +346,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         UpdateProjection();
     }
 
+    /// <summary>CPU-side composition of the current frame's glyph-atlas activity. The event loop
+    /// logs it when a fence sticks (the wedge breadcrumb) — a GPU hang leaves no readable GPU
+    /// state, so this is the best available record of what the hung submission contained.</summary>
+    public string GlyphAtlasBreadcrumb => _sdfFontAtlas is { } a ? $"sdf atlas: {a.FrameStats}" : "sdf atlas: n/a";
+
     public override void FillRectangle(in RectInt rect, DIR.Lib.RGBAColor32 fillColor)
     {
         if (_pipelines is null) return;
