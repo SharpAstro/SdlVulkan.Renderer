@@ -120,6 +120,17 @@ public sealed class SdlEventLoop
     /// work (background task completions, state cleanup).</summary>
     public Action? OnPostFrame { get; set; }
 
+#if DEBUG
+    /// <summary>
+    /// DEBUG-only per-iteration hook: invoked once every loop iteration, AFTER the render pass, whether
+    /// or not a frame was drawn. Unlike <see cref="OnPostFrame"/> (which fires only on a rendered frame),
+    /// this still runs while every window is minimized -- so the debug inspector's command pump keeps
+    /// servicing commands (ping, describe, window-state) on a minimized window, which otherwise never
+    /// renders. Compiled out of Release entirely, so the Release loop carries no extra per-frame work.
+    /// </summary>
+    internal Action? OnLoopIteration { get; set; }
+#endif
+
     // --- Single-window forwarding properties (delegate to the primary view) ---
 
     private SdlWindowView Primary => _primary
@@ -172,8 +183,12 @@ public sealed class SdlEventLoop
             // both bounds the backoff granularity and keeps event dispatch prompt.
             var nowTick = Environment.TickCount64;
             var anyNeedsRedraw = false;
+            // A minimized window is excluded here (and skipped in the render pass below) so it never
+            // forces the non-blocking PollEvent path: its surface is 0x0, so rendering it would just
+            // busy-spin through failed acquire/present + swapchain recreation for frames nobody sees.
+            // Falling through to WaitEventTimeout lets the loop idle until a restore/expose event.
             foreach (var v in _viewList)
-                if (v.NeedsRedraw && nowTick >= v.NextRenderAttemptTick) { anyNeedsRedraw = true; break; }
+                if (v.NeedsRedraw && nowTick >= v.NextRenderAttemptTick && !v.Window.IsMinimized) { anyNeedsRedraw = true; break; }
 
             Event evt;
             var hadEvent = anyNeedsRedraw
@@ -202,6 +217,10 @@ public sealed class SdlEventLoop
             {
                 var v = _viewList[i];
                 if (!v.NeedsRedraw) continue;
+                // Minimized: skip render + swapchain recreation entirely (see the IsMinimized guard
+                // above). Leave NeedsRedraw armed so the window repaints the instant it is restored,
+                // without waiting for a fresh expose/resize event to re-arm it.
+                if (v.Window.IsMinimized) continue;
                 // Inside a retry/recovery backoff: keep NeedsRedraw armed and skip this iteration —
                 // events were already dispatched above, so the window stays responsive while waiting.
                 if (Environment.TickCount64 < v.NextRenderAttemptTick) continue;
@@ -212,6 +231,12 @@ public sealed class SdlEventLoop
 
             if (renderedAny)
                 OnPostFrame?.Invoke();
+
+#if DEBUG
+            // Per-iteration pump (debug inspector). Runs every iteration, incl. when nothing rendered
+            // (all windows minimized), so inspector commands still drain on a minimized window.
+            OnLoopIteration?.Invoke();
+#endif
         }
     }
 
@@ -482,7 +507,11 @@ public sealed class SdlEventLoop
                 }
                 break;
 
+            case EventType.WindowRestored:
             case EventType.WindowExposed:
+                // Un-minimize / re-expose: re-arm a repaint. Covers the case where the window was
+                // idle (NeedsRedraw already false) when it got minimized, so the render pass's
+                // "keep NeedsRedraw armed" has nothing to resume from.
                 if (TryView(evt.Window.WindowID, out var ve))
                     ve.NeedsRedraw = true;
                 break;

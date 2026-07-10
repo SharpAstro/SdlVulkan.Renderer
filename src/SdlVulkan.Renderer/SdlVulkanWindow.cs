@@ -144,11 +144,24 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
     /// <summary>True if the window is currently maximized.</summary>
     public bool IsMaximized => (GetWindowFlags(Handle) & WindowFlags.Maximized) != 0;
 
+    /// <summary>
+    /// True if the window is currently minimized. When minimized the presentation surface is
+    /// 0x0 and every <c>vkAcquireNextImageKHR</c>/<c>vkQueuePresentKHR</c> returns
+    /// <c>ErrorOutOfDateKHR</c>, so the event loop must skip rendering + swapchain recreation
+    /// entirely (SDL keeps reporting a non-zero pixel size on Windows, so a size check alone
+    /// does not detect the minimized state).
+    /// </summary>
+    public bool IsMinimized => (GetWindowFlags(Handle) & WindowFlags.Minimized) != 0;
+
     /// <summary>Restores the window to its floating (un-maximized / un-minimized) size and position.</summary>
     public void Restore() => RestoreWindow(Handle);
 
     /// <summary>Maximizes the window.</summary>
     public void Maximize() => MaximizeWindow(Handle);
+
+    /// <summary>Minimizes (iconifies) the window. The presentation surface goes 0x0, so the event
+    /// loop idles rendering (see <see cref="IsMinimized"/>) until it is restored.</summary>
+    public void Minimize() => MinimizeWindow(Handle);
 
     /// <summary>Sets the window's top-left position in desktop coordinates.</summary>
     public void SetPosition(int x, int y) => SetWindowPosition(Handle, x, y);

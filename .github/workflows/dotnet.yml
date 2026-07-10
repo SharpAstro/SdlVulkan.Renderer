@@ -46,7 +46,13 @@ env:
   #       count cap (MTSDF quadrupled bytes/glyph vs R8), one-frame quarantine for glyphs on a
   #       just-appended page (first transition and first sample no longer share a submission), and
   #       a FrameStats wedge breadcrumb logged at fence-stuck escalation.
-  VERSION_PREFIX: 6.17.${{ github.run_number }}
+  # 6.18: idle the render loop while a window is minimized. A minimized window reports a non-zero
+  #       pixel size on Windows, so the old size guard never caught it and the loop busy-spun through
+  #       swapchain recreation (~270ms/frame) for invisible frames. Gate redraw on the SDL minimized
+  #       flag (SdlVulkanWindow.IsMinimized): ~0% CPU while minimized, instant repaint on restore.
+  #       DEBUG-only: inspector minimize/maximize/restore commands + a per-iteration command pump
+  #       (SdlEventLoop.OnLoopIteration) so commands drain on a minimized window.
+  VERSION_PREFIX: 6.18.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

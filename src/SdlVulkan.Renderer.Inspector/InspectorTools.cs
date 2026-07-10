@@ -161,6 +161,36 @@ public sealed class InspectorTools
         return result.GetString() ?? "ok";
     }
 
+    [McpServerTool, Description("Minimize (iconify) the instance's window. While minimized the app idles its render loop (~0% CPU/GPU, no frames), so this is the way to verify idle-on-minimize behaviour unattended. Other inspector commands (ping, describe, restore) still work while minimized; only screenshot is unavailable until restored (there is no swapchain to read). Use restore to bring it back.")]
+    public static async Task<string> minimize(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "minimize", null, ct);
+        return result.GetString() ?? "ok";
+    }
+
+    [McpServerTool, Description("Maximize the instance's window to fill the screen (work area).")]
+    public static async Task<string> maximize(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "maximize", null, ct);
+        return result.GetString() ?? "ok";
+    }
+
+    [McpServerTool, Description("Restore the instance's window to its floating (un-minimized / un-maximized) size and position. Un-minimizes a window that minimize iconified, and rendering resumes immediately.")]
+    public static async Task<string> restore(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "restore", null, ct);
+        return result.GetString() ?? "ok";
+    }
+
     [McpServerTool, Description("Read the app's rolling-average frame time in milliseconds (the EWMA that drives the frame.slow diagnostic) plus the slow-frame floor. Measure jank numerically: sample this, drive a pan/zoom (ideally via batch so frames render between steps), sample again. Returns {avgFrameMs, slowFrameFloorMs}.")]
     public static async Task<string> frame_stats(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
