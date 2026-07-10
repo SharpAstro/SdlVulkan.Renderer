@@ -202,6 +202,24 @@ public sealed class InspectorTools
     }
 
     [McpServerTool, Description(
+        "Read the Vulkan validation-layer report: whether validation and synchronization validation are "
+        + "enabled, running counts of total validation messages and SYNC-HAZARD messages, and the most "
+        + "recent messages (capped). Use it to check for GPU correctness / synchronization hazards -- the "
+        + "class of bug behind GPU wedges -- after driving the app (open a document, pan/zoom). syncHazards "
+        + "> 0 means a read/write ordering hazard was recorded. Returns {enabled, syncValidation, "
+        + "totalMessages, syncHazards, recent[]}. Everything is zero/false unless the app runs with the "
+        + "validation layer installed AND enabled (a DEBUG build or SDLVK_VALIDATION=1; sync validation also "
+        + "needs SDLVK_SYNC_VALIDATION=1).")]
+    public static async Task<string> validation_report(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "validationReport", null, ct);
+        return result.GetRawText();
+    }
+
+    [McpServerTool, Description(
         "Render-thread watchdog: is the app's RENDER THREAD pumping or wedged? The inspector executes "
         + "EVERY command (including ping) ON the render thread, so a ping that round-trips proves the "
         + "render loop completed a frame and drained its queue; a ping that does NOT return within the "

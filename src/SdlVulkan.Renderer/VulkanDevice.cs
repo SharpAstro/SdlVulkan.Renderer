@@ -438,7 +438,10 @@ public sealed unsafe class VulkanDevice : IDisposable
         // instance outlives this device — it backs the surfaces of any sibling windows — so the app
         // tears it down after the last device is gone.
         if (_ownsInstance)
+        {
+            VulkanValidation.DestroyMessenger(Instance, InstanceApi);
             InstanceApi.vkDestroyInstance();
+        }
     }
 
     private static VkPhysicalDevice PickPhysicalDevice(VkInstanceApi instanceApi, VkSurfaceKHR surface, out uint queueFamily)
