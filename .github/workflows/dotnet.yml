@@ -80,8 +80,16 @@ jobs:
   # round-tripping VkBlendOp.Min / Max through actual draw calls. Need a Vulkan ICD on the
   # runner; Mesa lavapipe (software) is the standard headless choice. fail-fast: false so a
   # regression on one architecture doesn't mask the other.
+  #
+  # vulkan-validationlayers is installed too so SyncValidationGlyphFloodTests runs (not skips):
+  # it renders an SDF glyph flood offscreen under VK_LAYER_KHRONOS_validation with SYNCHRONIZATION
+  # validation on and asserts no read-after-write hazard. Sync validation flags the atlas
+  # upload/sample hazard STATICALLY, so lavapipe reproduces it deterministically where the vendor
+  # hang (Adreno) never would. timeout-minutes bounds a genuine wedge (the test has its own
+  # 60s in-process deadman on top).
   test:
     needs: build
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -91,13 +99,17 @@ jobs:
     - uses: actions/checkout@v4
     - uses: SharpAstro/cache-apt-pkgs-action@v1
       with:
-        packages: mesa-vulkan-drivers libvulkan1 vulkan-tools
-        version: 1.0
+        packages: mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
+        version: 1.1
     # If the loader can't enumerate at least one ICD, the tests will Assert.Skip via
     # TryCreateOffscreenContext rather than fail. This diagnostic surfaces that situation
-    # in the build log without a re-run.
-    - name: Vulkan ICD summary
-      run: vulkaninfo --summary || true
+    # (and whether the validation layer is present, for the sync-validation test) in the build
+    # log without a re-run.
+    - name: Vulkan ICD + layer summary
+      run: |
+        vulkaninfo --summary || true
+        echo "--- instance layers ---"
+        vulkaninfo 2>/dev/null | grep -iA1 "VK_LAYER_KHRONOS_validation" || echo "validation layer NOT visible to loader"
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
