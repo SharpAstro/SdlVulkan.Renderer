@@ -21,9 +21,11 @@ namespace SdlVulkan.Renderer;
 /// <para>
 /// Threading: the socket/UDP servers run on background tasks and only ENQUEUE commands. Every
 /// command executes on the RENDER THREAD inside <see cref="DrainCommands"/>, which is chained onto
-/// <see cref="SdlEventLoop.OnPostFrame"/> by <see cref="Attach(SdlEventLoop, SdlWindowView, DebugInspectorOptions)"/>.
-/// Because OnPostFrame only fires on a rendered frame, enqueueing also wakes the loop via
-/// <see cref="SdlWindowView.RequestRedraw"/> (latency bounded by the loop's ~16ms wait).
+/// <see cref="SdlEventLoop.OnLoopIteration"/> by <see cref="Attach(SdlEventLoop, SdlWindowView, DebugInspectorOptions)"/>.
+/// That per-iteration hook fires EVERY loop iteration -- including while a window is minimized and
+/// nothing renders -- so commands keep draining on a minimized window (a per-frame hook would not).
+/// Enqueueing still calls <see cref="SdlWindowView.RequestRedraw"/> to wake the loop promptly
+/// (latency bounded by the loop's ~16ms wait).
 /// </para>
 /// The entire type is compiled only in DEBUG builds, so no release artifact carries it.
 /// </summary>
@@ -47,6 +49,13 @@ public sealed class DebugInspector : IDisposable
     private sealed record DescribeLayoutCommand : InspectorCommand;
     private sealed record ScreenshotCommand : InspectorCommand;
     private sealed record ListSignalsCommand : InspectorCommand;
+    /// <summary>Window state changes (iconify / maximize / restore). These call SDL window ops, which
+    /// must run on the render thread -- which the pump guarantees. They keep working while minimized
+    /// because the pump drains every loop iteration (see <see cref="SdlEventLoop.OnLoopIteration"/>),
+    /// so <c>restore</c> can un-minimize a window the loop is idling.</summary>
+    private sealed record MinimizeCommand : InspectorCommand;
+    private sealed record MaximizeCommand : InspectorCommand;
+    private sealed record RestoreCommand : InspectorCommand;
     private sealed record ClickCommand(float X, float Y, InputModifier Mods = InputModifier.None) : InspectorCommand;
     private sealed record ClickLabelCommand(string Label) : InspectorCommand;
     private sealed record KeyCommand(InputKey Key, InputModifier Mods) : InspectorCommand;
@@ -110,7 +119,7 @@ public sealed class DebugInspector : IDisposable
 
     /// <summary>
     /// Attaches the inspector to the given loop + window view and starts the background servers.
-    /// Chains the command pump onto the loop's <see cref="SdlEventLoop.OnPostFrame"/>. Call once,
+    /// Chains the command pump onto the loop's <see cref="SdlEventLoop.OnLoopIteration"/>. Call once,
     /// under <c>#if DEBUG</c>, after the loop's callbacks are wired but before <see cref="SdlEventLoop.Run"/>.
     /// The returned <see cref="IDisposable"/> stops the servers when disposed.
     /// </summary>
@@ -127,10 +136,13 @@ public sealed class DebugInspector : IDisposable
 
         inspector.Start();
 
-        // Lambda-compose the pump onto OnPostFrame (the framework's own wiring style) so the
-        // render-thread drain runs after the consumer's existing post-frame work.
-        var prev = loop.OnPostFrame;
-        loop.OnPostFrame = () =>
+        // Wire the pump onto the loop's per-iteration hook (OnLoopIteration), NOT OnPostFrame: the
+        // drain must run every iteration -- including when nothing rendered because the window is
+        // minimized -- so commands (notably `restore`) are still serviced on a minimized window. The
+        // hook fires inside Run on the render thread, so all Vulkan/widget/input access stays
+        // render-thread-safe. Lambda-compose (the framework's wiring style) so any prior hook runs first.
+        var prev = loop.OnLoopIteration;
+        loop.OnLoopIteration = () =>
         {
             prev?.Invoke();
             inspector.DrainCommands();
@@ -223,7 +235,7 @@ public sealed class DebugInspector : IDisposable
             }
 
             _queue.Enqueue(cmd);
-            _view.RequestRedraw(); // wake the loop so DrainCommands runs (OnPostFrame only fires on a rendered frame)
+            _view.RequestRedraw(); // wake the loop promptly so the per-iteration pump drains this command
 
             var fragment = await cmd.Result.Task.WaitAsync(cmd.Timeout, ct);
             return $"{{\"id\":{id},\"result\":{fragment}}}";
@@ -247,6 +259,9 @@ public sealed class DebugInspector : IDisposable
         "describeLayout" => new DescribeLayoutCommand(),
         "screenshot" => new ScreenshotCommand(),
         "signals" => new ListSignalsCommand(),
+        "minimize" => new MinimizeCommand(),
+        "maximize" => new MaximizeCommand(),
+        "restore" => new RestoreCommand(),
         "click" => new ClickCommand(
             p.GetProperty("x").GetSingle(),
             p.GetProperty("y").GetSingle(),
@@ -427,7 +442,7 @@ public sealed class DebugInspector : IDisposable
     // ---------------- Render-thread command pump ----------------
 
     /// <summary>
-    /// Drains and executes queued commands on the render thread. Wired into the loop's OnPostFrame
+    /// Drains and executes queued commands on the render thread. Wired into the loop's OnLoopIteration
     /// so all Vulkan/widget/input access is on the render thread. Never throws (per-command failures
     /// are routed to the command's TaskCompletionSource as an error response).
     /// </summary>
@@ -504,6 +519,9 @@ public sealed class DebugInspector : IDisposable
         DescribeLayoutCommand => ExecuteDescribeLayout(),
         ScreenshotCommand => ExecuteScreenshot(),
         ListSignalsCommand => ExecuteListSignals(),
+        MinimizeCommand => ExecuteWindowState(static w => w.Minimize()),
+        MaximizeCommand => ExecuteWindowState(static w => w.Maximize()),
+        RestoreCommand => ExecuteWindowState(static w => w.Restore()),
         ClickCommand c => ExecuteClickAt(c.X, c.Y, c.Mods),
         ClickLabelCommand c => ExecuteClickLabel(c.Label),
         KeyCommand c => ExecuteKey(c.Key, c.Mods),
@@ -675,6 +693,15 @@ public sealed class DebugInspector : IDisposable
                 w.WriteStringValue(name);
         w.WriteEndArray();
     });
+
+    // Applies an SDL window-state op on the render thread, then requests a redraw. Harmless for
+    // minimize (the loop idles it anyway); for maximize/restore the redraw repaints the new size.
+    private string ExecuteWindowState(Action<SdlVulkanWindow> op)
+    {
+        op(_view.Window);
+        _view.RequestRedraw();
+        return "\"ok\"";
+    }
 
     private string ExecuteClickAt(float x, float y, InputModifier mods = InputModifier.None)
     {
