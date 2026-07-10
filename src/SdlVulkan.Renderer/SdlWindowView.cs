@@ -77,6 +77,16 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// </summary>
     public Action? OnRenderDegraded { get; set; }
 
+    /// <summary>
+    /// Called (on the render thread, at most once) when this window's GPU is wedged beyond recovery:
+    /// the in-flight fence stayed stuck past the escalation window AND the sacrificial recovery
+    /// attempt did not complete within its deadline — i.e. the driver itself is blocking inside
+    /// teardown calls (the observed Adreno failure: vkFreeMemory never returns while the GPU spins
+    /// at 100% on a hung submission). The event loop stops after this fires. The consumer should
+    /// persist session state and exit/relaunch; there is no in-process way back from a hung device.
+    /// </summary>
+    public Action? OnGpuWedged { get; set; }
+
     // --- per-window loop state (managed by SdlEventLoop) ---
     internal bool NeedsRedraw = true;
     internal float MouseX, MouseY;
@@ -99,6 +109,17 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     // gates the next render attempt for BOTH the gentle retry and the recovery-storm backoff.
     internal long FenceStuckSinceTick;
     internal long NextRenderAttemptTick;
+
+    // Sacrificial GPU-error recovery, per window (see SdlEventLoop.RenderView). When the fence is
+    // known stuck the recovery teardown runs on a background task instead of the render thread —
+    // on a truly hung GPU the driver can block INSIDE vkDestroy*/vkFreeMemory indefinitely, and a
+    // blocked background task is abandonable (thread leak) where a blocked render thread is a
+    // frozen window. Deadline exceeded => OnGpuWedged + clean loop stop.
+    internal Task? GpuRecoveryTask;
+    internal long GpuRecoveryDeadlineTick;
+    // Stuck-fence escalations since the last clean frame. Bounds the stuck→recover→stuck ping-pong:
+    // at SdlEventLoop.GpuStuckEscalationLimit the device is declared wedged (OnGpuWedged + stop).
+    internal int StuckEscalations;
 
     /// <summary>Number of active touch fingers on this window. Use to suppress mouse drag during pinch.</summary>
     public int ActiveFingerCount => ActiveFingers.Count;

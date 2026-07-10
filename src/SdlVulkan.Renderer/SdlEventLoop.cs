@@ -35,6 +35,16 @@ public sealed class SdlEventLoop
     private const int FenceRetryBackoffMs = 50;
     private const long FenceEscalateMs = 2500;
 
+    // Sacrificial-recovery bounds for the stuck-fence path. On a truly hung GPU the driver can block
+    // INSIDE the teardown entry points (observed on Adreno, 2026-07-10 dump: RecoverFromGpuError →
+    // CleanupSwapchain → vkFreeMemory never returned; the render thread froze permanently). So the
+    // stuck-fence recovery runs on a background task the render thread only POLLS: past the deadline
+    // the task is abandoned (a leaked blocked thread on a dead device) and the loop exits cleanly via
+    // OnGpuWedged instead of freezing. The escalation limit bounds the stuck→recover→stuck ping-pong:
+    // that many stuck escalations without one clean frame in between = the device isn't coming back.
+    private const long GpuWedgeRecoveryDeadlineMs = 4000;
+    private const int GpuStuckEscalationLimit = 3;
+
     // After this many swapchain recoveries in quick succession (each within 1s of the previous) the
     // recovery clearly isn't sticking — the workload keeps re-wedging the GPU. Fire OnRenderDegraded
     // so the app can shed load (switch to a cheap view, reset a runaway). 2 => the 3rd quick recovery.
@@ -210,6 +220,56 @@ public sealed class SdlEventLoop
     private bool RenderView(SdlWindowView v)
     {
         var renderer = v.Renderer;
+
+        // A sacrificial recovery task owns this window's renderer while in flight (see the
+        // stuck-fence escalation in the catch below). Poll it here — the render thread itself never
+        // enters the possibly-blocking teardown: success resumes rendering, failure or a blown
+        // deadline ends the loop cleanly.
+        if (v.GpuRecoveryTask is { } recovery)
+        {
+            if (recovery.IsCompletedSuccessfully)
+            {
+                v.GpuRecoveryTask = null;
+                Console.Error.WriteLine($"[SdlEventLoop] GPU recovery completed (window {v.Window.WindowId}); resuming.");
+                // Recovery rebuilt the swapchain at the pre-recovery size; re-run layout only if the
+                // window was resized while recovery was in flight (mirrors the synchronous path).
+                v.Window.GetSizeInPixels(out var rw, out var rh);
+                if (rw > 0 && rh > 0 && ((uint)rw != v.LastRecoverW || (uint)rh != v.LastRecoverH))
+                {
+                    v.OnResize?.Invoke((uint)rw, (uint)rh);
+                    v.LastRecoverW = (uint)rw;
+                    v.LastRecoverH = (uint)rh;
+                }
+                // fall through and render this frame
+            }
+            else if (recovery.IsFaulted)
+            {
+                v.GpuRecoveryTask = null;
+                Console.Error.WriteLine($"[SdlEventLoop] GPU recovery failed: {recovery.Exception?.GetBaseException().Message}. Stopping event loop.");
+                _running = false;
+                return false;
+            }
+            else if (Environment.TickCount64 >= v.GpuRecoveryDeadlineTick)
+            {
+                // The driver is blocking inside teardown on a hung device. Abandon the task (its
+                // thread stays blocked — leaked deliberately; the alternative is freezing THIS
+                // thread) and hand the terminal decision to the host.
+                Console.Error.WriteLine($"[SdlEventLoop] GPU wedged: recovery did not return within {GpuWedgeRecoveryDeadlineMs}ms (window {v.Window.WindowId}). Abandoning device.");
+                try { v.OnGpuWedged?.Invoke(); }
+                catch (Exception ex) { Console.Error.WriteLine($"[SdlEventLoop] OnGpuWedged handler threw: {ex.GetType().Name}: {ex.Message}"); }
+                _running = false;
+                return false;
+            }
+            else
+            {
+                // Still recovering: skip rendering this window; the loop keeps pumping SDL events so
+                // the window stays movable/closable while the task works (or blocks).
+                v.NeedsRedraw = true;
+                v.NextRenderAttemptTick = Environment.TickCount64 + FenceRetryBackoffMs;
+                return false;
+            }
+        }
+
         try
         {
 #if DEBUG
@@ -270,6 +330,7 @@ public sealed class SdlEventLoop
             }
             v.NextRenderAttemptTick = 0;
             v.RecoverStreak = 0; // a clean frame ends any recovery storm accounting
+            v.StuckEscalations = 0; // ... and any stuck-fence escalation streak
             v.RenderDegradedNotified = false; // re-arm the load-shed request for the next storm
 
             return true;
@@ -302,6 +363,31 @@ public sealed class SdlEventLoop
                 }
                 Console.Error.WriteLine($"[SdlEventLoop] GPU fence stuck for {now - v.FenceStuckSinceTick}ms (window {v.Window.WindowId}); escalating to full recovery.");
                 v.FenceStuckSinceTick = 0;
+
+                // Breadcrumb: what the frames leading into the hang were doing. A field wedge report
+                // with this line attached tells us whether a glyph-upload storm / page append was in
+                // flight without needing a repro (the hang itself lives GPU-side and leaves no dump).
+                Console.Error.WriteLine($"[SdlEventLoop] wedge breadcrumb (window {v.Window.WindowId}): {renderer.GlyphAtlasBreadcrumb}");
+
+                // A stuck fence means the GPU may be truly hung — and on a hung device the driver can
+                // block INSIDE the teardown entry points themselves (observed on Adreno:
+                // RecoverFromGpuError → CleanupSwapchain → vkFreeMemory never returned, freezing the
+                // render thread permanently). Run the whole recovery on a sacrificial task the render
+                // thread only polls (see RenderView's entry gate). Repeated stuck escalations without
+                // a clean frame in between mean the device isn't coming back — hand the terminal
+                // decision to the host instead of ping-ponging stuck→recover→stuck forever.
+                if (++v.StuckEscalations >= GpuStuckEscalationLimit)
+                {
+                    Console.Error.WriteLine($"[SdlEventLoop] GPU wedged: {v.StuckEscalations} stuck escalations without a clean frame (window {v.Window.WindowId}). Abandoning device.");
+                    try { v.OnGpuWedged?.Invoke(); }
+                    catch (Exception ex) { Console.Error.WriteLine($"[SdlEventLoop] OnGpuWedged handler threw: {ex.GetType().Name}: {ex.Message}"); }
+                    _running = false;
+                    return false;
+                }
+                v.GpuRecoveryTask = Task.Run(renderer.RecoverFromGpuError);
+                v.GpuRecoveryDeadlineTick = now + GpuWedgeRecoveryDeadlineMs;
+                v.NeedsRedraw = true;
+                return false;
             }
 
             // A Vulkan call threw mid-frame — most commonly vkQueueSubmit/Present in EndFrame
