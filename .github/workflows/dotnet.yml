@@ -52,7 +52,13 @@ env:
   #       flag (SdlVulkanWindow.IsMinimized): ~0% CPU while minimized, instant repaint on restore.
   #       DEBUG-only: inspector minimize/maximize/restore commands + a per-iteration command pump
   #       (SdlEventLoop.OnLoopIteration) so commands drain on a minimized window.
-  VERSION_PREFIX: 6.18.${{ github.run_number }}
+  # 6.19: opt-in Vulkan validation diagnostics (VulkanValidation). The Khronos validation layer's
+  #       output was previously enabled in DEBUG but dropped to the loader's default sink; now a
+  #       debug-utils messenger routes it to a prefixed stderr line + a bounded ring buffer. Adds an
+  #       opt-in SYNCHRONIZATION validation switch (the GPU memory-hazard checker behind the wedge
+  #       class) and a validation_report inspector/MCP tool. Gated: DEBUG or SDLVK_VALIDATION=1
+  #       (+ SDLVK_SYNC_VALIDATION=1 for sync); zero cost + no layer in a normal Release build.
+  VERSION_PREFIX: 6.19.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

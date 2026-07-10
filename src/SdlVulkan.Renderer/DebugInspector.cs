@@ -69,6 +69,10 @@ public sealed class DebugInspector : IDisposable
     /// <summary>Read back the loop's rolling average frame time (the same EWMA that drives the
     /// [rdiag] frame.slow log), so jank can be measured numerically instead of by eye.</summary>
     private sealed record FrameStatsCommand : InspectorCommand;
+    /// <summary>Reads the Vulkan validation-layer report (enabled flags, message/hazard counts, recent
+    /// messages). Pure read of process-wide state, but runs on the render thread via the pump like
+    /// every other command.</summary>
+    private sealed record ValidationReportCommand : InspectorCommand;
     /// <summary>Idle for <see cref="Frames"/> rendered frames (e.g. to let async work settle).
     /// Only meaningful as a step inside a <see cref="BatchCommand"/>.</summary>
     private sealed record WaitCommand(int Frames) : InspectorCommand;
@@ -262,6 +266,7 @@ public sealed class DebugInspector : IDisposable
         "minimize" => new MinimizeCommand(),
         "maximize" => new MaximizeCommand(),
         "restore" => new RestoreCommand(),
+        "validationReport" => new ValidationReportCommand(),
         "click" => new ClickCommand(
             p.GetProperty("x").GetSingle(),
             p.GetProperty("y").GetSingle(),
@@ -529,6 +534,7 @@ public sealed class DebugInspector : IDisposable
         ScrollCommand c => ExecuteScroll(c.X, c.Y, c.ScrollY),
         DragCommand c => ExecuteDrag(c.X1, c.Y1, c.X2, c.Y2, c.Mods, c.Steps),
         FrameStatsCommand => ExecuteFrameStats(),
+        ValidationReportCommand => ExecuteValidationReport(),
         PostSignalCommand c => ExecutePostSignal(c.Name, c.Args),
         WaitCommand => "\"waited\"", // only reached if used outside a batch; harmless no-op
         _ => throw new ArgumentException($"unknown command: {cmd.GetType().Name}")
@@ -769,6 +775,21 @@ public sealed class DebugInspector : IDisposable
         w.WriteStartObject();
         w.WriteNumber("avgFrameMs", _loop.DebugFrameAvgMs);
         w.WriteNumber("slowFrameFloorMs", SdlEventLoop.DebugSlowFrameFloorMs);
+        w.WriteEndObject();
+    });
+
+    private static string ExecuteValidationReport() => ToJson(w =>
+    {
+        var snap = VulkanValidation.Snapshot();
+        w.WriteStartObject();
+        w.WriteBoolean("enabled", VulkanValidation.Enabled);
+        w.WriteBoolean("syncValidation", VulkanValidation.SyncEnabled);
+        w.WriteNumber("totalMessages", snap.TotalMessages);
+        w.WriteNumber("syncHazards", snap.SyncHazards);
+        w.WriteStartArray("recent");
+        foreach (var m in snap.Recent)
+            w.WriteStringValue(m);
+        w.WriteEndArray();
         w.WriteEndObject();
     });
 

@@ -253,41 +253,70 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
 
     private static VkInstance CreateVulkanInstance()
     {
-        var sdlExtensionNames = VulkanGetInstanceExtensions(out var extensionCount)
+        var sdlExtensionNames = VulkanGetInstanceExtensions(out _)
             ?? throw new InvalidOperationException("SDL_Vulkan_GetInstanceExtensions failed");
-        using var extensionArray = new VkStringArray(sdlExtensionNames);
+
+        // DEBUG build or SDLVK_VALIDATION=1: enable the Khronos validation layer + a debug-utils
+        // messenger so the layer's output is captured (routed to stderr + the inspector ring buffer)
+        // instead of dropped. SDLVK_SYNC_VALIDATION=1 additionally turns on synchronization
+        // validation, the GPU memory-hazard checker. All a no-op if the layer isn't installed.
+        bool useValidation = VulkanValidation.Enabled && VulkanValidation.LayerAvailable();
+
+        using var extensionArray = useValidation
+            ? new VkStringArray(WithValidationExtensions(sdlExtensionNames))
+            : new VkStringArray(sdlExtensionNames);
+        using var validationLayers = useValidation ? new VkStringArray([VulkanValidation.LayerName]) : default;
 
         VkInstanceCreateInfo instanceCI = new()
         {
-            enabledExtensionCount = extensionCount,
+            enabledExtensionCount = extensionArray.Length,
             ppEnabledExtensionNames = extensionArray
         };
-
-#if DEBUG
-        const string validationLayerName = "VK_LAYER_KHRONOS_validation";
-        uint layerCount = 0;
-        vkEnumerateInstanceLayerProperties(&layerCount, null);
-        var layerProps = new VkLayerProperties[layerCount];
-        fixed (VkLayerProperties* pLayerProps = layerProps)
-            vkEnumerateInstanceLayerProperties(&layerCount, pLayerProps);
-        bool hasValidation = false;
-        foreach (var layer in layerProps)
-        {
-            if (VkStringInterop.ConvertToManaged(layer.layerName) == validationLayerName)
-            {
-                hasValidation = true;
-                break;
-            }
-        }
-        using var validationLayers = hasValidation ? new VkStringArray([validationLayerName]) : default;
-        if (hasValidation)
+        if (useValidation)
         {
             instanceCI.enabledLayerCount = validationLayers.Length;
             instanceCI.ppEnabledLayerNames = validationLayers;
         }
-#endif
+
+        // pNext chain: synchronization-validation feature (opt-in) -> messenger CI (captures messages
+        // emitted during vkCreateInstance / vkDestroyInstance too). A persistent messenger for the
+        // rest of the instance's life is installed right after creation.
+        var syncEnables = stackalloc VkValidationFeatureEnableEXT[1] { VkValidationFeatureEnableEXT.SynchronizationValidation };
+        VkValidationFeaturesEXT syncFeatures = new()
+        {
+            enabledValidationFeatureCount = 1,
+            pEnabledValidationFeatures = syncEnables
+        };
+        VkDebugUtilsMessengerCreateInfoEXT debugCI = VulkanValidation.MessengerCreateInfo();
+        if (useValidation)
+        {
+            if (VulkanValidation.SyncEnabled)
+            {
+                syncFeatures.pNext = &debugCI;
+                instanceCI.pNext = &syncFeatures;
+            }
+            else
+            {
+                instanceCI.pNext = &debugCI;
+            }
+        }
 
         vkCreateInstance(&instanceCI, null, out var instance).CheckResult();
+        if (useValidation)
+            VulkanValidation.InstallMessenger(instance, GetApi(instance));
         return instance;
+    }
+
+    // The SDL-required instance extensions plus VK_EXT_debug_utils (for the messenger) and, when sync
+    // validation is requested, VK_EXT_validation_features. Kept off the hot path — only built when
+    // validation is actually enabled.
+    private static string[] WithValidationExtensions(string[] sdlExtensions)
+    {
+        // Vortice's VK_EXT_*_EXTENSION_NAME constants are UTF-8 ReadOnlySpan<byte>, not strings, so use
+        // the canonical name literals here to merge with SDL's string[] extension list.
+        var list = new List<string>(sdlExtensions) { "VK_EXT_debug_utils" };
+        if (VulkanValidation.SyncEnabled)
+            list.Add("VK_EXT_validation_features");
+        return list.ToArray();
     }
 }

@@ -74,6 +74,7 @@ public sealed class SdlVulkanApp : IDisposable
         // swapchains and surfaces reference this device/instance.
         _device?.Dispose();
 
+        VulkanValidation.DestroyMessenger(Instance, GetApi(Instance));
         GetApi(Instance).vkDestroyInstance();
 
         Quit();
