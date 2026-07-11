@@ -1,5 +1,6 @@
 using System;
 using System.Text;
+using System.Threading;
 using DIR.Lib;
 using SdlVulkan.Renderer;
 using Shouldly;
@@ -121,14 +122,19 @@ public sealed unsafe class BatchedGlyphByGidTests
 
             // No OnPreFlush warm — the batch prewarm alone must get the glyph into the atlas.
             // Rasterization runs on the thread pool and inserts bounded-per-frame, so pump frames
-            // until ink appears; the cap is generous (one glyph ≈ 10ms raster + 1 insert frame).
+            // until ink appears. Sleep between frames like a real redraw-while-dirty consumer:
+            // on a software ICD a 128×64 frame takes well under a millisecond, and a no-delay
+            // loop can burn every retry before the background rasterize task ever lands
+            // (observed on the ubuntu-latest lavapipe lane; a real GPU's frame pacing hid it).
             renderer.PreWarmSdfGlyphBatchByGid(new[] { (FontPath, gidW, (string?)null) });
 
             var lit = 0;
-            for (var frame = 0; frame < 120 && lit == 0; frame++)
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (lit == 0 && clock.Elapsed < TimeSpan.FromSeconds(15))
             {
                 lit = DrawBatchedAndCountLit(renderer, ctx!,
                     r => r.AddBatchedSdfGlyphAtBaselineByGid(FontPath, gidW, null, 20f, 48f), sdf: true, size);
+                if (lit == 0) Thread.Sleep(10);
             }
 
             lit.ShouldBeGreaterThan(0, "batch-prewarmed glyph never became drawable");
