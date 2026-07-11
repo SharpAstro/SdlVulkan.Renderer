@@ -758,6 +758,17 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// GID-direct <see cref="PreWarmGlyph"/>: pre-warms a bitmap-atlas glyph by a pre-resolved
+    /// identity (glyph id, or PostScript name for Type1) — the companion to
+    /// <see cref="AddBatchedGlyphAtBaselineByGid"/> the same way <see cref="PreWarmSdfGlyphByGid"/>
+    /// pairs with the SDF ByGid draw endpoints.
+    /// </summary>
+    public void PreWarmGlyphByGid(string fontPath, float fontSize, uint gid, string? type1Name = null)
+    {
+        _fontAtlas?.GetGlyphByGid(fontPath, fontSize, gid, type1Name);
+    }
+
+    /// <summary>
     /// Draws a single glyph at the exact ink position.
     /// Supports CID subset fonts via charCode for glyph index lookup.
     /// <para>
@@ -993,6 +1004,34 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
 
         var glyph = _fontAtlas.GetGlyph(fontPath, fontSize, character, skipUnflushed: true, charCode: charCode, hint: hint);
+        AddBatchedGlyphAtBaselineCore(in glyph, fontSize, baselineX, baselineY, rotation, xIsInkLeft, xScale);
+    }
+
+    /// <summary>
+    /// GID-direct variant of <see cref="AddBatchedGlyphAtBaseline"/>: adds a batched glyph by a
+    /// pre-resolved identity (glyph id, or PostScript name for Type1) instead of mapping a
+    /// codepoint through the font cmap at the draw boundary. For callers that already hold
+    /// resolved glyph ids — a shaper's output, or a PDF renderer whose parser resolved CID→GID —
+    /// this skips the per-glyph identity resolve the rune overload pays on every call, and cannot
+    /// be hijacked by a broken Unicode cmap in symbolic subset fonts.
+    /// </summary>
+    public void AddBatchedGlyphAtBaselineByGid(string fontPath, float fontSize, uint gid,
+        string? type1Name, float baselineX, float baselineY,
+        float rotation = 0f, bool xIsInkLeft = false, float xScale = 1f)
+    {
+        if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive) return;
+
+        var glyph = _fontAtlas.GetGlyphByGid(fontPath, fontSize, gid, type1Name, skipUnflushed: true);
+        AddBatchedGlyphAtBaselineCore(in glyph, fontSize, baselineX, baselineY, rotation, xIsInkLeft, xScale);
+    }
+
+    // Shared baseline→ink-top transform behind both AtBaseline overloads (rune-resolved and
+    // GID-direct) — keeps the two resolve paths in lockstep, mirroring GetGlyphByKey in the atlas.
+    // Hands the resolved glyph to the internal AddBatchedGlyph overload so neither path pays a
+    // second atlas lookup.
+    private void AddBatchedGlyphAtBaselineCore(in VkFontAtlas.GlyphInfo glyph, float fontSize,
+        float baselineX, float baselineY, float rotation, bool xIsInkLeft, float xScale)
+    {
         if (glyph.Width == 0) return;
 
         var glyphScale = VkFontAtlas.GetGlyphScale(fontSize);
@@ -1023,7 +1062,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             inkY = baselineY + bx * sinR - by * cosR;
         }
 
-        AddBatchedGlyph(fontPath, fontSize, character, charCode, inkX, inkY, rotation, hint, xScale);
+        AddBatchedGlyph(in glyph, fontSize, inkX, inkY, rotation, xScale);
     }
 
     /// <summary>
@@ -1147,6 +1186,35 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // rasterizeOnMiss: false — see AddBatchedSdfGlyph. Not-yet-rasterized glyphs queue + skip.
         var glyph = _sdfFontAtlas.GetGlyph(fontPath, _glyphBatchFontSize, character,
             skipUnflushed: true, charCode: charCode, hint: hint, rasterizeOnMiss: false);
+        AddBatchedSdfGlyphAtBaselineCore(in glyph, baselineX, baselineY, rotation, xIsInkLeft, xScale);
+    }
+
+    /// <summary>
+    /// GID-direct variant of <see cref="AddBatchedSdfGlyphAtBaseline"/>: adds a batched SDF glyph
+    /// by a pre-resolved identity (glyph id, or PostScript name for Type1) instead of mapping a
+    /// codepoint through the font cmap at the draw boundary. For callers that already hold
+    /// resolved glyph ids — a shaper's output, or a PDF renderer whose parser resolved CID→GID —
+    /// this skips the per-glyph identity resolve the rune overload pays on every call, and cannot
+    /// be hijacked by a broken Unicode cmap in symbolic subset fonts. Same queue+skip semantics as
+    /// the rune overload: a glyph not yet in the atlas is rasterized in the background and appears
+    /// a frame later.
+    /// </summary>
+    public void AddBatchedSdfGlyphAtBaselineByGid(string fontPath, uint gid, string? type1Name,
+        float baselineX, float baselineY, float rotation = 0f,
+        bool xIsInkLeft = false, float xScale = 1f)
+    {
+        if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
+
+        var glyph = _sdfFontAtlas.GetGlyphByGid(fontPath, gid, type1Name,
+            skipUnflushed: true, rasterizeOnMiss: false);
+        AddBatchedSdfGlyphAtBaselineCore(in glyph, baselineX, baselineY, rotation, xIsInkLeft, xScale);
+    }
+
+    // Shared baseline→ink-top transform behind both SDF AtBaseline overloads (rune-resolved and
+    // GID-direct) — keeps the two resolve paths in lockstep, mirroring GetGlyphByKey in the atlas.
+    private void AddBatchedSdfGlyphAtBaselineCore(in VkSdfFontAtlas.GlyphInfo glyph,
+        float baselineX, float baselineY, float rotation, bool xIsInkLeft, float xScale)
+    {
         if (glyph.Width == 0) return;
 
         // BearingX/BearingY on the SDF atlas are to the SDF TEXTURE edges (inc. spread padding).
@@ -1219,6 +1287,17 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void PreWarmSdfGlyphBatch(IReadOnlyList<(string Font, System.Text.Rune Character, int CharCode, DIR.Lib.GlyphMapHint Hint)> keys)
     {
         _sdfFontAtlas?.PreRasterizeBatch(keys);
+    }
+
+    /// <summary>
+    /// GID-direct <see cref="PreWarmSdfGlyphBatch"/>: batch prewarm keyed by pre-resolved glyph
+    /// identity (glyph id, or PostScript name for Type1), skipping the per-key cmap resolve. The
+    /// companion to <see cref="AddBatchedSdfGlyphAtBaselineByGid"/> — a consumer that draws by
+    /// resolved ids prewarms by the same ids, so the two paths share atlas entries exactly.
+    /// </summary>
+    public void PreWarmSdfGlyphBatchByGid(IReadOnlyList<(string Font, uint Gid, string? Type1Name)> keys)
+    {
+        _sdfFontAtlas?.PreRasterizeBatchByGid(keys);
     }
 
     /// <summary>
