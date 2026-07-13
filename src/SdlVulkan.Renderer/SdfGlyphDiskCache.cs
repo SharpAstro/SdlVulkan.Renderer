@@ -47,7 +47,10 @@ public sealed class SdfGlyphDiskCache : IDisposable
     // per-entry metadata layout changed — gid(4) + a variable-length glyph name replace the old
     // charCode/character/hint fields — so every v3 file is byte-incompatible; the header mismatch
     // truncates + rewrites them on next append (glyphs re-rasterize once).
-    private const uint FormatVersion = 4;
+    // v5 (MTSDF interpolation error correction): the multi-channel field content changed for glyphs
+    // with an interpolation-induced phantom edge (e.g. the bar bridging a bold 'R''s baseline legs).
+    // The file format is unchanged, but the stored SDF bytes differ, so bump to re-rasterize once.
+    private const uint FormatVersion = 5;
     // Header: magic(4) + version(4) + rasterSize(4) + spread(4) + fontHash(8) + reserved(8) = 32 bytes.
     private const int HeaderSize = 32;
     // Fixed per-entry metadata size *after* the 4-byte length prefix, i.e. everything before the
