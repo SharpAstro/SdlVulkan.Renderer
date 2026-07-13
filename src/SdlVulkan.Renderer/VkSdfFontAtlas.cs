@@ -357,6 +357,17 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable
     /// </summary>
     public static float GetGlyphScale(float requestedFontSize) => requestedFontSize / SdfRasterSize;
 
+    /// <summary>
+    /// Analytic half-width of the SDF smoothstep band, in field units, equal to half a screen
+    /// pixel at <paramref name="fontSize"/>: one texel is 1/(2·spread) field units and
+    /// fontSize/rasterSize screen pixels wide. Passed to the SDF pipeline's sdfEdge push
+    /// constant so edge AA doesn't depend on fwidth of the reconstructed median, whose
+    /// derivative jumps at channel-switch seams (see the SdfFragmentSource comment). Clamped
+    /// so tiny text can't smear the band across the whole field range.
+    /// </summary>
+    public static float ScreenPxHalfBand(float fontSize) =>
+        Math.Clamp(0.5f / (GetGlyphScale(fontSize) * 2f * SdfSpread), 1e-3f, 0.25f);
+
     public GlyphInfo GetGlyph(string fontPath, float fontSize, Rune character,
         bool skipUnflushed = false, int charCode = -1, GlyphMapHint hint = GlyphMapHint.Auto,
         bool rasterizeOnMiss = true)

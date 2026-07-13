@@ -1313,9 +1313,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _glyphBatchIsSdf = false;
 
         var api = Surface.DeviceApi;
-        // SDF AA is driven by fwidth() in the fragment shader, so no caller-side edge softness is
-        // needed regardless of fontSize. Slot 20 is unused by both pipelines; zero it for cleanliness.
-        _pushConstants[20] = 0f;
+        // Slot 20 = sdfEdge: the analytic half-width of the SDF AA band for this batch's fontSize.
+        // The shader prefers it over fwidth(dist), whose derivative spikes at median channel-switch
+        // seams painted faint gray dashes under round glyphs. Bitmap batches leave it 0 (unused).
+        _pushConstants[20] = isSdf ? VkSdfFontAtlas.ScreenPxHalfBand(_glyphBatchFontSize) : 0f;
 
         if (isSdf && _sdfFontAtlas is not null)
         {

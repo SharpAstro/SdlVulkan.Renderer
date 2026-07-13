@@ -164,15 +164,20 @@ public sealed unsafe class VkPipelineSet : IDisposable
     // single-channel SDF would round them off. Uses the same vertex layout as
     // TexturedPipeline.
     //
-    // Edge softness is driven by fwidth(dist) — the screen-space derivative of the
-    // reconstructed distance — which automatically adapts the smoothstep band to
-    // ±0.5 screen pixels at any zoom/font size. This is the canonical MTSDF AA
-    // technique and is much sharper than a single fixed edge constant.
+    // Edge softness: the sdfEdge push constant carries the ANALYTIC half-width of the
+    // smoothstep band in distance units — half a screen pixel, computed per draw from the
+    // batch fontSize (see VkSdfFontAtlas.ScreenPxHalfBand). The old fwidth(dist)-based band
+    // is kept only as a fallback when the slot is 0 (a caller that never sets it).
+    //
+    // Why not fwidth: the reconstructed median(r,g,b) is piecewise-linear with derivative
+    // jumps along MSDF channel-switch boundaries (and along the generator's error-correction
+    // collapses). fwidth() spikes at those seams, ballooning the AA band exactly where the
+    // field value hovers near 0.5 — which rendered as faint detached gray dashes hugging the
+    // shallow bottom curves of round glyphs (o/c/e/g/b, the "defective o" class). An analytic
+    // band is what the reference msdfgen shader uses (screenPxRange) and is immune to seams.
     //
     // The alpha channel (true distance) is available for outline / glow / weight
     // effects; the base text pass reconstructs coverage from the RGB median only.
-    // The sdfEdge push-constant slot is retained for push-constant layout
-    // compatibility but is currently ignored by the shader.
     private const string SdfFragmentSource = """
         #version 450
         layout(location = 0) in vec2 vTexCoord;
@@ -183,8 +188,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
         void main() {
             float dist = median(texture(uTexture, vTexCoord).rgb);
             // Half-width of the smoothstep band in distance units = half a screen pixel.
-            // fwidth(dist) is the per-fragment rate of change of dist per screen pixel.
-            float w = fwidth(dist) * 0.5 + 1e-4;
+            // Analytic per-draw value when provided; fwidth fallback otherwise.
+            float w = pc.sdfEdge > 0.0 ? pc.sdfEdge : fwidth(dist) * 0.5 + 1e-4;
             float alpha = smoothstep(0.5 - w, 0.5 + w, dist);
             if (alpha < 0.005) discard;
             FragColor = vec4(pc.color.rgb, pc.color.a * alpha);

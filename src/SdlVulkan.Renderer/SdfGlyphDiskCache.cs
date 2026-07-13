@@ -50,7 +50,10 @@ public sealed class SdfGlyphDiskCache : IDisposable
     // v5 (MTSDF interpolation error correction): the multi-channel field content changed for glyphs
     // with an interpolation-induced phantom edge (e.g. the bar bridging a bold 'R''s baseline legs).
     // The file format is unchanged, but the stored SDF bytes differ, so bump to re-rasterize once.
-    private const uint FormatVersion = 5;
+    // v6 (scanline winding fix): ray crossings are now counted per y-monotone piece, fixing rows
+    // whose winding inverted when a texel row hit a curve joint (detached gray dashes under round
+    // glyphs — o/c/e/g/b). Field bytes differ again for the affected glyphs; same re-rasterize-once.
+    private const uint FormatVersion = 6;
     // Header: magic(4) + version(4) + rasterSize(4) + spread(4) + fontHash(8) + reserved(8) = 32 bytes.
     private const int HeaderSize = 32;
     // Fixed per-entry metadata size *after* the 4-byte length prefix, i.e. everything before the
