@@ -110,7 +110,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // the source codepoint exactly as the pre-seam loop did, keeping that path byte-identical.
     // Callers guarantee the relevant atlas is non-null (checked at DrawText/MeasureText entry, and
     // the bitmap helper is only reached inside an `_fontAtlas is not null` colour-glyph branch).
-    private VkSdfFontAtlas.GlyphInfo ResolveSdfGlyph(in ShapedGlyph sg, string fontFamily, float fontSize, bool skipUnflushed = false)
+    private SdfFontAtlas.GlyphInfo ResolveSdfGlyph(in ShapedGlyph sg, string fontFamily, float fontSize, bool skipUnflushed = false)
         => sg.Glyph is { } id
             ? _sdfFontAtlas!.GetGlyphByGid(fontFamily, id.Gid, id.Type1Name, skipUnflushed)
             : _sdfFontAtlas!.GetGlyph(fontFamily, fontSize, sg.Source, skipUnflushed: skipUnflushed);
@@ -1088,13 +1088,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
-    /// Assembly-internal overload that accepts a pre-resolved <see cref="VkSdfFontAtlas.GlyphInfo"/>
+    /// Assembly-internal overload that accepts a pre-resolved <see cref="SdfFontAtlas.GlyphInfo"/>
     /// directly — skips the atlas dictionary lookup that the <c>fontPath</c> overload performs
     /// internally. Uses the current batch's <c>fontSize</c> (set by <see cref="BeginSdfGlyphBatch"/>)
     /// to compute scale and spread padding. Passed by <c>in</c> to avoid copying the ~40-byte
     /// record struct on the per-glyph hot path.
     /// </summary>
-    internal void AddBatchedSdfGlyph(in VkSdfFontAtlas.GlyphInfo glyph, float inkX, float inkY,
+    internal void AddBatchedSdfGlyph(in SdfFontAtlas.GlyphInfo glyph, float inkX, float inkY,
         float rotation = 0f, float xScale = 1f)
     {
         if (_pipelines is null || _sdfFontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSdf) return;
@@ -1212,7 +1212,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     // Shared baseline→ink-top transform behind both SDF AtBaseline overloads (rune-resolved and
     // GID-direct) — keeps the two resolve paths in lockstep, mirroring GetGlyphByKey in the atlas.
-    private void AddBatchedSdfGlyphAtBaselineCore(in VkSdfFontAtlas.GlyphInfo glyph,
+    private void AddBatchedSdfGlyphAtBaselineCore(in SdfFontAtlas.GlyphInfo glyph,
         float baselineX, float baselineY, float rotation, bool xIsInkLeft, float xScale)
     {
         if (glyph.Width == 0) return;
