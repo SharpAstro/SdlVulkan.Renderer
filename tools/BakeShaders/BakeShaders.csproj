@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Build-time tool: bakes the renderer's GLSL 450 shaders to SPIR-V so VkPipelineSet
+         loads pre-compiled bytecode instead of running shaderc at runtime (no android RID;
+         also helps AOT/startup). Run when a shader source changes, then commit the .spv.
+         Never shipped in the package. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Same shaderc wrapper VkPipelineSet used at runtime; here it runs only on the build host
+         (win/linux/osx RIDs all ship the native), so the shipped package needs no shaderc. -->
+    <PackageReference Include="Vortice.ShaderCompiler" Version="1.9.0" />
+  </ItemGroup>
+
+</Project>

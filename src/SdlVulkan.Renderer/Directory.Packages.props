@@ -18,7 +18,9 @@
     <PackageVersion Include="SDL3-CS" Version="3.4.10.5" Condition="'$(TargetFramework)' == 'net10.0-android'" />
     <PackageVersion Include="SDL3-CS.Android" Version="3.4.10.5" />
     <PackageVersion Include="Vortice.Vulkan" Version="3.2.1" />
-    <PackageVersion Include="Vortice.ShaderCompiler" Version="1.9.0" />
+    <!-- Vortice.ShaderCompiler (runtime GLSL->SPIR-V) is no longer referenced by the shipped package:
+         shaders are pre-baked to SPIR-V by tools/BakeShaders (which pins its own version inline, outside
+         this CPM scope). Kept out of runtime so the package has no shaderc native (no Android RID). -->
   </ItemGroup>
 
 </Project>

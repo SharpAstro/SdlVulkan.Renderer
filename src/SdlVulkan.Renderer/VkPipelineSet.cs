@@ -1,16 +1,16 @@
 using System.Collections.Concurrent;
 using Vortice.Vulkan;
-using Vortice.ShaderCompiler;
 using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer;
 
 public sealed unsafe class VkPipelineSet : IDisposable
 {
-    // Compiled SPIR-V is the same for every device/window, but GLSL→SPIR-V compilation is the slow
-    // part of building a renderer (~hundreds of ms cold). Cache the bytecode per shader for the
-    // process lifetime so the FIRST renderer compiles and every later one — each additional window, or
-    // a tab torn into its own window — only creates per-device shader modules from cached bytecode.
+    // SPIR-V is pre-baked at build time (tools/BakeShaders) and embedded as resources, so there is no
+    // runtime GLSL->SPIR-V compilation -- and no shaderc dependency, which ships no Android RID. The
+    // bytecode is identical for every device/window; cache it per shader for the process lifetime so
+    // each renderer -- each additional window, or a tab torn into its own window -- only creates
+    // per-device shader modules from the cached bytes rather than re-reading the embedded stream.
     // Keyed by the shader's stable file name. Thread-safe so background window creation is safe.
     private static readonly ConcurrentDictionary<string, byte[]> SpirvCache = new();
     public VkPipeline FlatPipeline { get; }
@@ -28,175 +28,9 @@ public sealed unsafe class VkPipelineSet : IDisposable
 
     private readonly VkDeviceApi _deviceApi;
 
-    #region GLSL 450 Shaders
-
-    private const string FlatVertexSource = """
-        #version 450
-        layout(location = 0) in vec2 aPos;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; } pc;
-        void main() {
-            gl_Position = pc.proj * vec4(aPos, 0.0, 1.0);
-        }
-        """;
-
-    private const string FlatFragmentSource = """
-        #version 450
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; } pc;
-        layout(location = 0) out vec4 FragColor;
-        void main() {
-            FragColor = pc.color;
-        }
-        """;
-
-    private const string TextureVertexSource = """
-        #version 450
-        layout(location = 0) in vec2 aPos;
-        layout(location = 1) in vec2 aTexCoord;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; } pc;
-        layout(location = 0) out vec2 vTexCoord;
-        void main() {
-            gl_Position = pc.proj * vec4(aPos, 0.0, 1.0);
-            vTexCoord = aTexCoord;
-        }
-        """;
-
-    private const string TextureFragmentSource = """
-        #version 450
-        layout(location = 0) in vec2 vTexCoord;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; } pc;
-        layout(set = 0, binding = 0) uniform sampler2D uTexture;
-        layout(location = 0) out vec4 FragColor;
-        void main() {
-            vec4 texel = texture(uTexture, vTexCoord);
-            // Color glyphs (emoji, COLR) have their own RGB; monochrome glyphs are white (1,1,1) with varying alpha.
-            // Detect color glyphs by checking if RGB deviates from white.
-            float isColor = 1.0 - step(0.99, min(texel.r, min(texel.g, texel.b)));
-            vec3 rgb = mix(pc.color.rgb, texel.rgb, isColor);
-            FragColor = vec4(rgb, pc.color.a * texel.a);
-        }
-        """;
-
-    // Pass-through fragment shader for textures — no glyph color detection
-    private const string PageFragmentSource = """
-        #version 450
-        layout(location = 0) in vec2 vTexCoord;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; } pc;
-        layout(set = 0, binding = 0) uniform sampler2D uTexture;
-        layout(location = 0) out vec4 FragColor;
-        void main() {
-            FragColor = texture(uTexture, vTexCoord);
-        }
-        """;
-
-    // Stroke pipeline: expands line segments to screen-space quads in the vertex shader.
-    // Each vertex carries both endpoints (aP0, aP1) and side/end selectors.
-    // halfWidth is in the same coordinate space as the projection matrix.
-    private const string StrokeVertexSource = """
-        #version 450
-        layout(location = 0) in vec2 aP0;
-        layout(location = 1) in vec2 aP1;
-        layout(location = 2) in vec2 aParams;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; float halfWidth; } pc;
-        void main() {
-            vec2 pos = mix(aP0, aP1, aParams.y);
-            vec2 dir = aP1 - aP0;
-            float len = length(dir);
-            vec2 normal = len > 0.0001 ? vec2(-dir.y, dir.x) / len : vec2(0.0, 1.0);
-            pos += normal * aParams.x * pc.halfWidth;
-            gl_Position = pc.proj * vec4(pos, 0.0, 1.0);
-        }
-        """;
-
-    private const string StrokeFragmentSource = """
-        #version 450
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; float halfWidth; } pc;
-        layout(location = 0) out vec4 FragColor;
-        void main() {
-            FragColor = pc.color;
-        }
-        """;
-
-    // Vertex and fragment push-constant blocks declare an IDENTICAL layout. The
-    // vertex stage doesn't read innerRadius but it's still part of the block so the
-    // 84-byte vkCmdPushConstants call (which targets Vertex|Fragment stage flags)
-    // covers exactly what each shader's PC block declares. Mismatched per-stage block
-    // sizes pass on hardware drivers but llvmpipe / Mesa validates more strictly and
-    // can SEGV inside the shader compiler when the actual push range exceeds the
-    // declared block on any stage referenced by the push call. See CI segfault on
-    // ubuntu-latest VkRendererPrimitiveTests.DrawEllipse_RingStroke.
-    private const string EllipseVertexSource = """
-        #version 450
-        layout(location = 0) in vec2 aPos;
-        layout(location = 1) in vec2 aLocalPos;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; float innerRadius; } pc;
-        layout(location = 0) out vec2 vLocal;
-        void main() {
-            gl_Position = pc.proj * vec4(aPos, 0.0, 1.0);
-            vLocal = aLocalPos;
-        }
-        """;
-
-    // Fragment-side: SINGLE-discard combined predicate. The original had two
-    // sequential `if (...) discard;` statements; Mesa llvmpipe is known to mis-
-    // compile a conditional-on-uniform second discard in some MSAA paths and the
-    // CI dump points squarely at this test. Folding into one discard keeps the
-    // logic identical -- pc.innerRadius=0 in fill mode makes innerRadius*innerRadius
-    // exactly 0, and `dist >= 0` always holds for a dot-product distance, so the
-    // inner-radius branch is unreachable in fill mode without an explicit guard.
-    private const string EllipseFragmentSource = """
-        #version 450
-        layout(location = 0) in vec2 vLocal;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; float innerRadius; } pc;
-        layout(location = 0) out vec4 FragColor;
-        void main() {
-            float dist = dot(vLocal, vLocal);
-            float innerSq = pc.innerRadius * pc.innerRadius;
-            // Outside the unit disc OR inside the inner ring -> discard. Single
-            // statement avoids the llvmpipe double-discard-with-MSAA bug class.
-            if (dist > 1.0 || dist < innerSq) discard;
-            FragColor = pc.color;
-        }
-        """;
-
-    // MTSDF text pipeline: samples a multi-channel signed distance field atlas
-    // (RGBA8; RGB = per-channel pseudo-distance, A = true distance). The edge is
-    // reconstructed from median(r,g,b), which keeps sharp corners crisp where a
-    // single-channel SDF would round them off. Uses the same vertex layout as
-    // TexturedPipeline.
-    //
-    // Edge softness: the sdfEdge push constant carries the ANALYTIC half-width of the
-    // smoothstep band in distance units — half a screen pixel, computed per draw from the
-    // batch fontSize (see VkSdfFontAtlas.ScreenPxHalfBand). The old fwidth(dist)-based band
-    // is kept only as a fallback when the slot is 0 (a caller that never sets it).
-    //
-    // Why not fwidth: the reconstructed median(r,g,b) is piecewise-linear with derivative
-    // jumps along MSDF channel-switch boundaries (and along the generator's error-correction
-    // collapses). fwidth() spikes at those seams, ballooning the AA band exactly where the
-    // field value hovers near 0.5 — which rendered as faint detached gray dashes hugging the
-    // shallow bottom curves of round glyphs (o/c/e/g/b, the "defective o" class). An analytic
-    // band is what the reference msdfgen shader uses (screenPxRange) and is immune to seams.
-    //
-    // The alpha channel (true distance) is available for outline / glow / weight
-    // effects; the base text pass reconstructs coverage from the RGB median only.
-    private const string SdfFragmentSource = """
-        #version 450
-        layout(location = 0) in vec2 vTexCoord;
-        layout(push_constant) uniform PC { mat4 proj; vec4 color; float sdfEdge; } pc;
-        layout(set = 0, binding = 0) uniform sampler2D uTexture;
-        layout(location = 0) out vec4 FragColor;
-        float median(vec3 v) { return max(min(v.r, v.g), min(max(v.r, v.g), v.b)); }
-        void main() {
-            float dist = median(texture(uTexture, vTexCoord).rgb);
-            // Half-width of the smoothstep band in distance units = half a screen pixel.
-            // Analytic per-draw value when provided; fwidth fallback otherwise.
-            float w = pc.sdfEdge > 0.0 ? pc.sdfEdge : fwidth(dist) * 0.5 + 1e-4;
-            float alpha = smoothstep(0.5 - w, 0.5 + w, dist);
-            if (alpha < 0.005) discard;
-            FragColor = vec4(pc.color.rgb, pc.color.a * alpha);
-        }
-        """;
-
-    #endregion
+    // GLSL 450 shader sources live in Shaders/*.vert / Shaders/*.frag (with their rationale comments)
+    // and are baked to Shaders/spirv/*.spv by tools/BakeShaders. Re-run that tool and commit the .spv
+    // whenever a shader source changes.
 
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
         VkPipeline sdf,
@@ -219,19 +53,17 @@ public sealed unsafe class VkPipelineSet : IDisposable
     {
         var deviceApi = ctx.DeviceApi;
 
-        // Compile shaders to SPIR-V
-        using var compiler = new Compiler();
-
-        var flatVert = CompileAndCreateModule(deviceApi, compiler, FlatVertexSource, "flat.vert", ShaderKind.VertexShader);
-        var flatFrag = CompileAndCreateModule(deviceApi, compiler, FlatFragmentSource, "flat.frag", ShaderKind.FragmentShader);
-        var texVert = CompileAndCreateModule(deviceApi, compiler, TextureVertexSource, "tex.vert", ShaderKind.VertexShader);
-        var texFrag = CompileAndCreateModule(deviceApi, compiler, TextureFragmentSource, "tex.frag", ShaderKind.FragmentShader);
-        var pageFrag = CompileAndCreateModule(deviceApi, compiler, PageFragmentSource, "page.frag", ShaderKind.FragmentShader);
-        var ellipseVert = CompileAndCreateModule(deviceApi, compiler, EllipseVertexSource, "ellipse.vert", ShaderKind.VertexShader);
-        var ellipseFrag = CompileAndCreateModule(deviceApi, compiler, EllipseFragmentSource, "ellipse.frag", ShaderKind.FragmentShader);
-        var strokeVert = CompileAndCreateModule(deviceApi, compiler, StrokeVertexSource, "stroke.vert", ShaderKind.VertexShader);
-        var strokeFrag = CompileAndCreateModule(deviceApi, compiler, StrokeFragmentSource, "stroke.frag", ShaderKind.FragmentShader);
-        var sdfFrag = CompileAndCreateModule(deviceApi, compiler, SdfFragmentSource, "sdf.frag", ShaderKind.FragmentShader);
+        // Shader modules from pre-baked SPIR-V embedded resources -- no runtime shaderc.
+        var flatVert = LoadEmbeddedModule(deviceApi, "flat.vert");
+        var flatFrag = LoadEmbeddedModule(deviceApi, "flat.frag");
+        var texVert = LoadEmbeddedModule(deviceApi, "tex.vert");
+        var texFrag = LoadEmbeddedModule(deviceApi, "tex.frag");
+        var pageFrag = LoadEmbeddedModule(deviceApi, "page.frag");
+        var ellipseVert = LoadEmbeddedModule(deviceApi, "ellipse.vert");
+        var ellipseFrag = LoadEmbeddedModule(deviceApi, "ellipse.frag");
+        var strokeVert = LoadEmbeddedModule(deviceApi, "stroke.vert");
+        var strokeFrag = LoadEmbeddedModule(deviceApi, "stroke.frag");
+        var sdfFrag = LoadEmbeddedModule(deviceApi, "sdf.frag");
 
         try
         {
@@ -415,21 +247,20 @@ public sealed unsafe class VkPipelineSet : IDisposable
         return pipeline;
     }
 
-    private static VkShaderModule CompileAndCreateModule(VkDeviceApi deviceApi, Compiler compiler, string source, string fileName, ShaderKind kind)
+    private static VkShaderModule LoadEmbeddedModule(VkDeviceApi deviceApi, string shaderName)
     {
-        // Compile once per process (cache hit on every renderer after the first), then create the
-        // per-device shader module from the cached bytecode.
-        var spirv = SpirvCache.GetOrAdd(fileName, _ =>
+        // Read the pre-baked SPIR-V once per process (cache hit on every renderer after the first),
+        // then create the per-device shader module from the cached bytecode. shaderName is the stable
+        // source file name ("flat.vert"); the embedded logical name is set in the .csproj.
+        var spirv = SpirvCache.GetOrAdd(shaderName, static name =>
         {
-            var options = new CompilerOptions
-            {
-                TargetEnv = TargetEnvironmentVersion.Vulkan_1_0,
-                ShaderStage = kind
-            };
-            var result = compiler.Compile(source, fileName, options);
-            if (result.Status != CompilationStatus.Success)
-                throw new InvalidOperationException($"Shader compilation failed ({fileName}): {result.ErrorMessage}");
-            return result.Bytecode;
+            var resource = $"SdlVulkan.Renderer.Shaders.{name}.spv";
+            using var stream = typeof(VkPipelineSet).Assembly.GetManifestResourceStream(resource)
+                ?? throw new InvalidOperationException(
+                    $"Embedded shader '{resource}' not found -- run tools/BakeShaders and commit Shaders/spirv/*.spv.");
+            var buffer = new byte[stream.Length];
+            stream.ReadExactly(buffer);
+            return buffer;
         });
 
         fixed (byte* pSpirv = spirv)

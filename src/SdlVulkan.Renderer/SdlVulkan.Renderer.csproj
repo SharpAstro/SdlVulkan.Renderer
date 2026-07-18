@@ -46,8 +46,33 @@
   <ItemGroup>
     <PackageReference Include="SDL3-CS" />
     <PackageReference Include="Vortice.Vulkan" />
-    <PackageReference Include="Vortice.ShaderCompiler" />
   </ItemGroup>
+
+  <!--
+    Shaders are authored as GLSL 450 in Shaders/*.vert|*.frag and pre-baked to SPIR-V under
+    Shaders/spirv/*.spv by the tools/BakeShaders tool (committed). The renderer embeds the .spv and
+    loads it at runtime, so the shipped package carries NO shaderc dependency (it has no Android RID)
+    and does NO runtime GLSL to SPIR-V compilation. Re-bake and commit the .spv when a shader
+    changes (see the SVR0001 build warning below for the exact command; also tools/BakeShaders).
+    (.vert/.frag are already visible in the IDE via the SDK's default None glob.)
+  -->
+  <ItemGroup>
+    <None Remove="Shaders\spirv\*.spv" />
+    <EmbeddedResource Include="Shaders\spirv\*.spv">
+      <LogicalName>SdlVulkan.Renderer.Shaders.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <ShaderSource Include="Shaders\*.vert;Shaders\*.frag" />
+  </ItemGroup>
+
+  <!-- Warn (never fail) when a shader source is newer than its baked .spv, so an edit that forgets
+       to re-bake is visible. Timestamp-based: fires in a dev tree right after an edit; a fresh clone
+       has near-equal checkout times so it stays quiet on CI. -->
+  <Target Name="WarnStaleBakedShaders" BeforeTargets="CoreCompile"
+          Inputs="@(ShaderSource)"
+          Outputs="@(ShaderSource->'Shaders\spirv\%(Filename)%(Extension).spv')">
+    <Warning Code="SVR0001"
+             Text="Shader source(s) newer than baked SPIR-V; re-run 'dotnet run --project tools/BakeShaders -c Release -- src/SdlVulkan.Renderer/Shaders' and commit Shaders/spirv/*.spv. Stale: @(ShaderSource)" />
+  </Target>
 
   <!-- Android-only: SDL Java bridge (Org.Libsdl.App.SDLActivity) + per-ABI libSDL3.so natives. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-android'">
