@@ -2,7 +2,10 @@
 
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net10.0-android</TargetFrameworks>
+    <!-- Android host (SdlVulkanActivity) needs SDL3-CS.Android's Java bridge, which only exists on
+         the android TFM. Desktop keeps the SDL3-CS.Native path via consuming apps. -->
+    <SupportedOSPlatformVersion Condition="'$(TargetFramework)' == 'net10.0-android'">24.0</SupportedOSPlatformVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -44,6 +47,16 @@
     <PackageReference Include="SDL3-CS" />
     <PackageReference Include="Vortice.Vulkan" />
     <PackageReference Include="Vortice.ShaderCompiler" />
+  </ItemGroup>
+
+  <!-- Android-only: SDL Java bridge (Org.Libsdl.App.SDLActivity) + per-ABI libSDL3.so natives. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-android'">
+    <PackageReference Include="SDL3-CS.Android" />
+  </ItemGroup>
+
+  <!-- The Android host (Android/*.cs) uses Org.Libsdl.App and compiles only for the android TFM. -->
+  <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-android'">
+    <Compile Remove="Android/**/*.cs" />
   </ItemGroup>
 
   <ItemGroup>

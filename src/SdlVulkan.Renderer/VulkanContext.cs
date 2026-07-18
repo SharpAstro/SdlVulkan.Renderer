@@ -556,7 +556,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
         if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
             imageCount = caps.maxImageCount;
 
-        var format = VkFormat.B8G8R8A8Unorm;
+        // Chosen once against the surface in VulkanDevice.Create; the render pass baked in the same
+        // format, so the swapchain images must match it (BGRA on desktop, RGBA on Android/Mali).
+        var format = _dev.ColorFormat;
         SwapchainFormat = format;
         SwapchainWidth = extent.width;
         SwapchainHeight = extent.height;
@@ -585,6 +587,31 @@ public sealed unsafe partial class VulkanContext : IDisposable
             }
         }
 
+        var imageUsage = VkImageUsageFlags.ColorAttachment;
+#if DEBUG
+        // TransferSrc lets the DEBUG-only inspector copy the presented frame out for screenshots
+        // (see VulkanContext.SwapchainReadback.cs). Desktop drivers always support it as a swapchain
+        // usage, but Android/Mali swapchains often expose ColorAttachment ONLY — and requesting an
+        // unsupported usage fails vkCreateSwapchainKHR (reported as VK_ERROR_SURFACE_LOST_KHR on
+        // Android). Only add it when the surface actually advertises it.
+        if ((caps.supportedUsageFlags & VkImageUsageFlags.TransferSrc) != 0)
+            imageUsage |= VkImageUsageFlags.TransferSrc;
+#endif
+
+        // Pick a supported composite-alpha mode. Desktop supports Opaque; Android surfaces commonly
+        // support Inherit ONLY, and requesting an unsupported mode fails swapchain creation (reported
+        // as VK_ERROR_SURFACE_LOST_KHR on Mali).
+        var compositeAlpha = VkCompositeAlphaFlagsKHR.Opaque;
+        if ((caps.supportedCompositeAlpha & VkCompositeAlphaFlagsKHR.Opaque) == 0)
+        {
+            if ((caps.supportedCompositeAlpha & VkCompositeAlphaFlagsKHR.Inherit) != 0)
+                compositeAlpha = VkCompositeAlphaFlagsKHR.Inherit;
+            else if ((caps.supportedCompositeAlpha & VkCompositeAlphaFlagsKHR.PreMultiplied) != 0)
+                compositeAlpha = VkCompositeAlphaFlagsKHR.PreMultiplied;
+            else if ((caps.supportedCompositeAlpha & VkCompositeAlphaFlagsKHR.PostMultiplied) != 0)
+                compositeAlpha = VkCompositeAlphaFlagsKHR.PostMultiplied;
+        }
+
         VkSwapchainCreateInfoKHR swapCI = new()
         {
             surface = _surface,
@@ -593,17 +620,10 @@ public sealed unsafe partial class VulkanContext : IDisposable
             imageColorSpace = VkColorSpaceKHR.SrgbNonLinear,
             imageExtent = extent,
             imageArrayLayers = 1,
-#if DEBUG
-            // TransferSrc lets the DEBUG-only inspector copy the presented frame out for screenshots
-            // (see VulkanContext.SwapchainReadback.cs). B8G8R8A8Unorm is guaranteed to support
-            // TransferSrc on all conformant desktop drivers, so no format fallback is needed.
-            imageUsage = VkImageUsageFlags.ColorAttachment | VkImageUsageFlags.TransferSrc,
-#else
-            imageUsage = VkImageUsageFlags.ColorAttachment,
-#endif
+            imageUsage = imageUsage,
             imageSharingMode = VkSharingMode.Exclusive,
             preTransform = caps.currentTransform,
-            compositeAlpha = VkCompositeAlphaFlagsKHR.Opaque,
+            compositeAlpha = compositeAlpha,
             presentMode = presentMode,
             clipped = true,
             oldSwapchain = VkSwapchainKHR.Null

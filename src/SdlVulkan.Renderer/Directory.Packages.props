@@ -10,7 +10,13 @@
   <ItemGroup>
     <PackageVersion Include="DIR.Lib" Version="6.10.*" />
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.300" />
-    <PackageVersion Include="SDL3-CS" Version="3.5.0-preview.20260213-150035" />
+    <!-- SDL3-CS.Android has no 3.5.0 preview, so the android TFM pins a coherent managed+native
+         pair; desktop stays on the 3.5.0 preview. NB: SDL3-CS.Android 3.4.12.x ships a MISMATCHED
+         pair (Java bridge 3.4.10 vs native 3.4.12) that fails SDL's runtime C/Java version check,
+         so pin 3.4.10.5 where both halves agree. -->
+    <PackageVersion Include="SDL3-CS" Version="3.5.0-preview.20260213-150035" Condition="'$(TargetFramework)' != 'net10.0-android'" />
+    <PackageVersion Include="SDL3-CS" Version="3.4.10.5" Condition="'$(TargetFramework)' == 'net10.0-android'" />
+    <PackageVersion Include="SDL3-CS.Android" Version="3.4.10.5" />
     <PackageVersion Include="Vortice.Vulkan" Version="3.2.1" />
     <PackageVersion Include="Vortice.ShaderCompiler" Version="1.9.0" />
   </ItemGroup>

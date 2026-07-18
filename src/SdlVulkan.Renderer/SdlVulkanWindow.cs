@@ -11,7 +11,7 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
 {
     public nint Handle { get; }
     public VkInstance Instance { get; }
-    public VkSurfaceKHR Surface { get; }
+    public VkSurfaceKHR Surface { get; private set; }
 
     /// <summary>The SDL window id this window's events carry (<c>SDL_GetWindowID</c>). Multi-window
     /// event dispatch routes each SDL event to the matching window by this id.</summary>
@@ -37,8 +37,8 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
     /// the owning <see cref="VulkanContext"/>/<see cref="VulkanDevice"/>. For multiple windows use
     /// <see cref="SdlVulkanApp"/> instead, which owns one SDL lifecycle + instance + shared device.
     /// </summary>
-    public static SdlVulkanWindow Create(string title, int width, int height)
-        => CreateInternal(InitSdlAndCreateInstance(), title, width, height, ownsSdl: true);
+    public static SdlVulkanWindow Create(string title, int width, int height, bool fullscreen = false)
+        => CreateInternal(InitSdlAndCreateInstance(), title, width, height, ownsSdl: true, fullscreen: fullscreen);
 
     /// <summary>
     /// Multi-window path used by <see cref="SdlVulkanApp"/>: creates a window + surface against an
@@ -55,13 +55,24 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
 
     private static SdlVulkanWindow CreateInternal(VkInstance instance, string title, int width, int height,
         bool ownsSdl, bool maximized = true, bool borderless = false, bool alwaysOnTop = false,
-        bool focusable = true)
+        bool focusable = true, bool fullscreen = false)
     {
-        var flags = WindowFlags.Vulkan | WindowFlags.Resizable;
-        if (maximized) flags |= WindowFlags.Maximized;
-        if (borderless) flags |= WindowFlags.Borderless;
-        if (alwaysOnTop) flags |= WindowFlags.AlwaysOnTop;
-        if (!focusable) flags |= WindowFlags.NotFocusable;
+        var flags = WindowFlags.Vulkan;
+        if (fullscreen)
+        {
+            // Android needs a FULLSCREEN Vulkan window. A windowed/maximized one receives surface-destroy
+            // callbacks that null the native window, so building the swapchain hits VK_ERROR_SURFACE_LOST_KHR
+            // (libsdl-org/SDL#12957). Fullscreen keeps the native surface attached.
+            flags |= WindowFlags.Fullscreen;
+        }
+        else
+        {
+            flags |= WindowFlags.Resizable;
+            if (maximized) flags |= WindowFlags.Maximized;
+            if (borderless) flags |= WindowFlags.Borderless;
+            if (alwaysOnTop) flags |= WindowFlags.AlwaysOnTop;
+            if (!focusable) flags |= WindowFlags.NotFocusable;
+        }
         var window = CreateWindow(title, width, height, flags);
         if (window == nint.Zero)
             throw new InvalidOperationException($"SDL_CreateWindow failed: {GetError()}");
@@ -92,6 +103,25 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
     }
 
     public void GetSizeInPixels(out int w, out int h) => GetWindowSizeInPixels(Handle, out w, out h);
+
+    /// <summary>
+    /// Destroys the current Vulkan surface and creates a fresh one against the window's native
+    /// surface. Needed on Android, where the native window is recreated during the splash-&gt;app
+    /// handoff: the surface SDL created at window construction becomes <c>VK_ERROR_SURFACE_LOST_KHR</c>
+    /// by the time the swapchain is built, so the host recreates it once the window has settled.
+    /// Must not be called while the surface is in use by a live swapchain.
+    /// </summary>
+    public void RecreateSurface()
+    {
+        // Destroy the stale surface FIRST: it still binds the native window, so creating a second one
+        // on the same window fails with VK_ERROR_NATIVE_WINDOW_IN_USE_KHR. Nothing may be using it —
+        // the host only calls this during startup settling, before the swapchain exists.
+        if (Surface != VkSurfaceKHR.Null)
+            GetApi(Instance).vkDestroySurfaceKHR(Surface);
+        if (!VulkanCreateSurface(Handle, Instance.Handle, nint.Zero, out var surfaceHandle))
+            throw new InvalidOperationException($"SDL_Vulkan_CreateSurface failed: {GetError()}");
+        Surface = new VkSurfaceKHR((ulong)surfaceHandle);
+    }
 
     /// <summary>
     /// Returns the platform-native window handle backing this SDL window: an HWND on Windows,

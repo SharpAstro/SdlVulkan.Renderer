@@ -30,6 +30,13 @@ public sealed unsafe class VulkanDevice : IDisposable
     public uint GraphicsQueueFamily { get; }
     public VkCommandPool CommandPool { get; }
     public VkRenderPass RenderPass { get; }
+
+    /// <summary>The color format the render pass — and therefore the swapchain images — use. Chosen
+    /// from the surface's supported formats on the swapchain path (B8G8R8A8Unorm on desktop for
+    /// readback/offscreen byte-order parity; R8G8B8A8Unorm on Android/Mali, which offers no BGRA);
+    /// fixed to B8G8R8A8Unorm on the offscreen path. Render pass and swapchain MUST agree on it.</summary>
+    public VkFormat ColorFormat { get; }
+
     public VkDescriptorPool DescriptorPool { get; }
     public VkDescriptorSetLayout DescriptorSetLayout { get; }
     public VkDescriptorSet DescriptorSet { get; }
@@ -82,7 +89,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkCommandPool commandPool, VkRenderPass renderPass,
         VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
         VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout,
-        VkSampleCountFlags msaaSamples, bool ownsInstance)
+        VkFormat colorFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
     {
         _ownsInstance = ownsInstance;
         Instance = instance;
@@ -94,6 +101,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         GraphicsQueueFamily = graphicsQueueFamily;
         CommandPool = commandPool;
         RenderPass = renderPass;
+        ColorFormat = colorFormat;
         DescriptorPool = descriptorPool;
         DescriptorSetLayout = descriptorSetLayout;
         DescriptorSet = descriptorSet;
@@ -133,11 +141,16 @@ public sealed unsafe class VulkanDevice : IDisposable
         var deviceApi = GetApi(instance, device);
         deviceApi.vkGetDeviceQueue(queueFamily, 0, out var graphicsQueue);
 
+        // Pick a color format the surface actually supports; the render pass and swapchain images must
+        // agree, so choose it once here. Desktop offers BGRA (kept for readback/offscreen byte-order
+        // parity); Android/Mali offers only RGBA.
+        var colorFormat = PickSurfaceColorFormat(instanceApi, physicalDevice, surface);
+
         // Swapchain render pass — final layout PresentSrcKHR.
-        var renderPass = CreateRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm, msaaSamples);
+        var renderPass = CreateRenderPass(deviceApi, colorFormat, msaaSamples);
 
         return CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, renderPass, msaaSamples, ownsInstance);
+            graphicsQueue, queueFamily, renderPass, colorFormat, msaaSamples, ownsInstance);
     }
 
     /// <summary>
@@ -177,7 +190,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         var renderPass = CreateOffscreenRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm, msaaSamples);
 
         return CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, renderPass, msaaSamples, ownsInstance);
+            graphicsQueue, queueFamily, renderPass, VkFormat.B8G8R8A8Unorm, msaaSamples, ownsInstance);
     }
 
     // Shared tail of both factories: command pool, descriptor pool/layout/set, pipeline layout.
@@ -188,7 +201,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkInstance instance, VkInstanceApi instanceApi,
         VkPhysicalDevice physicalDevice, VkDevice device, VkDeviceApi deviceApi,
         VkQueue graphicsQueue, uint queueFamily, VkRenderPass renderPass,
-        VkSampleCountFlags msaaSamples, bool ownsInstance)
+        VkFormat colorFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
     {
         // Command pool
         VkCommandPoolCreateInfo poolCI = new()
@@ -258,7 +271,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         return new VulkanDevice(
             instance, instanceApi, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, commandPool, renderPass,
-            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout, msaaSamples, ownsInstance);
+            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout, colorFormat, msaaSamples, ownsInstance);
     }
 
     /// <summary>
@@ -515,6 +528,35 @@ public sealed unsafe class VulkanDevice : IDisposable
         }
 
         throw new InvalidOperationException("No suitable Vulkan physical device found (offscreen)");
+    }
+
+    // Chooses a swapchain color format the surface supports: B8G8R8A8Unorm when available (desktop —
+    // keeps the readback/offscreen byte order), else R8G8B8A8Unorm (Android/Mali offers no BGRA), else
+    // the surface's first advertised format. A single legacy Undefined entry means "any", so BGRA is safe.
+    private static VkFormat PickSurfaceColorFormat(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice, VkSurfaceKHR surface)
+    {
+        uint count = 0;
+        instanceApi.vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, null);
+        if (count == 0)
+            return VkFormat.B8G8R8A8Unorm;
+
+        Span<VkSurfaceFormatKHR> formats = stackalloc VkSurfaceFormatKHR[(int)count];
+        fixed (VkSurfaceFormatKHR* p = formats)
+            instanceApi.vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, p);
+
+        if (count == 1 && formats[0].format == VkFormat.Undefined)
+            return VkFormat.B8G8R8A8Unorm;
+
+        var hasBgra = false;
+        var hasRgba = false;
+        foreach (var f in formats)
+        {
+            if (f.format == VkFormat.B8G8R8A8Unorm) hasBgra = true;
+            else if (f.format == VkFormat.R8G8B8A8Unorm) hasRgba = true;
+        }
+        if (hasBgra) return VkFormat.B8G8R8A8Unorm;
+        if (hasRgba) return VkFormat.R8G8B8A8Unorm;
+        return formats[0].format;
     }
 
     private static VkRenderPass CreateRenderPass(VkDeviceApi deviceApi, VkFormat format,
