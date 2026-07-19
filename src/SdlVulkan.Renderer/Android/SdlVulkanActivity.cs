@@ -38,10 +38,18 @@ public abstract class SdlVulkanActivity : SDLActivity
     /// Whether to create the window fullscreen (immersive, system bars hidden). Default true on
     /// Android: SDL draws edge-to-edge and ignores <c>decorFitsSystemWindows</c>, so with the bars
     /// visible the status/nav bars overlap the surface — cropping the top of the scene and covering
-    /// bottom chrome. A consumer that wants the bars visible can override this to false and apply its
-    /// own safe-area insets.
+    /// bottom chrome. Either way, consumers should lay out within
+    /// <see cref="SdlVulkanWindow.GetSafeAreaInsets"/> (via <see cref="SdlWindow"/>) — it covers the
+    /// display cutout and rounded corners when fullscreen, and additionally the system bars when not.
     /// </summary>
     protected virtual bool Fullscreen => true;
+
+    /// <summary>
+    /// The SDL window, available from <see cref="OnRendererReady"/> onward. Consumers use it for
+    /// safe-area queries (<see cref="SdlVulkanWindow.GetSafeAreaInsets"/>) on ready/resize.
+    /// Named to avoid hiding Android's <c>Activity.Window</c>.
+    /// </summary>
+    protected SdlVulkanWindow SdlWindow { get; private set; } = null!;
 
     /// <summary>
     /// Runs on SDL's native thread. Mirrors the desktop entry point: create the window + Vulkan
@@ -49,11 +57,18 @@ public abstract class SdlVulkanActivity : SDLActivity
     /// </summary>
     protected override void Main()
     {
+        // Default the diagnostic sink to logcat before bring-up: a failure in
+        // CreateRendererWhenSurfaceReady happens BEFORE OnRendererReady — where a consumer would
+        // normally install its own sink — and would otherwise leave no trace. ??= so a sink the
+        // consumer set earlier wins (and one set in OnRendererReady simply replaces this).
+        SdlEventLoop.DiagnosticLog ??= static m => global::Android.Util.Log.Info("SdlVulkan", m);
+
         var (dw, dh) = DesignSize;
         // Fullscreen (immersive) by default: the system bars would otherwise draw over the edge-to-edge
         // SDL surface, cropping the top of the scene and covering bottom chrome. Override Fullscreen to
         // keep the bars visible (then apply safe-area insets).
         using var window = SdlVulkanWindow.Create(WindowTitle, dw, dh, fullscreen: Fullscreen);
+        SdlWindow = window;
 
         var (ctx, renderer) = CreateRendererWhenSurfaceReady(window);
         try
@@ -92,8 +107,11 @@ public abstract class SdlVulkanActivity : SDLActivity
             catch (VkException ex)
             {
                 last = ex; // transient surface during startup — settle and retry
+                SdlEventLoop.DiagnosticLog?.Invoke($"[startup] attempt {attempt + 1}: {ex.Message}; retrying");
             }
         }
+        SdlEventLoop.DiagnosticLog?.Invoke(
+            $"[startup] giving up: Vulkan surface never became ready ({last?.Message ?? "surface never sized"})");
         throw last ?? new InvalidOperationException("Vulkan surface never became ready.");
     }
 

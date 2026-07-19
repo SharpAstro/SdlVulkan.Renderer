@@ -649,7 +649,14 @@ public sealed unsafe partial class VulkanContext : IDisposable
             imageArrayLayers = 1,
             imageUsage = imageUsage,
             imageSharingMode = VkSharingMode.Exclusive,
-            preTransform = caps.currentTransform,
+            // After a device rotation, currentTransform becomes Rotate90/270 — an app that adopts it
+            // as preTransform must render pre-rotated (rotate its projection), which VkRenderer does
+            // not. Prefer Identity when supported: the presentation engine applies the rotation
+            // itself (small compositor cost on mobile, correct visuals). Desktop surfaces report
+            // Identity as current anyway, so this is Android-rotation-only in practice.
+            preTransform = (caps.supportedTransforms & VkSurfaceTransformFlagsKHR.Identity) != 0
+                ? VkSurfaceTransformFlagsKHR.Identity
+                : caps.currentTransform,
             compositeAlpha = compositeAlpha,
             presentMode = presentMode,
             clipped = true,

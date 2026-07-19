@@ -23,6 +23,10 @@ public static class SdlInputMapping
             Scancode.Pagedown => InputKey.PageDown,
             Scancode.Return => InputKey.Enter,
             Scancode.Escape => InputKey.Escape,
+            // Android's back button/gesture: SDL traps it and delivers AC_BACK instead of letting
+            // the activity's onBackPressed run. Escape is its desktop-semantics equivalent, so hosts
+            // handle one "go back" key on every platform.
+            Scancode.ACBack => InputKey.Escape,
             Scancode.Tab => InputKey.Tab,
             Scancode.Space => InputKey.Space,
             Scancode.Backspace => InputKey.Backspace,

@@ -263,7 +263,10 @@ public sealed class SdlEventLoop
 
         // Android app lifecycle: on the first frame after returning to the foreground, rebuild the
         // swapchain against a fresh surface (the native surface was destroyed while backgrounded).
-        if (v.NeedsSurfaceRebuild)
+        // Never while a sacrificial recovery task exists — its thread may still be mutating this
+        // renderer's Vulkan state, and the poll block below owns that path (including the wedge
+        // deadline, which must stay live while the rebuild waits its turn).
+        if (v.NeedsSurfaceRebuild && v.GpuRecoveryTask is null)
         {
             v.Window.GetSizeInPixels(out var fw, out var fh);
             if (fw <= 0 || fh <= 0)
@@ -294,8 +297,10 @@ public sealed class SdlEventLoop
             return false;
         }
 
-        // Backgrounded: the native surface is gone. Skip all rendering until DidEnterForeground.
-        if (v.Paused)
+        // Backgrounded: the native surface is gone. Skip all rendering until DidEnterForeground —
+        // except polling a pending recovery task: its fault/deadline handling must not stall just
+        // because the app was backgrounded (or is awaiting a rebuild) mid-recovery.
+        if (v.Paused && v.GpuRecoveryTask is null)
             return false;
 
         // A sacrificial recovery task owns this window's renderer while in flight (see the
@@ -308,6 +313,14 @@ public sealed class SdlEventLoop
             {
                 v.GpuRecoveryTask = null;
                 Console.Error.WriteLine($"[SdlEventLoop] GPU recovery completed (window {v.Window.WindowId}); resuming.");
+                // A surface rebuild queued up while recovery ran (Android backgrounded mid-recovery):
+                // recovery rebuilt against the OLD surface, which is dead — don't present to it. Hand
+                // control back to the rebuild branch next frame, now that the task is cleared.
+                if (v.NeedsSurfaceRebuild || v.Paused)
+                {
+                    v.NeedsRedraw = true;
+                    return false;
+                }
                 // Recovery rebuilt the swapchain at the pre-recovery size; re-run layout only if the
                 // window was resized while recovery was in flight (mirrors the synchronous path).
                 v.Window.GetSizeInPixels(out var rw, out var rh);
@@ -549,6 +562,18 @@ public sealed class SdlEventLoop
             case EventType.WindowPixelSizeChanged:
                 if (TryView(evt.Window.WindowID, out var vr))
                 {
+                    // Backgrounded or awaiting a surface rebuild (Android): the current surface is
+                    // dead, so resizing the swapchain against it would throw SURFACE_LOST — and
+                    // Dispatch runs uncaught. SDL can deliver Restored + Resized in one poll batch
+                    // (rotation does), both ahead of RenderView's rebuild. Fold the resize into the
+                    // rebuild instead: it re-reads the pixel size when it runs. Never true on desktop.
+                    if (vr.Paused || vr.NeedsSurfaceRebuild)
+                    {
+                        DebugLog($"[resume] resize while surface dead -> folded into rebuild");
+                        vr.NeedsSurfaceRebuild = true;
+                        vr.NeedsRedraw = true;
+                        break;
+                    }
                     vr.Window.GetSizeInPixels(out var rw, out var rh);
                     if (rw > 0 && rh > 0)
                     {

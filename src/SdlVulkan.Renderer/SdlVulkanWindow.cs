@@ -105,6 +105,28 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
     public void GetSizeInPixels(out int w, out int h) => GetWindowSizeInPixels(Handle, out w, out h);
 
     /// <summary>
+    /// Safe-area insets in PIXELS: how far content must stay from each window edge to avoid display
+    /// cutouts (camera notch/punch-hole), rounded corners, and — when not fullscreen — system bars.
+    /// Wraps <c>SDL_GetWindowSafeArea</c> (window coordinates), scaled to pixel coordinates so it
+    /// composes directly with <see cref="GetSizeInPixels"/>. All zeros on desktop (the whole window is
+    /// safe) and whenever SDL can't report an area. Re-query on resize/rotation/foreground-return —
+    /// the cutout moves with orientation.
+    /// </summary>
+    public (int Left, int Top, int Right, int Bottom) GetSafeAreaInsets()
+    {
+        GetSizeInPixels(out var pw, out var ph);
+        GetWindowSize(Handle, out var ww, out var wh);
+        if (pw <= 0 || ph <= 0 || ww <= 0 || wh <= 0 || !GetWindowSafeArea(Handle, out var safe))
+            return (0, 0, 0, 0);
+        // Window coords -> pixels (identical on Android; hi-dpi desktops scale, though there the
+        // safe area is the full window anyway).
+        var sx = (float)pw / ww;
+        var sy = (float)ph / wh;
+        return ((int)(safe.X * sx), (int)(safe.Y * sy),
+                (int)((ww - safe.X - safe.W) * sx), (int)((wh - safe.Y - safe.H) * sy));
+    }
+
+    /// <summary>
     /// Destroys the current Vulkan surface and creates a fresh one against the window's native
     /// surface. Needed on Android, where the native window is recreated during the splash-&gt;app
     /// handoff: the surface SDL created at window construction becomes <c>VK_ERROR_SURFACE_LOST_KHR</c>
