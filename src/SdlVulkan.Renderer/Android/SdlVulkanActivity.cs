@@ -35,15 +35,25 @@ public abstract class SdlVulkanActivity : SDLActivity
     protected virtual RGBAColor32 BackgroundColor => new(0x1a, 0x1a, 0x2e, 0xff);
 
     /// <summary>
+    /// Whether to create the window fullscreen (immersive, system bars hidden). Default true on
+    /// Android: SDL draws edge-to-edge and ignores <c>decorFitsSystemWindows</c>, so with the bars
+    /// visible the status/nav bars overlap the surface — cropping the top of the scene and covering
+    /// bottom chrome. A consumer that wants the bars visible can override this to false and apply its
+    /// own safe-area insets.
+    /// </summary>
+    protected virtual bool Fullscreen => true;
+
+    /// <summary>
     /// Runs on SDL's native thread. Mirrors the desktop entry point: create the window + Vulkan
     /// surface, build the context + renderer, let the consumer wire callbacks, then pump the loop.
     /// </summary>
     protected override void Main()
     {
         var (dw, dh) = DesignSize;
-        // Non-fullscreen so the Android status bar/clock stay visible during development. (The
-        // fullscreen option remains on SdlVulkanWindow.Create for later.)
-        using var window = SdlVulkanWindow.Create(WindowTitle, dw, dh);
+        // Fullscreen (immersive) by default: the system bars would otherwise draw over the edge-to-edge
+        // SDL surface, cropping the top of the scene and covering bottom chrome. Override Fullscreen to
+        // keep the bars visible (then apply safe-area insets).
+        using var window = SdlVulkanWindow.Create(WindowTitle, dw, dh, fullscreen: Fullscreen);
 
         var (ctx, renderer) = CreateRendererWhenSurfaceReady(window);
         try
