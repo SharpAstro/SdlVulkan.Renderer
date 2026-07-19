@@ -71,6 +71,10 @@ jobs:
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
+    - name: Install Android workload
+      # The package multi-targets net10.0-android (SdlVulkanActivity host); restore resolves all TFMs,
+      # so it needs the android workload. ubuntu runners already ship the Android SDK + JDK.
+      run: dotnet workload install android
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
@@ -119,6 +123,10 @@ jobs:
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
+    - name: Install Android workload
+      # The package multi-targets net10.0-android (SdlVulkanActivity host); restore resolves all TFMs,
+      # so it needs the android workload. ubuntu runners already ship the Android SDK + JDK.
+      run: dotnet workload install android
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
@@ -154,6 +162,9 @@ jobs:
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
+    - name: Install Android workload
+      # WebViewSmoke references the renderer, whose restore resolves the net10.0-android TFM.
+      run: dotnet workload install android
     - name: WebView messaging self-test (headless via Xvfb)
       run: >-
         xvfb-run -a -s "-screen 0 1280x800x24"
