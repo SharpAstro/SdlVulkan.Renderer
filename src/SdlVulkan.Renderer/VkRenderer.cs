@@ -319,6 +319,23 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// Rebuild the swapchain against a NEW presentation surface. Android destroys the native surface
+    /// when the app is backgrounded and hands back a fresh one on foreground, so the old swapchain and
+    /// surface are dead on return. <paramref name="recreateSurface"/> must create the replacement (the
+    /// window destroys the old handle and returns the new one); it runs AFTER the old swapchain is torn
+    /// down and BEFORE the new one binds. Bounded-drain, no vkDeviceWaitIdle (see
+    /// <see cref="VulkanContext.PrepareForSurfaceLoss"/>).
+    /// </summary>
+    public void RecreateForNewSurface(Func<VkSurfaceKHR> recreateSurface, uint width, uint height)
+    {
+        _width = width;
+        _height = height;
+        Surface.PrepareForSurfaceLoss();
+        Surface.AdoptSurface(recreateSurface(), width, height);
+        UpdateProjection();
+    }
+
+    /// <summary>
     /// Resize the offscreen render target (offscreen contexts only) and update the projection to
     /// match. Unlike <see cref="Resize"/> this rebuilds the single VkImage target, not a swapchain,
     /// and leaves the glyph atlases intact — for multi-page offscreen raster/export where pages

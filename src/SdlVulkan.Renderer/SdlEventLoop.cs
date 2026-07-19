@@ -168,6 +168,21 @@ public sealed class SdlEventLoop
     public void Stop() => _running = false;
 
     /// <summary>
+    /// Optional diagnostic sink. Android apps have no console (Console.Error is not routed to logcat),
+    /// so the host can point this at <c>Android.Util.Log</c> to see loop-internal lifecycle traces
+    /// (surface loss / rebuild). Null (default) = no diagnostics, so it costs nothing when unset.
+    /// Static so it can be set before any loop exists.
+    /// </summary>
+    public static Action<string>? DiagnosticLog;
+
+    // DebugLog calls are kept when DEBUG OR ANDROID is defined (multiple [Conditional] attributes are
+    // OR-ed). ANDROID is defined for the net10.0-android TFM, so the traces survive the Release device
+    // build — where they're actually needed — yet compile out of desktop Release entirely (the whole
+    // call, args included). Routed through DiagnosticLog so there's still no cost when no sink is set.
+    [Conditional("DEBUG"), Conditional("ANDROID")]
+    private static void DebugLog(string message) => DiagnosticLog?.Invoke(message);
+
+    /// <summary>
     /// Runs the event loop until <see cref="Stop"/> is called or the cancellation token is triggered.
     /// Blocks the calling thread.
     /// </summary>
@@ -245,6 +260,43 @@ public sealed class SdlEventLoop
     private bool RenderView(SdlWindowView v)
     {
         var renderer = v.Renderer;
+
+        // Android app lifecycle: on the first frame after returning to the foreground, rebuild the
+        // swapchain against a fresh surface (the native surface was destroyed while backgrounded).
+        if (v.NeedsSurfaceRebuild)
+        {
+            v.Window.GetSizeInPixels(out var fw, out var fh);
+            if (fw <= 0 || fh <= 0)
+            {
+                // Android delivers the new surface a beat after the foreground event — settle and retry.
+                DebugLog($"[resume] surface not sized yet ({fw}x{fh}); retry");
+                v.NeedsRedraw = true;
+                v.NextRenderAttemptTick = Environment.TickCount64 + FenceRetryBackoffMs;
+                return false;
+            }
+            try
+            {
+                renderer.RecreateForNewSurface(
+                    () => { v.Window.RecreateSurface(); return v.Window.Surface; }, (uint)fw, (uint)fh);
+                DebugLog($"[resume] swapchain rebuilt at {fw}x{fh}");
+                v.OnResize?.Invoke((uint)fw, (uint)fh);
+                v.NeedsSurfaceRebuild = false;
+                v.Paused = false;
+                v.NeedsRedraw = true; // paint the restored frame now that the swapchain is live
+            }
+            catch (VkException ex)
+            {
+                // Surface not ready to build a swapchain yet (still settling) — retry next tick.
+                DebugLog($"[resume] rebuild threw ({ex.Message}); retry");
+                v.NeedsRedraw = true;
+                v.NextRenderAttemptTick = Environment.TickCount64 + FenceRetryBackoffMs;
+            }
+            return false;
+        }
+
+        // Backgrounded: the native surface is gone. Skip all rendering until DidEnterForeground.
+        if (v.Paused)
+            return false;
 
         // A sacrificial recovery task owns this window's renderer while in flight (see the
         // stuck-fence escalation in the catch below). Poll it here — the render thread itself never
@@ -509,12 +561,53 @@ public sealed class SdlEventLoop
 
             case EventType.WindowRestored:
             case EventType.WindowExposed:
-                // Un-minimize / re-expose: re-arm a repaint. Covers the case where the window was
-                // idle (NeedsRedraw already false) when it got minimized, so the render pass's
-                // "keep NeedsRedraw armed" has nothing to resume from.
+                // Un-minimize / re-expose: re-arm a repaint. Covers the case where the window was idle
+                // (NeedsRedraw already false) when it got minimized, so the render pass's "keep
+                // NeedsRedraw armed" has nothing to resume from.
                 if (TryView(evt.Window.WindowID, out var ve))
+                {
+                    // On Android this is the return-to-foreground signal (SDL delivers Minimized/Restored
+                    // window events, not the app-lifecycle ones): the native surface was destroyed while
+                    // backgrounded, so rebuild the swapchain against a fresh one before the next frame.
+                    // Desktop restore doesn't lose the surface, so it just re-arms a repaint (no churn).
+#if ANDROID
+                    DebugLog($"[resume] window event ({(EventType)evt.Type}) -> rebuild flagged");
+                    ve.NeedsSurfaceRebuild = true;
+#endif
                     ve.NeedsRedraw = true;
+                }
                 break;
+
+#if ANDROID
+            case EventType.WindowHidden:
+            case EventType.WindowMinimized:
+                // Android background: the native surface is torn down. Stop presenting to it (a present
+                // on the dead surface fails with "No such device") until we're restored and have rebuilt.
+                DebugLog($"[resume] window event ({(EventType)evt.Type}) -> paused");
+                if (TryView(evt.Window.WindowID, out var vh))
+                    vh.Paused = true;
+                break;
+
+            // App-lifecycle events (app-level, not per-window): belt-and-suspenders alongside the
+            // window Minimized/Restored events above — SDL delivers window events on the tested device,
+            // but other devices/SDL versions may deliver these instead.
+            case EventType.WillEnterBackground:
+            case EventType.DidEnterBackground:
+                DebugLog($"[resume] background ({(EventType)evt.Type})");
+                foreach (var bg in _viewList)
+                    bg.Paused = true;
+                break;
+
+            case EventType.WillEnterForeground:
+            case EventType.DidEnterForeground:
+                DebugLog($"[resume] foreground ({(EventType)evt.Type}) -> rebuild flagged");
+                foreach (var fg in _viewList)
+                {
+                    fg.NeedsSurfaceRebuild = true;
+                    fg.NeedsRedraw = true;
+                }
+                break;
+#endif
 
             case EventType.KeyDown:
                 if (TryView(evt.Key.WindowID, out var vk))

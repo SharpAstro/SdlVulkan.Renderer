@@ -89,6 +89,13 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
 
     // --- per-window loop state (managed by SdlEventLoop) ---
     internal bool NeedsRedraw = true;
+
+    // Android app lifecycle (see SdlEventLoop.Dispatch/RenderView): the native surface is destroyed
+    // when the app is backgrounded and handed back fresh on foreground. Paused skips all rendering
+    // while backgrounded (never present to a dead surface); NeedsSurfaceRebuild makes the first frame
+    // after returning rebuild the swapchain against the new surface, then resume.
+    internal bool Paused;
+    internal bool NeedsSurfaceRebuild;
     internal float MouseX, MouseY;
     internal ulong LastMouseRedrawCounter;
     internal readonly Dictionary<long, (float X, float Y)> ActiveFingers = new();

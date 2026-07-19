@@ -136,7 +136,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private readonly float*[] _vertexMapped = new float*[MaxFramesInFlight];
     private int _vertexOffset; // in floats
 
-    private readonly VkSurfaceKHR _surface;
+    // Not readonly: Android destroys the native surface on background and hands back a fresh one on
+    // foreground, so the swapchain is rebuilt against a new surface via AdoptSurface.
+    private VkSurfaceKHR _surface;
     private bool _disposed;
 
     private VulkanContext(VulkanDevice device, VkSurfaceKHR surface, uint vertexBufferSize, bool ownsDevice)
@@ -213,6 +215,31 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // UI thread on an unbounded vkDeviceWaitIdle.
         TryDrainDevice(DrainTimeoutNs, "swapchain recreate");
         CleanupSwapchain();
+        CreateSwapchain(width, height);
+    }
+
+    /// <summary>
+    /// Android surface loss (app backgrounded): drain in-flight frames (bounded, like
+    /// <see cref="RecreateSwapchain"/> — never an unbounded vkDeviceWaitIdle on the UI thread) and
+    /// destroy the swapchain so the old surface is no longer referenced by it. Pair with
+    /// <see cref="AdoptSurface"/> once the window has created a fresh surface. Split from AdoptSurface
+    /// so the caller can recreate the window's surface in between: the old surface must outlive its
+    /// swapchain (destroyed here) yet be gone before the new swapchain binds.
+    /// </summary>
+    public void PrepareForSurfaceLoss()
+    {
+        TryDrainDevice(DrainTimeoutNs, "surface loss");
+        CleanupSwapchain();
+    }
+
+    /// <summary>
+    /// Adopt a freshly-created presentation surface (created and owned by the window) and rebuild the
+    /// swapchain against it. The previous surface was destroyed by the window, not here — so this does
+    /// not touch the old handle.
+    /// </summary>
+    public void AdoptSurface(VkSurfaceKHR newSurface, uint width, uint height)
+    {
+        _surface = newSurface;
         CreateSwapchain(width, height);
     }
 
