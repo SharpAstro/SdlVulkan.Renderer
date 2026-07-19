@@ -129,8 +129,11 @@ jobs:
       run: dotnet workload install android
     - name: Restore dependencies
       run: dotnet restore
-    - name: Build
-      run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+    - name: Build test project
+      # Only the test project (net10.0) — NOT the whole solution: building the net10.0-android TFM needs
+      # the Android SDK, which the ubuntu-24.04-arm runner doesn't ship (ubuntu-latest x64 does). The
+      # tests are net10.0 offscreen Vulkan, so the android TFM is irrelevant here (the build job packs it).
+      run: dotnet build src/SdlVulkan.Renderer.Tests -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
     - name: Test
       run: dotnet test src/SdlVulkan.Renderer.Tests -c $BUILD_CONF --no-build --logger "console;verbosity=detailed"
 
