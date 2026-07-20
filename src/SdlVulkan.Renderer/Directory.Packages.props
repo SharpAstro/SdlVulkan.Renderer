@@ -8,7 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageVersion Include="DIR.Lib" Version="6.11.*" />
+    <PackageVersion Include="DIR.Lib" Version="6.13.*" />
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.300" />
     <!-- SDL3-CS.Android has no 3.5.0 preview, so the android TFM pins a coherent managed+native
          pair; desktop stays on the 3.5.0 preview. NB: SDL3-CS.Android 3.4.12.x ships a MISMATCHED
