@@ -44,7 +44,10 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     public VkSdfFontAtlas(VulkanContext ctx, ManagedFontRasterizer rasterizer,
         SdfGlyphDiskCache? diskCache = null,
         int initialWidth = SdfFontAtlas.DefaultInitialAtlasDim,
-        int initialHeight = SdfFontAtlas.DefaultInitialAtlasDim)
+        int initialHeight = SdfFontAtlas.DefaultInitialAtlasDim,
+        float rasterSize = SdfFontAtlas.SdfRasterSize,
+        int maxPages = SdfFontAtlas.MaxPages,
+        bool refuseWhenSaturated = false)
     {
         _ctx = ctx;
         // MUST run before constructing the core: its ctor synchronously allocates page 0, which
@@ -55,7 +58,10 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
             framesInFlight: VulkanContext.MaxFramesInFlight,
             backend: this,
             initialPageDim: initialWidth,
-            diskCache: diskCache);
+            diskCache: diskCache,
+            rasterSize: rasterSize,
+            maxPages: maxPages,
+            refuseWhenSaturated: refuseWhenSaturated);
         // initialHeight intentionally unused — pages are square, exactly as before the split.
         _ = initialHeight;
     }
@@ -90,9 +96,13 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     public void PreRasterizeBatchByGid(IReadOnlyList<(string Font, uint Gid, string? Type1Name)> keys)
         => _core.PreRasterizeBatchByGid(keys);
 
-    // Static forwarders so existing VkSdfFontAtlas.GetGlyphScale(...) call sites need zero edits.
-    public static float GetGlyphScale(float requestedFontSize) => SdfFontAtlas.GetGlyphScale(requestedFontSize);
-    public static float ScreenPxHalfBand(float fontSize) => SdfFontAtlas.ScreenPxHalfBand(fontSize);
+    /// <summary>Raster size (px) this atlas bakes at — 64 for the default tier, larger for a big-text tier.</summary>
+    public float RasterSize => _core.RasterSize;
+    // Instance now (were static): the quad scale and the AA half-band both depend on THIS atlas's
+    // raster size, which differs per tier — so callers invoke them on the specific atlas a glyph
+    // came from, not on the type.
+    public float GetGlyphScale(float requestedFontSize) => _core.GetGlyphScale(requestedFontSize);
+    public float ScreenPxHalfBand(float fontSize) => _core.ScreenPxHalfBand(fontSize);
 
     // ---- GPU-side page surface ------------------------------------------------------------------
 
