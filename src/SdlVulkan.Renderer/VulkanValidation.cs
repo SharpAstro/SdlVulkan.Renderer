@@ -22,7 +22,11 @@ namespace SdlVulkan.Renderer;
 ///
 /// Gating (never on in a shipping build — the layer carries real CPU cost and is not shipped):
 /// <list type="bullet">
-/// <item>Layer + messenger + logging: DEBUG build, or <c>SDLVK_VALIDATION=1</c> in any build.</item>
+/// <item>Layer + messenger + logging: DEBUG build <b>and</b> <c>SDLVK_VALIDATION=1</c> — opt-in even
+/// in Debug. The layer validates EVERY <c>vkCmd*</c> call, so with it always-on a Debug session ran
+/// several times slower than Release for no diagnostic benefit when nobody was reading the reports;
+/// a plain Debug run is now fast by default and validation is a deliberate act (the tianwen
+/// <c>run-gui</c> skill sets the variable when a GPU bug is actually being chased).</item>
 /// <item>Synchronization validation (extra cost): additionally requires <c>SDLVK_SYNC_VALIDATION=1</c>.</item>
 /// </list>
 /// Everything degrades to a no-op when the layer is not installed on the host.
@@ -49,8 +53,9 @@ internal static unsafe class VulkanValidation
     private const bool CompiledDebug = false;
 #endif
 
-    /// <summary>Layer + messenger + logging on: a DEBUG build, or <c>SDLVK_VALIDATION=1</c> anywhere.</summary>
-    public static bool Enabled { get; } = CompiledDebug || IsEnvSet("SDLVK_VALIDATION");
+    /// <summary>Layer + messenger + logging on: a DEBUG build <b>and</b> <c>SDLVK_VALIDATION=1</c>.
+    /// Opt-in even in Debug (see the class doc) — a Release/AOT build can never enable it.</summary>
+    public static bool Enabled { get; } = CompiledDebug && IsEnvSet("SDLVK_VALIDATION");
 
     /// <summary>Synchronization validation additionally enabled (opt-in via <c>SDLVK_SYNC_VALIDATION=1</c>).
     /// Only meaningful when <see cref="Enabled"/>.</summary>

@@ -58,7 +58,7 @@ env:
   #       opt-in SYNCHRONIZATION validation switch (the GPU memory-hazard checker behind the wedge
   #       class) and a validation_report inspector/MCP tool. Gated: DEBUG or SDLVK_VALIDATION=1
   #       (+ SDLVK_SYNC_VALIDATION=1 for sync); zero cost + no layer in a normal Release build.
-  VERSION_PREFIX: 6.25.${{ github.run_number }}
+  VERSION_PREFIX: 6.26.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
