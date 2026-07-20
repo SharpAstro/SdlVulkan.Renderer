@@ -457,6 +457,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // allocation. Render-thread only, like all draw APIs.
     private readonly List<float> _rectScratch = new();
 
+    // Scratch vertex accumulator for batched polylines (DrawPolyline / DrawPolylineDashed) — reused,
+    // render-thread only, like _rectScratch.
+    private readonly List<float> _polyScratch = new();
+
     public override void FillRectangles(ReadOnlySpan<(RectInt Rect, DIR.Lib.RGBAColor32 Color)> rectangles)
     {
         if (_pipelines is null || rectangles.IsEmpty) return;
@@ -1561,6 +1565,78 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         ];
 
         DrawTriangles(vertices, color);
+    }
+
+    /// <summary>
+    /// Batched polyline: expands every segment to a rotated quad and records the whole run as ONE
+    /// FlatPipeline draw (single WriteVertices + bind + push + draw), instead of the base class's
+    /// one-<see cref="DrawLine"/>-per-segment loop (N draws). Geometry is identical to calling
+    /// <see cref="DrawLine"/> per consecutive pair; no join handling (matches the base contract).
+    /// </summary>
+    public override void DrawPolyline(ReadOnlySpan<(float X, float Y)> points, DIR.Lib.RGBAColor32 color, int thickness = 1)
+    {
+        if (_pipelines is null || points.Length < 2) return;
+
+        var hw = Math.Max(thickness, 1) * 0.5f;
+        _polyScratch.Clear();
+        for (var i = 1; i < points.Length; i++)
+            AppendSegmentQuad(_polyScratch, points[i - 1].X, points[i - 1].Y, points[i].X, points[i].Y, hw);
+
+        if (_polyScratch.Count >= 6)
+            DrawTriangles(CollectionsMarshal.AsSpan(_polyScratch), color);
+    }
+
+    /// <summary>
+    /// Batched dashed polyline: every visible dash across every segment becomes one rotated quad, and
+    /// the whole run records as ONE FlatPipeline draw. Dash pattern resets at each vertex (no phase
+    /// continuity), matching the base <c>DrawLineDashed</c> semantics. Degrades to
+    /// <see cref="DrawPolyline"/> when either length is non-positive.
+    /// </summary>
+    public override void DrawPolylineDashed(ReadOnlySpan<(float X, float Y)> points, DIR.Lib.RGBAColor32 color,
+        float dashLength, float gapLength, int thickness = 1)
+    {
+        if (_pipelines is null || points.Length < 2) return;
+        if (dashLength <= 0f || gapLength <= 0f) { DrawPolyline(points, color, thickness); return; }
+
+        var hw = Math.Max(thickness, 1) * 0.5f;
+        var period = dashLength + gapLength;
+        _polyScratch.Clear();
+        for (var i = 1; i < points.Length; i++)
+        {
+            float x0 = points[i - 1].X, y0 = points[i - 1].Y;
+            var dx = points[i].X - x0;
+            var dy = points[i].Y - y0;
+            var len = MathF.Sqrt(dx * dx + dy * dy);
+            if (len <= 0f) continue;
+            var ux = dx / len;
+            var uy = dy / len;
+            for (var t = 0f; t < len; t += period)
+            {
+                var dashEnd = MathF.Min(t + dashLength, len);
+                AppendSegmentQuad(_polyScratch, x0 + ux * t, y0 + uy * t, x0 + ux * dashEnd, y0 + uy * dashEnd, hw);
+            }
+        }
+
+        if (_polyScratch.Count >= 6)
+            DrawTriangles(CollectionsMarshal.AsSpan(_polyScratch), color);
+    }
+
+    // Appends one segment's rotated quad (2 triangles, 6 position-only vertices) to the accumulator.
+    // Same perpendicular-normal quad math as DrawLine; degenerate (zero-length) segments are skipped.
+    private static void AppendSegmentQuad(List<float> dst, float x0, float y0, float x1, float y1, float hw)
+    {
+        var dx = x1 - x0;
+        var dy = y1 - y0;
+        var len = MathF.Sqrt(dx * dx + dy * dy);
+        if (len < 0.001f) return;
+
+        var nx = -dy / len * hw;
+        var ny = dx / len * hw;
+        var ax = x0 + nx; var ay = y0 + ny;
+        var bx = x0 - nx; var by = y0 - ny;
+        var cx = x1 - nx; var cy = y1 - ny;
+        var ex = x1 + nx; var ey = y1 + ny;
+        dst.AddRange([ax, ay, bx, by, cx, cy, ax, ay, cx, cy, ex, ey]);
     }
 
     public override void DrawRectangle(in RectInt rect, DIR.Lib.RGBAColor32 strokeColor, int strokeWidth)

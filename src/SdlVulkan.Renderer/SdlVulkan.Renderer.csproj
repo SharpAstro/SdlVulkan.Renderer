@@ -11,7 +11,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsAotCompatible>true</IsAotCompatible>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <VersionPrefix>6.26.0</VersionPrefix>
+    <VersionPrefix>6.27.0</VersionPrefix>
     <AssemblyVersion>6.11.0.0</AssemblyVersion>
     <PackageID>SdlVulkan.Renderer</PackageID>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
