@@ -44,7 +44,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="SDL3-CS" />
+    <!-- SDL3-CS publishes preview versions only, so NuGet's stable-package-with-prerelease-dependency
+         warning (NU5104) fires on every pack; suppressed for this reference alone. -->
+    <PackageReference Include="SDL3-CS" NoWarn="NU5104" />
     <PackageReference Include="Vortice.Vulkan" />
   </ItemGroup>
 

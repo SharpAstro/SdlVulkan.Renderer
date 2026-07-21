@@ -10,7 +10,7 @@ namespace SdlVulkan.Renderer;
 /// stderr: <c>[rdiag] &lt;category&gt; &lt;detail&gt;</c>.
 /// <para>
 /// Categories use a dotted prefix (e.g. <c>sdf.grow</c>, <c>sdf.evict</c>, <c>sdf.full</c>,
-/// <c>vk.submit</c>) so the output is easy to grep/filter. Keep <paramref name="detail"/> as
+/// <c>vk.submit</c>) so the output is easy to grep/filter. Keep each method's <c>detail</c> argument as
 /// space-separated <c>key=value</c> pairs for the same reason.
 /// </para>
 /// </summary>
