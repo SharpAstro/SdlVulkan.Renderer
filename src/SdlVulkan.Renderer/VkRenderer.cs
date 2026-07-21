@@ -1153,7 +1153,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <summary>
     /// Adds an SDF glyph to the current batch at the exact ink top-left position (no draw call
     /// issued). All glyphs in the batch share the fontSize passed to <see cref="BeginSdfGlyphBatch"/>.
-    /// <para>Semantics match <see cref="AddBatchedGlyph"/>: <paramref name="inkX"/>/<paramref name="inkY"/>
+    /// <para>Semantics match <see cref="AddBatchedGlyph(string, float, System.Text.Rune, int, float, float, float, GlyphMapHint, float)"/>: <paramref name="inkX"/>/<paramref name="inkY"/>
     /// is where the top-left of the glyph's *ink* bounding box should land. The SDF texture itself
     /// extends <c>spread*scale</c> pixels beyond the ink on every side; this function offsets the
     /// quad so the ink inside lines up with the caller's coordinates.</para>
@@ -1261,7 +1261,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <summary>
     /// Adds an SDF glyph to the current batch at the text baseline position (no draw call issued).
     /// Computes ink-top from baseline using the glyph's bearing, then delegates to
-    /// <see cref="AddBatchedSdfGlyph"/>.
+    /// <see cref="AddBatchedSdfGlyph(string, System.Text.Rune, int, float, float, float, GlyphMapHint, float)"/>.
     /// <para>
     /// <paramref name="xIsInkLeft"/>: when false (default), <paramref name="baselineX"/> is
     /// treated as glyph origin (pen position) and the glyph's LSB is added to reach ink-left.
