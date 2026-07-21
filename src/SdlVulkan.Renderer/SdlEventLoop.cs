@@ -146,6 +146,8 @@ public sealed class SdlEventLoop
     public Func<float, float, bool>? OnMouseMove { get => Primary.OnMouseMove; set => Primary.OnMouseMove = value; }
     public Action<byte>? OnMouseUp { get => Primary.OnMouseUp; set => Primary.OnMouseUp = value; }
     public Func<float, float, float, bool>? OnMouseWheel { get => Primary.OnMouseWheel; set => Primary.OnMouseWheel = value; }
+    /// <summary>Primary window's unified pointer callback. See <see cref="SdlWindowView.OnPointerInput"/>.</summary>
+    public Func<InputEvent, bool>? OnPointerInput { get => Primary.OnPointerInput; set => Primary.OnPointerInput = value; }
     public Action<float, float, float, PinchSource>? OnPinch { get => Primary.OnPinch; set => Primary.OnPinch = value; }
     public Action? OnPinchEnd { get => Primary.OnPinchEnd; set => Primary.OnPinchEnd = value; }
     public Action<string>? OnTextInput { get => Primary.OnTextInput; set => Primary.OnTextInput = value; }
@@ -645,14 +647,22 @@ public sealed class SdlEventLoop
             case EventType.MouseButtonDown:
                 if (TryView(evt.Button.WindowID, out var vmd))
                 {
-                    vmd.OnMouseDown?.Invoke(evt.Button.Button, evt.Button.X, evt.Button.Y, evt.Button.Clicks, GetModState().ToInputModifier);
+                    vmd.DispatchPointerDown(evt.Button.Button, evt.Button.X, evt.Button.Y, evt.Button.Clicks, GetModState().ToInputModifier);
                     vmd.NeedsRedraw = true;
                 }
                 break;
 
             case EventType.MouseButtonUp:
                 if (TryView(evt.Button.WindowID, out var vmu))
-                    vmu.OnMouseUp?.Invoke(evt.Button.Button);
+                {
+                    // SDL's button-up event DOES carry the release coordinates — only the legacy
+                    // Action<byte> signature drops them. The synthesized event keeps them, so
+                    // position-dependent release logic (tap-vs-drag slop, tap-to-select) just works.
+                    if (vmu.DispatchPointerUp(evt.Button.Button, evt.Button.X, evt.Button.Y))
+                    {
+                        vmu.NeedsRedraw = true;
+                    }
+                }
                 break;
 
             case EventType.MouseMotion:
@@ -664,7 +674,7 @@ public sealed class SdlEventLoop
                     {
                         vmm.MouseX = newMx;
                         vmm.MouseY = newMy;
-                        if (vmm.OnMouseMove?.Invoke(vmm.MouseX, vmm.MouseY) == true)
+                        if (vmm.DispatchPointerMove(vmm.MouseX, vmm.MouseY))
                         {
                             // Throttle mouse-driven redraws to ~30fps (per window).
                             var now = GetPerformanceCounter();
@@ -681,7 +691,7 @@ public sealed class SdlEventLoop
             case EventType.MouseWheel:
                 if (TryView(evt.Wheel.WindowID, out var vw))
                 {
-                    vw.OnMouseWheel?.Invoke(evt.Wheel.Y, vw.MouseX, vw.MouseY);
+                    vw.DispatchPointerWheel(evt.Wheel.Y, vw.MouseX, vw.MouseY, GetModState().ToInputModifier);
                     vw.NeedsRedraw = true;
                 }
                 break;

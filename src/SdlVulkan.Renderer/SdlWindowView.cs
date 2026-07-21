@@ -38,6 +38,80 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// <summary>Called on mouse wheel. Parameters: scrollY, mouseX, mouseY. Return true if consumed.</summary>
     public Func<float, float, float, bool>? OnMouseWheel { get; set; }
 
+    /// <summary>
+    /// Unified pointer callback: the loop synthesizes a DIR.Lib <see cref="InputEvent"/> for mouse
+    /// down / move / up / wheel and delivers it here, so consumers wire ONE handler instead of four
+    /// lambdas. The synthesis owns the per-event details every hand-wired consumer had to rediscover:
+    /// <see cref="InputEvent.MouseUp"/> carries the REAL release coordinates (SDL's button-up event has
+    /// X/Y; the legacy <see cref="OnMouseUp"/> signature drops them, which is how a consumer once
+    /// shipped <c>MouseUp(0, 0)</c> and broke every position-dependent release check), the SDL button
+    /// byte is mapped to <see cref="MouseButton"/>, and down/wheel carry the live keyboard modifiers.
+    /// Return true if consumed (drives the same redraw semantics as the per-event callbacks). Fires
+    /// independently of the legacy per-event callbacks — a consumer wires one style or the other.
+    /// Keyboard/text stay on <see cref="OnKeyDown"/>/<see cref="OnTextInput"/> (they carry app-level
+    /// chords like quit/fullscreen and have no synthesis pitfalls).
+    /// </summary>
+    public Func<InputEvent, bool>? OnPointerInput { get; set; }
+
+    // ---------------------------------------------------------------------------------------------
+    // Pointer dispatch: the ONE place a pointer event (real SDL or inspector-synthesized) fans out
+    // to the legacy per-event callback AND the unified OnPointerInput. SdlEventLoop's pump and
+    // DebugInspector both route through these, so synthesized input can never drift from real input.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>Fan a button press out to <see cref="OnMouseDown"/> + <see cref="OnPointerInput"/>. Returns consumed.</summary>
+    internal bool DispatchPointerDown(byte sdlButton, float x, float y, byte clicks, InputModifier mods)
+    {
+        var consumed = OnMouseDown?.Invoke(sdlButton, x, y, clicks, mods) == true;
+        if (OnPointerInput?.Invoke(new InputEvent.MouseDown(x, y, ToMouseButton(sdlButton), mods, clicks)) == true)
+        {
+            consumed = true;
+        }
+        return consumed;
+    }
+
+    /// <summary>Fan a pointer move out to <see cref="OnMouseMove"/> + <see cref="OnPointerInput"/>. Returns consumed.</summary>
+    internal bool DispatchPointerMove(float x, float y)
+    {
+        var consumed = OnMouseMove?.Invoke(x, y) == true;
+        if (OnPointerInput?.Invoke(new InputEvent.MouseMove(x, y)) == true)
+        {
+            consumed = true;
+        }
+        return consumed;
+    }
+
+    /// <summary>
+    /// Fan a button release out to <see cref="OnMouseUp"/> + <see cref="OnPointerInput"/>. The release
+    /// coordinates are real (SDL's button-up event carries X/Y; only the legacy <see cref="OnMouseUp"/>
+    /// signature drops them). Returns consumed (legacy <see cref="OnMouseUp"/> is void, so only
+    /// <see cref="OnPointerInput"/> can consume).
+    /// </summary>
+    internal bool DispatchPointerUp(byte sdlButton, float x, float y)
+    {
+        OnMouseUp?.Invoke(sdlButton);
+        return OnPointerInput?.Invoke(new InputEvent.MouseUp(x, y, ToMouseButton(sdlButton))) == true;
+    }
+
+    /// <summary>Fan a wheel tick out to <see cref="OnMouseWheel"/> + <see cref="OnPointerInput"/>. Returns consumed.</summary>
+    internal bool DispatchPointerWheel(float scrollY, float x, float y, InputModifier mods)
+    {
+        var consumed = OnMouseWheel?.Invoke(scrollY, x, y) == true;
+        if (OnPointerInput?.Invoke(new InputEvent.Scroll(scrollY, x, y, mods)) == true)
+        {
+            consumed = true;
+        }
+        return consumed;
+    }
+
+    /// <summary>SDL button byte (1=left, 2=middle, 3=right) to the DIR.Lib button enum; side buttons map to Left.</summary>
+    internal static MouseButton ToMouseButton(byte sdlButton) => sdlButton switch
+    {
+        2 => MouseButton.Middle,
+        3 => MouseButton.Right,
+        _ => MouseButton.Left,
+    };
+
     /// <summary>Called on trackpad/touch pinch. Parameters: scale (absolute since start), anchorX, anchorY
     /// (pixels), source. For a touchscreen (<see cref="PinchSource.Touchscreen"/>) the anchor is the real
     /// finger midpoint; for a touchpad (<see cref="PinchSource.Touchpad"/>) it is the mouse cursor, since

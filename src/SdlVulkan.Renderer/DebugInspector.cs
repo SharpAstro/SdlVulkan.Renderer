@@ -111,11 +111,15 @@ public sealed class DebugInspector : IDisposable
     // (null when idle). Mirrors _activeBatch: the button stays held across frames so the app ticks THROUGH
     // the hold (a long-press timer advances) instead of the render thread blocking for the duration.
     private HoldState? _activeHold;
-    private sealed class HoldState(TaskCompletionSource<string> result, long startTick, long durationMs)
+    private sealed class HoldState(TaskCompletionSource<string> result, long startTick, long durationMs, float x, float y)
     {
         public readonly TaskCompletionSource<string> Result = result;
         public readonly long StartTick = startTick;
         public readonly long DurationMs = durationMs;
+        // Press position, so the deferred release can carry real coordinates (position-dependent
+        // release logic -- tap-vs-drag slop, tap-to-select -- reads them off the MouseUp event).
+        public readonly float X = x;
+        public readonly float Y = y;
     }
 
     private readonly DebugInspectorOptions _opts;
@@ -530,9 +534,9 @@ public sealed class DebugInspector : IDisposable
     /// </summary>
     private void StartHold(HoldCommand h)
     {
-        _view.OnMouseMove?.Invoke(h.X, h.Y); // update cached pointer position (consumers may read it on MouseUp)
-        _view.OnMouseDown?.Invoke(1, h.X, h.Y, 1, h.Mods);
-        _activeHold = new HoldState(h.Result, Environment.TickCount64, h.DurationMs);
+        _view.DispatchPointerMove(h.X, h.Y); // update cached pointer position (consumers may read it on MouseUp)
+        _view.DispatchPointerDown(1, h.X, h.Y, 1, h.Mods);
+        _activeHold = new HoldState(h.Result, Environment.TickCount64, h.DurationMs, h.X, h.Y);
         _view.RequestRedraw();
     }
 
@@ -549,7 +553,7 @@ public sealed class DebugInspector : IDisposable
             _view.RequestRedraw(); // still holding -- keep the loop pumping so the app ticks through the hold
             return;
         }
-        _view.OnMouseUp?.Invoke(1);
+        _view.DispatchPointerUp(1, h.X, h.Y);
         _view.RequestRedraw();
         h.Result.TrySetResult(ToJson(w => w.WriteStringValue($"held {h.DurationMs}ms")));
         _activeHold = null;
@@ -791,9 +795,9 @@ public sealed class DebugInspector : IDisposable
 
     private string ExecuteClickAt(float x, float y, InputModifier mods = InputModifier.None)
     {
-        _view.OnMouseMove?.Invoke(x, y); // update cached pointer position (some consumers read it on MouseUp)
-        _view.OnMouseDown?.Invoke(1, x, y, 1, mods);
-        _view.OnMouseUp?.Invoke(1);
+        _view.DispatchPointerMove(x, y); // update cached pointer position (some consumers read it on MouseUp)
+        _view.DispatchPointerDown(1, x, y, 1, mods);
+        _view.DispatchPointerUp(1, x, y);
         _view.RequestRedraw();
         return "\"ok\"";
     }
@@ -827,8 +831,8 @@ public sealed class DebugInspector : IDisposable
 
     private string ExecuteScroll(float x, float y, float scrollY)
     {
-        _view.OnMouseMove?.Invoke(x, y); // position the pointer first -- wheel handlers zoom around it
-        _view.OnMouseWheel?.Invoke(scrollY, x, y);
+        _view.DispatchPointerMove(x, y); // position the pointer first -- wheel handlers zoom around it
+        _view.DispatchPointerWheel(scrollY, x, y, InputModifier.None);
         _view.RequestRedraw();
         return "\"ok\"";
     }
@@ -838,14 +842,14 @@ public sealed class DebugInspector : IDisposable
         // Same path as a real drag: move-to-start, button-down, interpolated motion, button-up.
         // Pan handlers that integrate per motion event (e.g. the sky map's unproject-based pan)
         // need the intermediate steps -- a single jump start->end would under-pan or misbehave.
-        _view.OnMouseMove?.Invoke(x1, y1);
-        _view.OnMouseDown?.Invoke(1, x1, y1, 1, mods);
+        _view.DispatchPointerMove(x1, y1);
+        _view.DispatchPointerDown(1, x1, y1, 1, mods);
         for (var i = 1; i <= steps; i++)
         {
             var t = (float)i / steps;
-            _view.OnMouseMove?.Invoke(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
+            _view.DispatchPointerMove(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
         }
-        _view.OnMouseUp?.Invoke(1);
+        _view.DispatchPointerUp(1, x2, y2);
         _view.RequestRedraw();
         return "\"ok\"";
     }
