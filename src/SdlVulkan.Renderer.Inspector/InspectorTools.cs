@@ -161,6 +161,20 @@ public sealed class InspectorTools
         return result.GetString() ?? "ok";
     }
 
+    [McpServerTool, Description("Synthesize a left-button PRESS-AND-HOLD at (x, y): mouse-down, hold the button for `seconds` while the app KEEPS RENDERING (so hold-duration logic -- long-press, hold-to-repeat, charge-up -- ticks through the hold), then mouse-up. The hold runs on the app's per-frame command pump; it does NOT block the render thread. Returns after the hold completes. Use this instead of drag for a stationary timed press; use drag for movement.")]
+    public static async Task<string> press_hold(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("X pixel.")] float x,
+        [Description("Y pixel.")] float y,
+        [Description("Hold duration in seconds (0.05-300). Note: very long holds may hit the MCP client's own tool-call timeout.")] double seconds = 1.0,
+        [Description("InputModifier held during the press (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None.")] string mods = "None",
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "pressHold", new { x, y, mods, seconds }, ct);
+        return result.GetString() ?? "ok";
+    }
+
     [McpServerTool, Description("Minimize (iconify) the instance's window. While minimized the app idles its render loop (~0% CPU/GPU, no frames), so this is the way to verify idle-on-minimize behaviour unattended. Other inspector commands (ping, describe, restore) still work while minimized; only screenshot is unavailable until restored (there is no swapchain to read). Use restore to bring it back.")]
     public static async Task<string> minimize(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
