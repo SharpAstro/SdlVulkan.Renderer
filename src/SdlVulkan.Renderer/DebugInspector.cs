@@ -879,8 +879,11 @@ public sealed class DebugInspector : IDisposable
 
     private string ExecutePostSignal(string name, JsonElement args)
     {
-        if (_opts.SignalFactories is null || !_opts.SignalFactories.TryGetValue(name, out var post))
-            throw new ArgumentException($"unknown signal: {name}");
+        if (_opts.SignalFactories is null)
+            throw new ArgumentException("this instance exposes no signals (SignalFactories is null)");
+        if (!_opts.SignalFactories.TryGetValue(name, out var post))
+            // List the valid names so a misspelled/unknown signal is self-correcting instead of a dead end.
+            throw new ArgumentException($"unknown signal: '{name}'. Known signals: {string.Join(", ", _opts.SignalFactories.Keys)}");
         post(args);
         _view.RequestRedraw();
         return "\"queued\"";
