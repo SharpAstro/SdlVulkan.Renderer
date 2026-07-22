@@ -1,10 +1,7 @@
-using System;
 using DIR.Lib;
 using SdlVulkan.Renderer;
 using Shouldly;
-using Vortice.Vulkan;
 using Xunit;
-using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer.Tests;
 
@@ -17,9 +14,12 @@ namespace SdlVulkan.Renderer.Tests;
 /// quadrant — the 180° flip. The lit-quadrant SWAP between the two frames is the core assertion, so it
 /// holds regardless of the readback's row order.
 ///
-/// Skips when Vulkan isn't loadable on the host (no ICD / libvulkan), like the sibling GPU tests.
+/// Uses the shared <see cref="OffscreenGpuFixture"/> (one Vulkan instance/device for the whole GPU test
+/// collection) — never stands up its own instance, which would reintroduce the lavapipe teardown flake.
+/// Skips when the host has no Vulkan ICD.
 /// </summary>
-public sealed unsafe class DeviceTransformRenderTests
+[Collection("OffscreenGpu")]
+public sealed class DeviceTransformRenderTests(OffscreenGpuFixture gpu)
 {
     private const uint Size = 64;
     private const int Half = (int)Size / 2;
@@ -27,42 +27,38 @@ public sealed unsafe class DeviceTransformRenderTests
     [Fact]
     public void Half_MovesTopLeftFillToBottomRight()
     {
-        if (!TryCreateOffscreenContext(out var instance, out var ctx))
+        if (gpu.Context is not { } ctx)
         {
             Assert.Skip("Vulkan runtime not available on this host");
             return;
         }
 
-        try
-        {
-            using var renderer = new VkRenderer(ctx!, Size, Size);
+        ctx.ResizeOffscreen(Size, Size);
 
-            // Identity transform (default): content top-left quadrant → device top-left quadrant.
-            renderer.DeviceTransform.IsIdentity.ShouldBeTrue("renderer starts at the identity transform");
-            var identity = RenderTopLeftQuadrantFill(renderer, ctx!);
+        // The offscreen context is owned by the shared collection fixture; never dispose it here.
+        using var renderer = new VkRenderer(ctx, Size, Size);
 
-            // 180° about the surface centre: the same top-left quadrant now lands bottom-right.
-            renderer.DeviceTransform = DeviceTransform.CenteredRotation(Rotation90.Half, Size, Size);
-            var flipped = RenderTopLeftQuadrantFill(renderer, ctx!);
+        // Identity transform (default): content top-left quadrant → device top-left quadrant.
+        renderer.DeviceTransform.IsIdentity.ShouldBeTrue("renderer starts at the identity transform");
+        var identity = RenderTopLeftQuadrantFill(renderer, ctx);
 
-            // Sample the middle of the top-left and bottom-right quadrants.
-            var tlId = RedAt(identity, Half / 2, Half / 2);
-            var brId = RedAt(identity, Half + Half / 2, Half + Half / 2);
-            var tlFlip = RedAt(flipped, Half / 2, Half / 2);
-            var brFlip = RedAt(flipped, Half + Half / 2, Half + Half / 2);
+        // 180° about the surface centre: the same top-left quadrant now lands bottom-right.
+        renderer.DeviceTransform = DeviceTransform.CenteredRotation(Rotation90.Half, Size, Size);
+        var flipped = RenderTopLeftQuadrantFill(renderer, ctx);
 
-            // Identity: top-left lit, bottom-right dark.
-            tlId.ShouldBeGreaterThan((byte)200, "identity: top-left quadrant should be filled");
-            brId.ShouldBeLessThan((byte)60, "identity: bottom-right quadrant should be clear");
+        // Sample the middle of the top-left and bottom-right quadrants.
+        var tlId = RedAt(identity, Half / 2, Half / 2);
+        var brId = RedAt(identity, Half + Half / 2, Half + Half / 2);
+        var tlFlip = RedAt(flipped, Half / 2, Half / 2);
+        var brFlip = RedAt(flipped, Half + Half / 2, Half + Half / 2);
 
-            // Half: the fill has moved to the bottom-right; top-left is now clear.
-            tlFlip.ShouldBeLessThan((byte)60, "half: top-left quadrant should be clear after the 180° flip");
-            brFlip.ShouldBeGreaterThan((byte)200, "half: bottom-right quadrant should be filled after the 180° flip");
-        }
-        finally
-        {
-            ctx?.Dispose();
-        }
+        // Identity: top-left lit, bottom-right dark.
+        tlId.ShouldBeGreaterThan((byte)200, "identity: top-left quadrant should be filled");
+        brId.ShouldBeLessThan((byte)60, "identity: bottom-right quadrant should be clear");
+
+        // Half: the fill has moved to the bottom-right; top-left is now clear.
+        tlFlip.ShouldBeLessThan((byte)60, "half: top-left quadrant should be clear after the 180° flip");
+        brFlip.ShouldBeGreaterThan((byte)200, "half: bottom-right quadrant should be filled after the 180° flip");
     }
 
     /// <summary>
@@ -86,25 +82,4 @@ public sealed unsafe class DeviceTransformRenderTests
     }
 
     private static byte RedAt(byte[] rgba, int x, int y) => rgba[(y * (int)Size + x) * 4];
-
-    /// <summary>
-    /// Best-effort offscreen Vulkan setup; returns false when the host has no Vulkan ICD.
-    /// </summary>
-    private static bool TryCreateOffscreenContext(out VkInstance instance, out VulkanContext? ctx)
-    {
-        instance = default;
-        ctx = null;
-        try
-        {
-            vkInitialize().CheckResult();
-            VkInstanceCreateInfo ici = new();
-            vkCreateInstance(&ici, null, out instance).CheckResult();
-            ctx = VulkanContext.CreateOffscreen(instance, Size, Size);
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
 }
