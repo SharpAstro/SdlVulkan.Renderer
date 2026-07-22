@@ -58,7 +58,13 @@ env:
   #       opt-in SYNCHRONIZATION validation switch (the GPU memory-hazard checker behind the wedge
   #       class) and a validation_report inspector/MCP tool. Gated: DEBUG or SDLVK_VALIDATION=1
   #       (+ SDLVK_SYNC_VALIDATION=1 for sync); zero cost + no layer in a normal Release build.
-  VERSION_PREFIX: 6.29.${{ github.run_number }}
+  # 6.30: DeviceTransform GPU compose (needs DIR.Lib 6.17). VkRenderer.DeviceTransform folds the
+  #       content->device affine into the projection in UpdateProjection — the compose stays a
+  #       Matrix3x2 (2D affine, no wasted lanes) and only widens to the mat4 push-constant at upload,
+  #       so the whole frame (text included) rotates/scales as one. Identity transform is byte-
+  #       identical to the previous screen-space projection. Verified via offscreen render + readback
+  #       (180° flip moves a top-left fill to the bottom-right).
+  VERSION_PREFIX: 6.30.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
