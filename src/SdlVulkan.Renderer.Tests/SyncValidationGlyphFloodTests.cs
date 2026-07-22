@@ -34,6 +34,12 @@ namespace SdlVulkan.Renderer.Tests;
 /// the ICD-absent skip in the other offscreen tests — so a runner without the layer is inconclusive,
 /// not a false pass. The CI test lane installs vulkan-validationlayers so it actually runs there.
 /// </summary>
+// Joins the OffscreenGpu collection so it runs SERIALLY with the shared-context render tests rather
+// than in parallel. It deliberately keeps its OWN validated instance (it is testing a validated
+// instance + debug-utils messenger, which the shared fixture's plain instance cannot provide), but
+// running it concurrently with the shared-context tests would put a second instance/device lifecycle
+// on the driver at the same time -- exactly the concurrent churn the collection exists to prevent.
+[Collection("OffscreenGpu")]
 public sealed class SyncValidationGlyphFloodTests
 {
     private const uint Width = 256;

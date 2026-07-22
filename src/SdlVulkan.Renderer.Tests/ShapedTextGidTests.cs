@@ -5,9 +5,7 @@ using System.Text;
 using DIR.Lib;
 using SdlVulkan.Renderer;
 using Shouldly;
-using Vortice.Vulkan;
 using Xunit;
-using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer.Tests;
 
@@ -22,7 +20,8 @@ namespace SdlVulkan.Renderer.Tests;
 /// Uses only the DIR.Lib core shaping seam (ITextShaper / ShapedGlyph / GlyphIdentity), so there is
 /// no dependency on the DIR.Lib.Shaping satellite. Skips when no Vulkan ICD is available on the host.
 /// </summary>
-public sealed unsafe class ShapedTextGidTests
+[Collection("OffscreenGpu")]
+public sealed class ShapedTextGidTests(OffscreenGpuFixture gpu)
 {
     private const uint Width = 128;
     private const uint Height = 64;
@@ -54,15 +53,17 @@ public sealed unsafe class ShapedTextGidTests
     [Fact]
     public void MeasureText_UsesShapedGlyphAdvance_NotSourceCodepoint()
     {
-        if (!TryCreateOffscreenContext(out _, out var ctx))
+        if (gpu.Context is not { } ctx)
         {
             Assert.Skip("Vulkan runtime not available on this host");
             return;
         }
 
-        try
+        ctx.ResizeOffscreen(Width, Height);
+
+        // The offscreen context is owned by the shared collection fixture; never dispose it here.
         {
-            using var renderer = new VkRenderer(ctx!, Width, Height);
+            using var renderer = new VkRenderer(ctx, Width, Height);
             const float size = 40f;
 
             // 'M' is a wide glyph, 'i' a narrow one. Resolve M's glyph id through the same font file
@@ -94,29 +95,26 @@ public sealed unsafe class ShapedTextGidTests
             wShaped.ShouldBeGreaterThan(wI); // definitely not measured as the source 'i'
 
             renderer.EndOffscreenFrame();
-            ctx!.WaitOffscreenFrameComplete();
-        }
-        finally
-        {
-            ctx?.Dispose();
+            ctx.WaitOffscreenFrameComplete();
         }
     }
 
     [Fact]
     public void DrawText_RendersShapedGlyphId_NotSourceCodepoint()
     {
-        if (!TryCreateOffscreenContext(out _, out var ctx))
+        if (gpu.Context is not { } ctx)
         {
             Assert.Skip("Vulkan runtime not available on this host");
             return;
         }
 
-        // One context, reused across all three renders. Creating and destroying several offscreen
-        // Vulkan instances back-to-back segfaults some software ICDs (Mesa lavapipe on arm), so
-        // mirror the single-context lifecycle of MtsdfTextRenderTests and just cycle frames instead.
-        try
+        ctx.ResizeOffscreen(Width, Height);
+
+        // The offscreen context is owned by the shared collection fixture; never dispose it here.
+        // All three renders below cycle frames on that one context (creating and destroying
+        // offscreen instances back-to-back segfaults software ICDs like Mesa lavapipe).
         {
-            using var renderer = new VkRenderer(ctx!, Width, Height);
+            using var renderer = new VkRenderer(ctx, Width, Height);
             const float size = 44f;
             var gidM = new ManagedFontRasterizer()
                 .ResolveGlyphIdentity(FontPath, new Rune('M'), -1, GlyphMapHint.Auto).Gid;
@@ -131,22 +129,18 @@ public sealed unsafe class ShapedTextGidTests
 
             // 'i' shaped so every glyph id becomes 'M' → the draw path must render the wide M.
             renderer.TextShaper = new FixedGidShaper(gidM);
-            var litShapedI = DrawAndCountLit(renderer, ctx!, "i", size);
+            var litShapedI = DrawAndCountLit(renderer, ctx, "i", size);
 
             // Baselines with the default per-rune shaper.
             renderer.TextShaper = AdvanceShaper.Default;
-            var litM = DrawAndCountLit(renderer, ctx!, "M", size);
-            var litI = DrawAndCountLit(renderer, ctx!, "i", size);
+            var litM = DrawAndCountLit(renderer, ctx, "M", size);
+            var litI = DrawAndCountLit(renderer, ctx, "i", size);
 
             litI.ShouldBeGreaterThan(0, "the source glyph 'i' must actually render (else the test proves nothing)");
             // GID-direct: shaping 'i' to the 'M' id renders the wide M — far more coverage than 'i'...
             litShapedI.ShouldBeGreaterThan(litI * 2);
             // ...and matches drawing 'M' directly (same glyph, same centred position).
             litShapedI.ShouldBeInRange((int)(litM * 0.85f), (int)(litM * 1.15f));
-        }
-        finally
-        {
-            ctx?.Dispose();
         }
     }
 
@@ -170,25 +164,4 @@ public sealed unsafe class ShapedTextGidTests
         return lit;
     }
 
-    /// <summary>
-    /// Best-effort offscreen Vulkan setup; returns false when the host has no Vulkan ICD. Mirrors
-    /// the helper in <see cref="MtsdfTextRenderTests"/> / <see cref="BlendOpRegressionTests"/>.
-    /// </summary>
-    private static bool TryCreateOffscreenContext(out VkInstance instance, out VulkanContext? ctx)
-    {
-        instance = default;
-        ctx = null;
-        try
-        {
-            vkInitialize().CheckResult();
-            VkInstanceCreateInfo ici = new();
-            vkCreateInstance(&ici, null, out instance).CheckResult();
-            ctx = VulkanContext.CreateOffscreen(instance, Width, Height);
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
 }

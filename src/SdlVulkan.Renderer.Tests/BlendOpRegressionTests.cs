@@ -4,7 +4,6 @@ using SdlVulkan.Renderer;
 using Shouldly;
 using Vortice.Vulkan;
 using Xunit;
-using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer.Tests;
 
@@ -28,7 +27,8 @@ namespace SdlVulkan.Renderer.Tests;
 ///
 /// Tests skip when Vulkan isn't loadable on the host (no ICD, no libvulkan, etc.).
 /// </summary>
-public sealed unsafe class BlendOpRegressionTests
+[Collection("OffscreenGpu")]
+public sealed unsafe class BlendOpRegressionTests(OffscreenGpuFixture gpu)
 {
     private const uint Width = 64;
     private const uint Height = 64;
@@ -44,15 +44,17 @@ public sealed unsafe class BlendOpRegressionTests
     [Fact]
     public void VkPipelineSet_AllPipelinesCreatedSuccessfully()
     {
-        if (!TryCreateOffscreenContext(out var instance, out var ctx))
+        if (gpu.Context is not { } ctx)
         {
             Assert.Skip("Vulkan runtime not available on this host");
             return;
         }
 
-        try
+        ctx.ResizeOffscreen(Width, Height);
+
+        // The offscreen context is owned by the shared collection fixture; never dispose it here.
         {
-            using var pipelines = VkPipelineSet.Create(ctx!);
+            using var pipelines = VkPipelineSet.Create(ctx);
             pipelines.FlatPipeline.Handle.ShouldNotBe((ulong)0, "FlatPipeline must be created");
             pipelines.TexturedPipeline.Handle.ShouldNotBe((ulong)0, "TexturedPipeline must be created");
             pipelines.EllipsePipeline.Handle.ShouldNotBe((ulong)0, "EllipsePipeline must be created");
@@ -65,10 +67,6 @@ public sealed unsafe class BlendOpRegressionTests
             pipelines.FlatScreenPipeline.Handle.ShouldNotBe((ulong)0, "FlatScreenPipeline (One/OneMinusSrcColor, Add) must be created");
             pipelines.FlatDarkenPipeline.Handle.ShouldNotBe((ulong)0, "FlatDarkenPipeline (One/One, Min) must be created");
             pipelines.FlatLightenPipeline.Handle.ShouldNotBe((ulong)0, "FlatLightenPipeline (One/One, Max) must be created");
-        }
-        finally
-        {
-            ctx?.Dispose();
         }
     }
 
@@ -92,16 +90,18 @@ public sealed unsafe class BlendOpRegressionTests
         int dstR, int dstG, int dstB,
         int expR, int expG, int expB)
     {
-        if (!TryCreateOffscreenContext(out var instance, out var ctx))
+        if (gpu.Context is not { } ctx)
         {
             Assert.Skip("Vulkan runtime not available on this host");
             return;
         }
 
-        try
+        ctx.ResizeOffscreen(Width, Height);
+
+        // The offscreen context is owned by the shared collection fixture; never dispose it here.
         {
-            using var pipelines = VkPipelineSet.Create(ctx!);
-            using var renderer = new VkRenderer(ctx!, Width, Height);
+            using var pipelines = VkPipelineSet.Create(ctx);
+            using var renderer = new VkRenderer(ctx, Width, Height);
 
             var blendPipeline = pipelineName switch
             {
@@ -115,7 +115,7 @@ public sealed unsafe class BlendOpRegressionTests
             var dst = new RGBAColor32((byte)dstR, (byte)dstG, (byte)dstB, 255);
             renderer.BeginOffscreenFrame(dst).ShouldBeTrue();
             var cmd = renderer.CurrentCommandBuffer;
-            var api = ctx!.DeviceApi;
+            var api = ctx.DeviceApi;
 
             // Fullscreen-quad vertices in [0, W] x [0, H] pixel space. FlatPipeline reads
             // vec2 positions; the proj matrix below maps [0..W, 0..H] to NDC [-1..1].
@@ -181,31 +181,6 @@ public sealed unsafe class BlendOpRegressionTests
                 $"[{pipelineName}] B byte: expected ~{expB}, got {actB}");
             actA.ShouldBe((byte)255, $"[{pipelineName}] alpha should round-trip to 255 (One*1 + OneMinusSrcAlpha*1 = 1)");
         }
-        finally
-        {
-            ctx?.Dispose();
-        }
     }
 
-    /// <summary>
-    /// Best-effort offscreen Vulkan setup. Returns false when the host has no Vulkan ICD
-    /// (e.g. CI runner without mesa-vulkan-drivers, macOS without MoltenVK).
-    /// </summary>
-    private static bool TryCreateOffscreenContext(out VkInstance instance, out VulkanContext? ctx)
-    {
-        instance = default;
-        ctx = null;
-        try
-        {
-            vkInitialize().CheckResult();
-            VkInstanceCreateInfo ici = new();
-            vkCreateInstance(&ici, null, out instance).CheckResult();
-            ctx = VulkanContext.CreateOffscreen(instance, Width, Height);
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
 }
