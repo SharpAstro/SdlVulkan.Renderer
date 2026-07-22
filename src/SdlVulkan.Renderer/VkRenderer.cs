@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.InteropServices;
 using DIR.Lib;
 using Vortice.Vulkan;
@@ -29,6 +30,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     // Push constant data: mat4 (16 floats) + vec4 color (4 floats) + float innerRadius (1 float) = 84 bytes
     private readonly float[] _pushConstants = new float[21];
+
+    // Content→device transform folded into the projection (see UpdateProjection). Identity by default,
+    // so the projection is byte-identical to the plain screen-space ortho until a consumer sets it.
+    private DeviceTransform _deviceTransform = DeviceTransform.Identity;
 
     // Glyph batching state — accumulates contiguous glyph quads for a single draw call.
     // A batch is either bitmap (TexturedPipeline + RGBA atlas) or SDF (SdfPipeline +
@@ -538,6 +543,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <summary>
     /// Draws triangles with a custom origin and scale (e.g. for tiled/paged rendering).
     /// Builds a combined projection so vertices stay in their original coordinate space.
+    /// NOTE: this builds its own screen-space projection inline and does NOT honour
+    /// <see cref="DeviceTransform"/> (tiled/paged capture runs at the surface's native orientation).
     /// </summary>
     public void DrawTrianglesTransformed(ReadOnlySpan<float> vertices, DIR.Lib.RGBAColor32 color,
         float originX, float originY, float scale)
@@ -1941,18 +1948,49 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _pipelines = null;
     }
 
+    /// <inheritdoc/>
+    public override DeviceTransform DeviceTransform
+    {
+        get => _deviceTransform;
+        set
+        {
+            _deviceTransform = value;
+            UpdateProjection(); // refold into the cached push-constant matrix
+        }
+    }
+
     private void UpdateProjection()
     {
         var w = (float)_width;
         var h = (float)_height;
 
+        // Device→NDC orthographic as a 2D affine (Vulkan Y already points down, so no Y-flip here):
+        //   (x, y) → (2x/w − 1, 2y/h − 1).
+        var proj = new Matrix3x2(
+            2f / w, 0f,
+            0f, 2f / h,
+            -1f, -1f);
+
+        // Fold the content→device transform in front of it: content → device → NDC. This is the only
+        // matrix MULTIPLY, and it stays 2×3 — the transform is a pure affine (no perspective, no z), so a
+        // 4×4 multiply would waste half its lanes. System.Numerics keeps it to the six real coefficients.
+        // Identity _deviceTransform leaves `mvp` == `proj`, so the upload below is byte-identical to the
+        // plain screen-space projection this method used to write.
+        var mvp = _deviceTransform.ToMatrix3x2() * proj;
+
+        // Widen the composed affine into the mat4 the vertex shaders multiply (gl_Position = proj *
+        // vec4(pos, 0, 1)). The push-constant block is a column-major GLSL mat4: the linear part lands in
+        // slots 0/1/4/5, the translation in the last column (12/13), and the z/w rows are constants (all
+        // geometry is z = 0, so m22 = −1 leaves clip.z = 0 exactly as before).
         Array.Clear(_pushConstants, 0, 16);
-        _pushConstants[0] = 2f / w;      // m00
-        _pushConstants[5] = 2f / h;      // m11 (Vulkan Y already points down)
-        _pushConstants[10] = -1f;        // m22
-        _pushConstants[12] = -1f;        // m30
-        _pushConstants[13] = -1f;        // m31
-        _pushConstants[15] = 1f;         // m33
+        _pushConstants[0] = mvp.M11;
+        _pushConstants[1] = mvp.M12;
+        _pushConstants[4] = mvp.M21;
+        _pushConstants[5] = mvp.M22;
+        _pushConstants[10] = -1f;         // z passthrough (clip.z = 0 for z = 0 geometry)
+        _pushConstants[12] = mvp.M31;     // translation x
+        _pushConstants[13] = mvp.M32;     // translation y
+        _pushConstants[15] = 1f;
     }
 
     private void SetColor(DIR.Lib.RGBAColor32 color)
