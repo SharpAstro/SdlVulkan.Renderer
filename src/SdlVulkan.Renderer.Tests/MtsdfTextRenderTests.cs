@@ -4,9 +4,7 @@ using System.Text;
 using DIR.Lib;
 using SdlVulkan.Renderer;
 using Shouldly;
-using Vortice.Vulkan;
 using Xunit;
-using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer.Tests;
 
@@ -22,7 +20,8 @@ namespace SdlVulkan.Renderer.Tests;
 ///
 /// Skips when no Vulkan ICD is available on the host.
 /// </summary>
-public sealed unsafe class MtsdfTextRenderTests
+[Collection("OffscreenGpu")]
+public sealed class MtsdfTextRenderTests(OffscreenGpuFixture gpu)
 {
     private const uint Width = 128;
     private const uint Height = 64;
@@ -33,15 +32,17 @@ public sealed unsafe class MtsdfTextRenderTests
     [Fact]
     public void MtsdfText_RendersCoherentCoverage()
     {
-        if (!TryCreateOffscreenContext(out _, out var ctx))
+        if (gpu.Context is not { } ctx)
         {
             Assert.Skip("Vulkan runtime not available on this host");
             return;
         }
 
-        try
+        ctx.ResizeOffscreen(Width, Height);
+
+        // The offscreen context is owned by the shared collection fixture; never dispose it here.
         {
-            using var renderer = new VkRenderer(ctx!, Width, Height);
+            using var renderer = new VkRenderer(ctx, Width, Height);
             var font = FontPath;
             const float size = 36f;
 
@@ -64,7 +65,7 @@ public sealed unsafe class MtsdfTextRenderTests
             renderer.EndGlyphBatch();
 
             renderer.EndOffscreenFrame();
-            ctx!.WaitOffscreenFrameComplete();
+            ctx.WaitOffscreenFrameComplete();
 
             var rgba = ctx.ReadbackOffscreenRgba();
             rgba.Length.ShouldBe((int)(Width * Height * 4));
@@ -94,32 +95,6 @@ public sealed unsafe class MtsdfTextRenderTests
             solid.ShouldBeGreaterThan(20, "expected a solid glyph interior (near-white texels)");
             // ...and antialiased edges (the smoothstep band produces intermediate coverage).
             partial.ShouldBeGreaterThan(20, "expected antialiased edge texels (partial coverage)");
-        }
-        finally
-        {
-            ctx?.Dispose();
-        }
-    }
-
-    /// <summary>
-    /// Best-effort offscreen Vulkan setup. Returns false when the host has no Vulkan ICD.
-    /// Mirrors the helper in <see cref="BlendOpRegressionTests"/>.
-    /// </summary>
-    private static bool TryCreateOffscreenContext(out VkInstance instance, out VulkanContext? ctx)
-    {
-        instance = default;
-        ctx = null;
-        try
-        {
-            vkInitialize().CheckResult();
-            VkInstanceCreateInfo ici = new();
-            vkCreateInstance(&ici, null, out instance).CheckResult();
-            ctx = VulkanContext.CreateOffscreen(instance, Width, Height);
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
         }
     }
 }
