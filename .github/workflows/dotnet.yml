@@ -64,7 +64,7 @@ env:
   #       so the whole frame (text included) rotates/scales as one. Identity transform is byte-
   #       identical to the previous screen-space projection. Verified via offscreen render + readback
   #       (180° flip moves a top-left fill to the bottom-right).
-  VERSION_PREFIX: 6.30.${{ github.run_number }}
+  VERSION_PREFIX: 6.31.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
