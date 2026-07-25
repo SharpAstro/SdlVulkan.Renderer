@@ -10,6 +10,12 @@
          also helps AOT/startup). Run when a shader source changes, then commit the .spv.
          Never shipped in the package. -->
     <IsPackable>false</IsPackable>
+    <!-- Pins its shaderc version inline, so it must opt out of Central Package Management. There is no
+         Directory.Packages.props in tools/, but MSBuild keeps walking up: when this repo is checked out
+         inside another one (e.g. as a submodule) the search reaches the CONSUMING repo's CPM, which has
+         no reason to pin Vortice.ShaderCompiler — restore then failed with NU1008 and the shaders could
+         not be re-baked from a nested checkout at all. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
   </PropertyGroup>
 
   <ItemGroup>
