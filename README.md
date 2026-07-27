@@ -89,6 +89,31 @@ At runtime you need the Vulkan loader plus an ICD (driver). Nothing else: no X11
 
 SDL3-CS remains a package reference because the on-screen path uses it. Its P/Invokes are lazy — `libSDL3.so` / `SDL3.dll` is never loaded if `SdlVulkanWindow` is not instantiated, so the offscreen path has no SDL runtime dependency.
 
+### Android
+
+Android is a first-class target: the package multi-targets `net10.0;net10.0-android`, the host is
+`Android/SdlVulkanActivity.cs` (`abstract class SdlVulkanActivity : Org.Libsdl.App.SDLActivity`), and
+the Java bridge plus per-ABI `libSDL3.so` come from `SDL3-CS.Android`. Two properties of that native
+package are load-bearing for **every** Android consumer, so they live here rather than in any one app:
+
+**Pin `SDL3-CS.Android` to 3.4.10.5 — not 3.4.12.x.** 3.4.12.x ships a mismatched pair: a Java bridge
+built for 3.4.10 alongside a 3.4.12 native. SDL's runtime C/Java version check rejects the
+combination and the app dies at launch (`expected 3.4.10, got 3.4.12`). 3.4.10.5 is internally
+consistent. Both halves are pinned in `src/SdlVulkan.Renderer/Directory.Packages.props`,
+TFM-conditional so desktop stays on the 3.5.0 preview.
+
+**The shipped `libSDL3.so` is not 16 KB page-aligned.** Building any Android consumer raises
+`warning XA0141` for the `android-arm64` and `android-x64` natives. Android is moving to 16 KB memory
+pages, and a native library laid out for 4 KB pages will not load on a device configured that way —
+so this is a deadline, not cosmetic noise. It is also **not fixable downstream**: the `.so` arrives
+prebuilt inside `SDL3-CS.Android`, so clearing it needs an upstream rebuild with the 16 KB
+max-page-size link flag. See [Android's page-sizes guide](https://developer.android.com/guide/practices/page-sizes).
+
+Consumers also need `dotnet workload install android`; the workload supplies the .NET bits but not
+the Android SDK, which `dotnet build -t:InstallAndroidDependencies -p:AcceptAndroidSDKLicenses=true`
+will provision. The tooling needs a JDK it can parse — **JDK 17**; JDK 25 is too new and throws inside
+`GetJdkRevision`.
+
 ### CI setup
 
 On a fresh Ubuntu runner (GitHub Actions `ubuntu-latest`, Azure Pipelines, GitLab):
@@ -196,8 +221,10 @@ Backend notes:
 
 - [DIR.Lib](https://www.nuget.org/packages/DIR.Lib) — Rendering primitives + FreeType glyph rasterization
 - [SDL3-CS](https://www.nuget.org/packages/SDL3-CS) — SDL3 bindings
+- [SDL3-CS.Android](https://www.nuget.org/packages/SDL3-CS.Android) — android TFM only: SDL Java bridge + per-ABI `libSDL3.so` (see [Android](#android) for the version pin)
 - [Vortice.Vulkan](https://www.nuget.org/packages/Vortice.Vulkan) — Vulkan bindings
-- [Vortice.ShaderCompiler](https://www.nuget.org/packages/Vortice.ShaderCompiler) — GLSL to SPIR-V
+
+Not a runtime dependency: [Vortice.ShaderCompiler](https://www.nuget.org/packages/Vortice.ShaderCompiler) (GLSL to SPIR-V) is used only by `tools/BakeShaders` at build time. Shaders ship pre-baked as embedded SPIR-V, which keeps the shaderc native — it has no Android RID — out of the package entirely.
 
 ## License
 
@@ -400,3 +427,8 @@ no scRGB, no HDR10 via OpenGL on any platform.
 - **WebGPU .NET bindings** — if they mature, a future browser target becomes possible.
 - **Silk.NET 3.0** — if it ever ships with working Vulkan + a non-GLFW windowing path,
   the comparison may change.
+- **`SDL3-CS.Android` releases** — worth re-testing on each one, because a single bump could clear
+  *both* Android constraints above. The 16 KB page alignment needs an upstream rebuild, and the
+  Java/native mismatch that forces the 3.4.10.5 pin was last seen in early 3.4.12.x; 3.4.12.6 is
+  the current latest and is several patches past it, so it may already be consistent. Verify by
+  launching on a device — the mismatch fails SDL's version check at startup, not at build time.
