@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using Vortice.Vulkan;
 using static Vortice.Vulkan.Vulkan;
 
@@ -20,6 +20,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
     public VkPipeline StrokePipeline { get; }
     public VkPipeline SdfPipeline { get; }
 
+    /// <summary>Rounded-box fill: one SDF quad per rect, so a translucent fill blends exactly once
+    /// and the corners are antialiased. Backs <c>VkRenderer.FillRoundedRectangle</c>.</summary>
+    public VkPipeline RoundRectPipeline { get; }
+
     // Blend mode variants of FlatPipeline
     public VkPipeline FlatMultiplyPipeline { get; }
     public VkPipeline FlatScreenPipeline { get; }
@@ -33,7 +37,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
     // whenever a shader source changes.
 
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
-        VkPipeline sdf,
+        VkPipeline sdf, VkPipeline roundRect,
         VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten)
     {
         _deviceApi = deviceApi;
@@ -43,6 +47,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         PagePipeline = page;
         StrokePipeline = stroke;
         SdfPipeline = sdf;
+        RoundRectPipeline = roundRect;
         FlatMultiplyPipeline = flatMultiply;
         FlatScreenPipeline = flatScreen;
         FlatDarkenPipeline = flatDarken;
@@ -64,6 +69,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
         var strokeVert = LoadEmbeddedModule(deviceApi, "stroke.vert");
         var strokeFrag = LoadEmbeddedModule(deviceApi, "stroke.frag");
         var sdfFrag = LoadEmbeddedModule(deviceApi, "sdf.frag");
+        var roundRectVert = LoadEmbeddedModule(deviceApi, "roundrect.vert");
+        var roundRectFrag = LoadEmbeddedModule(deviceApi, "roundrect.frag");
 
         try
         {
@@ -107,6 +114,18 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var sdf = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, texVert, sdfFrag,
                 &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
 
+            // Rounded-rect pipeline: vec2 pos + vec2 localPx + vec2 halfPx + float radiusPx.
+            // The box parameters ride on vertex attributes rather than push constants so the shared
+            // 84-byte push block stays identical across every pipeline (see roundrect.vert).
+            VkVertexInputBindingDescription roundRectBinding = new(7 * sizeof(float));
+            var roundRectAttrs = stackalloc VkVertexInputAttributeDescription[4];
+            roundRectAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                  // aPos
+            roundRectAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));  // aLocal
+            roundRectAttrs[2] = new(2, VkFormat.R32G32Sfloat, 4 * sizeof(float));  // aHalf
+            roundRectAttrs[3] = new(3, VkFormat.R32Sfloat, 6 * sizeof(float));     // aRadius
+            var roundRect = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, roundRectVert, roundRectFrag,
+                &roundRectBinding, 1, roundRectAttrs, 4, msaaSamples: msaa);
+
             // Blend mode variants of the flat pipeline
             var flatMultiply = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.DstColor, VkBlendFactor.OneMinusSrcAlpha, msaaSamples: msaa);
@@ -117,7 +136,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var flatLighten = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Max, msaa);
 
-            return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf,
+            return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, roundRect,
                 flatMultiply, flatScreen, flatDarken, flatLighten);
         }
         finally
@@ -132,6 +151,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
             deviceApi.vkDestroyShaderModule(strokeVert);
             deviceApi.vkDestroyShaderModule(strokeFrag);
             deviceApi.vkDestroyShaderModule(sdfFrag);
+            deviceApi.vkDestroyShaderModule(roundRectVert);
+            deviceApi.vkDestroyShaderModule(roundRectFrag);
         }
     }
 
@@ -144,6 +165,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(FlatLightenPipeline);
         _deviceApi.vkDestroyPipeline(TexturedPipeline);
         _deviceApi.vkDestroyPipeline(EllipsePipeline);
+        _deviceApi.vkDestroyPipeline(RoundRectPipeline);
         _deviceApi.vkDestroyPipeline(PagePipeline);
         _deviceApi.vkDestroyPipeline(StrokePipeline);
         _deviceApi.vkDestroyPipeline(SdfPipeline);

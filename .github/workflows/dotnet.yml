@@ -1,4 +1,4 @@
-name: CI/CD
+﻿name: CI/CD
 
 on:
   push:
@@ -64,7 +64,17 @@ env:
   #       so the whole frame (text included) rotates/scales as one. Identity transform is byte-
   #       identical to the previous screen-space projection. Verified via offscreen render + readback
   #       (180° flip moves a top-left fill to the bottom-right).
-  VERSION_PREFIX: 6.32.${{ github.run_number }}
+  # 6.33 - VkRenderer.FillRoundedRectangle: a real GPU override of DIR.Lib 6.20's scanline
+  #        fallback. One rounded-box SDF quad per rect instead of one FillRectangle per row, with
+  #        antialiased corners, and single-coverage so a translucent fill blends exactly once.
+  #        New roundrect.vert/.frag + RoundRectPipeline. The box parameters (half extents, radius)
+  #        ride on VERTEX ATTRIBUTES, not push constants, so the shared 84-byte push block stays
+  #        byte-identical across every pipeline -- growing it for one pipeline is the per-stage
+  #        mismatch that ellipse.vert documents as an llvmpipe shader-compiler SEGV. A zero radius
+  #        delegates to FillRectangle, so the square path is untouched.
+  #        Re-pins DIR.Lib 6.19.* -> 6.21.* (FillRoundedRectangle lands in 6.20, Layout.Node.Radius
+  #        in 6.21; pinning straight to 6.21 keeps this a single re-pin).
+  VERSION_PREFIX: 6.33.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

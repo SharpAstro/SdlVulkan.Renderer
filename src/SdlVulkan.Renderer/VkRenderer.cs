@@ -1727,6 +1727,66 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// Rounded-rect fill as a SINGLE distance-field quad, replacing the base class's one-span-per-row
+    /// scanline fallback: one draw instead of one per row, and antialiased corners into the bargain.
+    /// <para>
+    /// A zero (or negative) radius delegates to <see cref="FillRectangle"/>, so the square path is
+    /// untouched -- callers can thread a radius through unconditionally. The radius is clamped to half
+    /// the shorter side, matching the base class, so an over-large value degrades to a stadium or a
+    /// circle rather than inverting the arc.
+    /// </para>
+    /// </summary>
+    public override void FillRoundedRectangle(in RectInt rect, DIR.Lib.RGBAColor32 fillColor, float cornerRadius)
+    {
+        if (_pipelines is null) return;
+
+        var x0 = (float)Math.Min(rect.UpperLeft.X, rect.LowerRight.X);
+        var x1 = (float)Math.Max(rect.UpperLeft.X, rect.LowerRight.X);
+        var y0 = (float)Math.Min(rect.UpperLeft.Y, rect.LowerRight.Y);
+        var y1 = (float)Math.Max(rect.UpperLeft.Y, rect.LowerRight.Y);
+        var halfW = (x1 - x0) * 0.5f;
+        var halfH = (y1 - y0) * 0.5f;
+        if (halfW <= 0f || halfH <= 0f) return;
+
+        var radius = MathF.Min(cornerRadius, MathF.Min(halfW, halfH));
+        if (radius <= 0f)
+        {
+            FillRectangle(rect, fillColor);
+            return;
+        }
+
+        var api = Surface.DeviceApi;
+
+        // Per vertex: screen pos, offset-from-centre (px), half extents (px), radius (px). The last two
+        // are the same at all six vertices -- constant across the quad, so interpolation reproduces them
+        // exactly and the shared push-constant block never has to grow. See roundrect.vert.
+        ReadOnlySpan<float> vertices =
+        [
+            x0, y0, -halfW, -halfH, halfW, halfH, radius,
+            x1, y0,  halfW, -halfH, halfW, halfH, radius,
+            x1, y1,  halfW,  halfH, halfW, halfH, radius,
+            x0, y0, -halfW, -halfH, halfW, halfH, radius,
+            x1, y1,  halfW,  halfH, halfW, halfH, radius,
+            x0, y1, -halfW,  halfH, halfW, halfH, radius
+        ];
+
+        SetColor(fillColor);
+        _pushConstants[20] = 0f; // innerRadius is unused by this shader; keep the shared block well-defined
+        var offset = Surface.WriteVertices(vertices);
+        if (offset == uint.MaxValue) return;
+
+        BindPipeline(_pipelines.RoundRectPipeline);
+        fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
+    }
+
+    /// <summary>
     /// GPU-efficient ellipse outline via the EllipsePipeline ring shader.
     /// </summary>
     public override void DrawEllipse(in RectInt rect, DIR.Lib.RGBAColor32 strokeColor, float strokeWidth)
