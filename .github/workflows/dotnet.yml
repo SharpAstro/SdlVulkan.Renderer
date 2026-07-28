@@ -74,7 +74,7 @@ env:
   #        delegates to FillRectangle, so the square path is untouched.
   #        Re-pins DIR.Lib 6.19.* -> 6.21.* (FillRoundedRectangle lands in 6.20, Layout.Node.Radius
   #        in 6.21; pinning straight to 6.21 keeps this a single re-pin).
-  VERSION_PREFIX: 6.33.${{ github.run_number }}
+  VERSION_PREFIX: 7.0.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

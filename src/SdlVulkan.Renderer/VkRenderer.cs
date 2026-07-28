@@ -33,7 +33,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     // Content→device transform folded into the projection (see UpdateProjection). Identity by default,
     // so the projection is byte-identical to the plain screen-space ortho until a consumer sets it.
-    private DeviceTransform _deviceTransform = DeviceTransform.Identity;
+    private ContentTransform _contentTransform = ContentTransform.Identity;
 
     // Glyph batching state — accumulates contiguous glyph quads for a single draw call.
     // A batch is either bitmap (TexturedPipeline + RGBA atlas) or SDF (SdfPipeline +
@@ -544,7 +544,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// Draws triangles with a custom origin and scale (e.g. for tiled/paged rendering).
     /// Builds a combined projection so vertices stay in their original coordinate space.
     /// NOTE: this builds its own screen-space projection inline and does NOT honour
-    /// <see cref="DeviceTransform"/> (tiled/paged capture runs at the surface's native orientation).
+    /// <see cref="ContentTransform"/> (tiled/paged capture runs at the surface's native orientation).
     /// </summary>
     public void DrawTrianglesTransformed(ReadOnlySpan<float> vertices, DIR.Lib.RGBAColor32 color,
         float originX, float originY, float scale)
@@ -2009,12 +2009,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <inheritdoc/>
-    public override DeviceTransform DeviceTransform
+    public override ContentTransform ContentTransform
     {
-        get => _deviceTransform;
+        get => _contentTransform;
         set
         {
-            _deviceTransform = value;
+            _contentTransform = value;
             UpdateProjection(); // refold into the cached push-constant matrix
         }
     }
@@ -2034,9 +2034,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // Fold the content→device transform in front of it: content → device → NDC. This is the only
         // matrix MULTIPLY, and it stays 2×3 — the transform is a pure affine (no perspective, no z), so a
         // 4×4 multiply would waste half its lanes. System.Numerics keeps it to the six real coefficients.
-        // Identity _deviceTransform leaves `mvp` == `proj`, so the upload below is byte-identical to the
+        // Identity _contentTransform leaves `mvp` == `proj`, so the upload below is byte-identical to the
         // plain screen-space projection this method used to write.
-        var mvp = _deviceTransform.ToMatrix3x2() * proj;
+        var mvp = _contentTransform.ToMatrix3x2() * proj;
 
         // Widen the composed affine into the mat4 the vertex shaders multiply (gl_Position = proj *
         // vec4(pos, 0, 1)). The push-constant block is a column-major GLSL mat4: the linear part lands in

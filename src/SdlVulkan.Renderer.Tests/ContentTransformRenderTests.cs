@@ -6,7 +6,7 @@ using Xunit;
 namespace SdlVulkan.Renderer.Tests;
 
 /// <summary>
-/// End-to-end render verification for <see cref="VkRenderer.DeviceTransform"/>: the transform must be
+/// End-to-end render verification for <see cref="VkRenderer.ContentTransform"/>: the transform must be
 /// folded into the projection so the WHOLE frame moves, not just individual draws. The test fills the
 /// top-left quadrant of a 64×64 offscreen target via the ordinary <see cref="VkRenderer.FillRectangle"/>
 /// path (which draws through the cached projection push-constant), reads the framebuffer back, and
@@ -19,7 +19,7 @@ namespace SdlVulkan.Renderer.Tests;
 /// Skips when the host has no Vulkan ICD.
 /// </summary>
 [Collection("OffscreenGpu")]
-public sealed class DeviceTransformRenderTests(OffscreenGpuFixture gpu)
+public sealed class ContentTransformRenderTests(OffscreenGpuFixture gpu)
 {
     private const uint Size = 64;
     private const int Half = (int)Size / 2;
@@ -39,11 +39,11 @@ public sealed class DeviceTransformRenderTests(OffscreenGpuFixture gpu)
         using var renderer = new VkRenderer(ctx, Size, Size);
 
         // Identity transform (default): content top-left quadrant → device top-left quadrant.
-        renderer.DeviceTransform.IsIdentity.ShouldBeTrue("renderer starts at the identity transform");
+        renderer.ContentTransform.IsIdentity.ShouldBeTrue("renderer starts at the identity transform");
         var identity = RenderTopLeftQuadrantFill(renderer, ctx);
 
         // 180° about the surface centre: the same top-left quadrant now lands bottom-right.
-        renderer.DeviceTransform = DeviceTransform.CenteredRotation(Rotation90.Half, Size, Size);
+        renderer.ContentTransform = ContentTransform.CenteredRotation(Rotation90.Half, Size, Size);
         var flipped = RenderTopLeftQuadrantFill(renderer, ctx);
 
         // Sample the middle of the top-left and bottom-right quadrants.
