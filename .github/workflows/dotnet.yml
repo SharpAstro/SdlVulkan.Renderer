@@ -74,7 +74,21 @@ env:
   #        delegates to FillRectangle, so the square path is untouched.
   #        Re-pins DIR.Lib 6.19.* -> 6.21.* (FillRoundedRectangle lands in 6.20, Layout.Node.Radius
   #        in 6.21; pinning straight to 6.21 keeps this a single re-pin).
-  VERSION_PREFIX: 7.1.${{ github.run_number }}
+  # 7.2 - the inspector REFUSES an unrecognised `mods` string instead of resolving it to None. Behaviour
+  #       change, deliberate: resolving the unknown to None delivered a BARE key or click, and a bare key is
+  #       frequently a different valid binding rather than a no-op -- so a typo ("ctlr") or an unsupported
+  #       modifier ("Cmd") surfaced as the app IGNORING a correct chord rather than as a bad request. The
+  #       worked example is chess, which flips its board on Ctrl+F while bare `f` selects file f. This also
+  #       made ResolveModifier the one resolver in DebugInspector that did not reject what it could not
+  #       understand -- ResolveInputKey has always thrown, listing the valid names -- so this is a
+  #       consistency fix as much as a safety one. A partial match still resolves ("ctrl+cmd" is Ctrl), so a
+  #       chord that CAN be delivered is never blocked; only text with nothing recognisable is refused. The
+  #       four sidecar tools carrying `mods` (click, key, drag, pressHold) all default to "None" and say so,
+  #       so no existing driver changes. Console.Lib 4.7 made the same call for the terminal inspector's
+  #       `key` verb; the two now agree. ResolveModifier/ResolveInputKey are internal (not private) with
+  #       InternalsVisibleTo the test project, since what an injected key MEANS is otherwise only observable
+  #       against a live SDL window -- 20 tests.
+  VERSION_PREFIX: 7.2.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

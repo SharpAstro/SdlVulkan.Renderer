@@ -362,7 +362,7 @@ public sealed class DebugInspector : IDisposable
     // A-Z, D0-D9, Plus/Minus/... We accept the common natural aliases below so
     // "Return"/"Esc"/"ArrowUp"/"1" just work, and an unknown name returns a
     // clear error listing the valid set rather than an opaque parse failure.
-    private static InputKey ResolveInputKey(string raw)
+    internal static InputKey ResolveInputKey(string raw)
     {
         var name = raw.Trim();
         if (name.Length == 0)
@@ -399,7 +399,20 @@ public sealed class DebugInspector : IDisposable
     // "Control" all work (Enum.Parse only accepts the comma-separated [Flags]
     // form, so "CtrlShift" -- which our tool docs advertise -- would otherwise
     // throw). Matches known tokens as substrings, so order/separator/case-free.
-    private static InputModifier ResolveModifier(string? raw)
+    /// <summary>
+    /// Resolves a driver's modifier string. Substring-matched and case-insensitive, so "Ctrl",
+    /// "ctrl+shift" and "CtrlShift" all work.
+    /// </summary>
+    /// <remarks>
+    /// <b>Unrecognised text throws, like <see cref="ResolveInputKey"/> does.</b> It used to resolve to
+    /// <see cref="InputModifier.None"/>, which delivered a BARE key or click — and a bare key is frequently a
+    /// different valid binding rather than a no-op, so the mistake surfaced as the app ignoring a correct
+    /// chord rather than as a bad request. Chess is the worked example: it flips the board on Ctrl+F while
+    /// bare <c>f</c> selects file f, so a dropped modifier silently did something else. Returning None for
+    /// unknown input also made this the one resolver in this file that did not reject what it could not
+    /// understand.
+    /// </remarks>
+    internal static InputModifier ResolveModifier(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return InputModifier.None;
         var s = raw.ToLowerInvariant();
@@ -409,6 +422,16 @@ public sealed class DebugInspector : IDisposable
         if (s.Contains("ctrl") || s.Contains("control")) mod |= InputModifier.Ctrl;
         if (s.Contains("shift")) mod |= InputModifier.Shift;
         if (s.Contains("alt") || s.Contains("option")) mod |= InputModifier.Alt;
+
+        if (mod == InputModifier.None)
+        {
+            throw new ArgumentException(
+                $"unknown modifiers '{raw}'. Accepted: Ctrl (or Control), Shift, Alt (or Option), combined in "
+                + "any spelling — \"Ctrl+Shift\", \"CtrlShift\", \"ctrl-alt\". Omit the field, or pass "
+                + "\"none\"/\"0\", for no modifiers. Refused rather than treated as none, because a dropped "
+                + "modifier delivers a bare key, which is often a different binding rather than a no-op.");
+        }
+
         return mod;
     }
 

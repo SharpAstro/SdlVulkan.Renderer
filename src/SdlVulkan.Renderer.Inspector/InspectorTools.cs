@@ -89,7 +89,7 @@ public sealed class InspectorTools
     public static async Task<string> click(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("X pixel coordinate.")] float x,
         [Description("Y pixel coordinate.")] float y,
-        [Description("InputModifier name held during the click (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None.")] string mods = "None",
+        [Description("InputModifier name held during the click (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None. Unrecognised text (Cmd, Super, a typo) is REFUSED rather than treated as None, because a dropped modifier delivers a bare key or click - often a different binding rather than a no-op.")] string mods = "None",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
@@ -112,7 +112,7 @@ public sealed class InspectorTools
     [McpServerTool, Description("Inject a key press through the SAME path as a real SDL keypress, so it reaches a focused text field / search box (e.g. Enter commits an open search). Key is a DIR.Lib InputKey name (see the key param). Mods is None/Ctrl/Shift/Alt or a combo like CtrlShift / 'Ctrl+Alt'.")]
     public static async Task<string> press_key(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("InputKey name: Enter, Escape, Tab, Space, Backspace, Delete, Up/Down/Left/Right, Home/End, F1-F12, A-Z, D0-D9, Plus/Minus/Period/Comma/etc. Aliases accepted: Return=Enter, Esc=Escape, ArrowUp/Down/Left/Right, Spacebar=Space, 0-9=D0-D9.")] string key,
-        [Description("Modifier(s) held: None, Ctrl, Shift, Alt, or a combo like CtrlShift / 'Ctrl+Alt'. Default None.")] string mods = "None",
+        [Description("Modifier(s) held: None, Ctrl, Shift, Alt, or a combo like CtrlShift / 'Ctrl+Alt'. Default None. Unrecognised text (Cmd, Super, a typo) is REFUSED rather than treated as None, because a dropped modifier delivers a bare key or click - often a different binding rather than a no-op.")] string mods = "None",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
@@ -151,7 +151,7 @@ public sealed class InspectorTools
         [Description("Start Y pixel.")] float y1,
         [Description("End X pixel.")] float x2,
         [Description("End Y pixel.")] float y2,
-        [Description("InputModifier held during the drag (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None.")] string mods = "None",
+        [Description("InputModifier held during the drag (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None. Unrecognised text (Cmd, Super, a typo) is REFUSED rather than treated as None, because a dropped modifier delivers a bare key or click - often a different binding rather than a no-op.")] string mods = "None",
         [Description("Interpolated motion events between start and end (1-64). Default 8.")] int steps = 8,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
@@ -166,7 +166,7 @@ public sealed class InspectorTools
         [Description("X pixel.")] float x,
         [Description("Y pixel.")] float y,
         [Description("Hold duration in seconds (0.05-300). Note: very long holds may hit the MCP client's own tool-call timeout.")] double seconds = 1.0,
-        [Description("InputModifier held during the press (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None.")] string mods = "None",
+        [Description("InputModifier held during the press (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None. Unrecognised text (Cmd, Super, a typo) is REFUSED rather than treated as None, because a dropped modifier delivers a bare key or click - often a different binding rather than a no-op.")] string mods = "None",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
