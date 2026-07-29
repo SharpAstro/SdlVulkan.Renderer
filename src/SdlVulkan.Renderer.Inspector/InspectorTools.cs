@@ -94,7 +94,7 @@ public sealed class InspectorTools
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "click", new { x, y, mods }, ct);
+        var result = await socket.SendAsync(target, "click", Json.Obj(("x", x), ("y", y), ("mods", mods)), ct);
         return result.GetString() ?? "ok";
     }
 
@@ -105,7 +105,7 @@ public sealed class InspectorTools
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "clickLabel", new { label }, ct);
+        var result = await socket.SendAsync(target, "clickLabel", Json.Obj(("label", label)), ct);
         return result.GetString() ?? "ok";
     }
 
@@ -117,7 +117,7 @@ public sealed class InspectorTools
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "key", new { key, mods }, ct);
+        var result = await socket.SendAsync(target, "key", Json.Obj(("key", key), ("mods", mods)), ct);
         return result.GetString() ?? "ok";
     }
 
@@ -128,7 +128,7 @@ public sealed class InspectorTools
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "text", new { s = text }, ct);
+        var result = await socket.SendAsync(target, "text", Json.Obj(("s", text)), ct);
         return result.GetString() ?? "ok";
     }
 
@@ -141,7 +141,7 @@ public sealed class InspectorTools
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "scroll", new { x, y, scrollY }, ct);
+        var result = await socket.SendAsync(target, "scroll", Json.Obj(("x", x), ("y", y), ("scrollY", scrollY)), ct);
         return result.GetString() ?? "ok";
     }
 
@@ -157,7 +157,7 @@ public sealed class InspectorTools
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "drag", new { x1, y1, x2, y2, mods, steps }, ct);
+        var result = await socket.SendAsync(target, "drag", Json.Obj(("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2), ("mods", mods), ("steps", steps)), ct);
         return result.GetString() ?? "ok";
     }
 
@@ -171,7 +171,7 @@ public sealed class InspectorTools
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "pressHold", new { x, y, mods, seconds }, ct);
+        var result = await socket.SendAsync(target, "pressHold", Json.Obj(("x", x), ("y", y), ("mods", mods), ("seconds", seconds)), ct);
         return result.GetString() ?? "ok";
     }
 
@@ -297,7 +297,7 @@ public sealed class InspectorTools
         using var doc = JsonDocument.Parse(stepsJson);
         if (doc.RootElement.ValueKind != JsonValueKind.Array)
             throw new ArgumentException("stepsJson must be a JSON array of {method, params} steps");
-        var result = await socket.SendAsync(target, "batch", new { steps = doc.RootElement }, ct);
+        var result = await socket.SendAsync(target, "batch", Json.Obj(("steps", doc.RootElement)), ct);
         return result.GetRawText();
     }
 
@@ -341,7 +341,7 @@ public sealed class InspectorTools
         using (argsDoc)
         {
             var result = await socket.SendAsync(target: await ResolveAsync(discovery, instance, ct),
-                "postSignal", new { name, args = argsDoc.RootElement }, ct);
+                "postSignal", Json.Obj(("name", name), ("args", argsDoc.RootElement)), ct);
             return result.GetString() ?? "queued";
         }
     }

@@ -67,4 +67,13 @@
     <WriteLinesToFile File="$(IntermediateOutputPath)server.json" Lines="$(_McpManifestContent)" Overwrite="true" WriteOnlyWhenDifferent="true" />
   </Target>
 
+
+  <ItemGroup>
+    <!-- Json.Obj builds the request wire format by hand (no reflective serializer), and that shape is only
+         otherwise verifiable against a live app, so the test project checks it directly. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>SdlVulkan.Renderer.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

@@ -35,6 +35,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
+    <ProjectReference Include="..\SdlVulkan.Renderer.Inspector\SdlVulkan.Renderer.Inspector.csproj" />
   </ItemGroup>
 
   <ItemGroup>

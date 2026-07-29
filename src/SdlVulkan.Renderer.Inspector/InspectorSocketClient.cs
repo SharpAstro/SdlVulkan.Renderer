@@ -32,7 +32,10 @@ public sealed class InspectorSocketClient
     /// Connects to <paramref name="target"/>, sends <c>{id,method,params}</c>, reads one response
     /// line, and returns the <c>result</c> element (cloned). Throws on an <c>error</c> response.
     /// </summary>
-    public async Task<JsonElement> SendAsync(InspectorInstance target, string method, object? parameters = null,
+    /// <param name="paramsJson">A JSON object for <c>params</c>, or null for <c>{}</c>. A pre-built string
+    /// rather than an object, because serialising one reflectively is what trimming and AOT forbid — see
+    /// <see cref="Json"/>.</param>
+    public async Task<JsonElement> SendAsync(InspectorInstance target, string method, string? paramsJson = null,
         CancellationToken ct = default)
     {
         using var tcp = new TcpClient();
@@ -42,7 +45,7 @@ public sealed class InspectorSocketClient
         using var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
 
         var id = Interlocked.Increment(ref _nextId);
-        var request = JsonSerializer.Serialize(new RequestEnvelope(id, method, parameters));
+        var request = $"{{\"id\":{id},\"method\":{Json.Quote(method)},\"params\":{paramsJson ?? "{}"}}}";
         await writer.WriteLineAsync(request.AsMemory(), ct);
 
         var responseLine = await reader.ReadLineAsync(ct)
@@ -118,5 +121,4 @@ public sealed class InspectorSocketClient
         }
     }
 
-    private sealed record RequestEnvelope(int id, string method, object? @params);
 }
