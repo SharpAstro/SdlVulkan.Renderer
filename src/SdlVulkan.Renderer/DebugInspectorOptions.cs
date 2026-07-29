@@ -1,5 +1,4 @@
 #if DEBUG
-using System.Net;
 using System.Text.Json;
 using DIR.Lib;
 using Layout = DIR.Lib.Layout;
@@ -57,23 +56,19 @@ public sealed class DebugInspectorOptions
     public IReadOnlyDictionary<string, Action<JsonElement>>? SignalFactories { get; init; }
 
     // --- Transport ---
+    //
+    // The addressing knobs are GONE: DebugInspectorCore owns the transport now, and it binds an ephemeral
+    // port on LOOPBACK with one fixed discovery group. They are removed rather than accepted-and-ignored,
+    // because a `Port = 5000` that silently does nothing is worse than one that fails to compile.
+    //
+    // Note what the old default meant: BindAddress was IPAddress.Any, so this command server -- which
+    // injects input, captures the framebuffer and reads app state -- accepted connections from the whole
+    // LAN. Loopback-only is the fix, and there is no opt-out.
 
     /// <summary>
-    /// Bind address for the TCP command server. <see cref="IPAddress.Any"/> (default) lets a sidecar on
-    /// another LAN host connect; set <see cref="IPAddress.Loopback"/> to restrict to same-machine.
+    /// Whether to answer UDP multicast discovery. Default true, which is how a sidecar finds this instance
+    /// without being told a port. Off leaves the command server working and simply unadvertised.
     /// </summary>
-    public IPAddress BindAddress { get; init; } = IPAddress.Any;
-
-    /// <summary>TCP command port. 0 (default) lets the OS pick a free port so multiple instances coexist.</summary>
-    public int Port { get; init; }
-
-    /// <summary>Discovery multicast group. Site-local 239.x by default; NOT 5353 / not DNS-SD.</summary>
-    public IPAddress DiscoveryGroup { get; init; } = IPAddress.Parse("239.255.77.90");
-
-    /// <summary>Discovery multicast port shared by all instances (co-listened via ReuseAddress).</summary>
-    public int DiscoveryPort { get; init; } = 47891;
-
-    /// <summary>Whether to run the UDP multicast discovery responder. Default true.</summary>
     public bool EnableDiscovery { get; init; } = true;
 }
 

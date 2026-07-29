@@ -6,7 +6,11 @@ using System.Text.Json;
 namespace SdlVulkan.Renderer.Inspector;
 
 /// <summary>A discovered debuggable instance (one running Debug-build app).</summary>
-public sealed record InspectorInstance(IPAddress Address, int TcpPort, string App, string? Title, int Pid, int Proto);
+/// <param name="Address">Where the reply came FROM. Not what the command connection uses — see
+/// <see cref="InspectorSocketClient"/>.</param>
+/// <param name="Kind">The surface kind it claims. Only an <c>sdl</c> surface speaks these verbs.</param>
+public sealed record InspectorInstance(
+    IPAddress Address, int TcpPort, string App, string? Title, int Pid, int Proto, string Kind);
 
 /// <summary>
 /// Discovers debuggable instances by sending a UDP multicast query and collecting the unicast
@@ -15,7 +19,7 @@ public sealed record InspectorInstance(IPAddress Address, int TcpPort, string Ap
 /// </summary>
 public sealed class InspectorDiscoveryClient(IPAddress group, int port)
 {
-    private static readonly byte[] Query = Encoding.UTF8.GetBytes("{\"q\":\"sdlvk-inspect\",\"proto\":1}");
+    private static readonly byte[] Query = Encoding.UTF8.GetBytes("{\"q\":\"dir-inspect\",\"proto\":1}");
 
     /// <summary>
     /// Multicasts a discovery query and returns the instances that reply within the collection
@@ -37,7 +41,7 @@ public sealed class InspectorDiscoveryClient(IPAddress group, int port)
             while (true)
             {
                 var recv = await udp.ReceiveAsync(window.Token);
-                if (TryParse(recv, out var instance) && seen.Add(instance!.Pid))
+                if (TryParse(recv, out var instance) && IsSdl(instance!.Kind) && seen.Add(instance.Pid))
                     found.Add(instance);
             }
         }
@@ -46,6 +50,14 @@ public sealed class InspectorDiscoveryClient(IPAddress group, int port)
 
         return found;
     }
+
+    /// <summary>
+    /// Whether a reply is a surface this sidecar can drive. Discovery is ONE shared group, so a terminal
+    /// app on the same machine answers the same query — and offering it a screenshot verb would be
+    /// nonsense. <c>unknown</c> is accepted because an app built before the kind field existed does not
+    /// send one, and refusing it would make that app invisible rather than merely unlabelled.
+    /// </summary>
+    private static bool IsSdl(string kind) => kind is "sdl" or "unknown";
 
     private static bool TryParse(UdpReceiveResult recv, out InspectorInstance? instance)
     {
@@ -59,7 +71,8 @@ public sealed class InspectorDiscoveryClient(IPAddress group, int port)
             var app = r.TryGetProperty("app", out var a) ? a.GetString() ?? "" : "";
             var title = r.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
             var proto = r.TryGetProperty("proto", out var p) ? p.GetInt32() : 0;
-            instance = new InspectorInstance(recv.RemoteEndPoint.Address, tcpPort, app, title, pid, proto);
+            var kind = r.TryGetProperty("kind", out var k) ? k.GetString() ?? "unknown" : "unknown";
+            instance = new InspectorInstance(recv.RemoteEndPoint.Address, tcpPort, app, title, pid, proto, kind);
             return true;
         }
         catch

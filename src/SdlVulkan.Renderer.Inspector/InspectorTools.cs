@@ -27,14 +27,17 @@ public sealed class InspectorTools
         return sb.ToString();
     }
 
-    [McpServerTool, Description("Ping an instance to confirm the inspector is alive. Returns 'pong'.")]
+    [McpServerTool, Description("Confirm the inspector is alive and report the app name and protocol version.")]
     public static async Task<string> ping(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
         var result = await socket.SendAsync(target, "ping", null, ct);
-        return result.GetString() ?? "pong";
+        // GetRawText, never GetString: since the move onto DebugInspectorCore the reply is an OBJECT, and
+        // GetString THROWS on one rather than returning null — so the old `GetString() ?? "pong"` would have
+        // turned a healthy ping into an exception. Raw text also renders an older app's bare "pong" fine.
+        return result.GetRawText();
     }
 
     [McpServerTool, Description("Returns the live clickable-region tree (each region's bounds + role + label) plus the app's optional state JSON. The 'label' of a button is the action string used by click_label.")]

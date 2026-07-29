@@ -88,7 +88,36 @@ env:
   #       `key` verb; the two now agree. ResolveModifier/ResolveInputKey are internal (not private) with
   #       InternalsVisibleTo the test project, since what an injected key MEANS is otherwise only observable
   #       against a live SDL window -- 20 tests.
-  VERSION_PREFIX: 7.2.${{ github.run_number }}
+  # 7.3 - DebugInspector folds onto DIR.Lib's DebugInspectorCore (needs DIR.Lib 7.3): 940 -> ~600 lines. Gone
+  #       are the private TCP accept loop, the newline framing, the discovery responder and descriptor, the
+  #       command queue, the whole InspectorCommand record hierarchy with its BuildCommand parser, and the
+  #       batch/wait state machine -- all of it duplicated what the core does. What stays is what is actually
+  #       SDL: the verbs, ResolveInputKey/ResolveModifier, and pressHold, now expressed as a background
+  #       IDebugInspectorOperation (pressed in Begin, released in Advance, deliberately NOT exclusive so a
+  #       screenshot can be taken mid-hold). The prior split had been measured -- only ~48 lines touched SDL --
+  #       but that measured SDL-COUPLING, not shareability: a frame-stepped batch calls no SDL function yet
+  #       presumes a loop with frames, which the core could not express until now.
+  #       ONE discovery protocol: `dir-inspect` on 239.255.77.91:47892, was `sdlvk-inspect` on
+  #       239.255.77.90:47891. A sidecar now tells surfaces apart by the `kind` field ("sdl") rather than by
+  #       which port answered, and drops replies it cannot drive. The sidecar moves in lockstep.
+  #       SECURITY: DebugInspectorOptions.BindAddress defaulted to IPAddress.Any, so this command server --
+  #       which injects input, captures the framebuffer and reads app state -- accepted connections from the
+  #       whole LAN. The core binds LOOPBACK with no opt-out.
+  #       BREAKING, but only in a DEBUG build: DebugInspectorOptions loses BindAddress, Port, DiscoveryGroup
+  #       and DiscoveryPort. The core owns addressing, so they could only be accepted-and-ignored, and a
+  #       `Port = 5000` that silently does nothing is worse than one that fails to compile. The whole type is
+  #       #if DEBUG, so it is ABSENT from this published Release package and no package consumer can hit
+  #       this; only a local Debug build against the sibling can, which is exactly who needs telling.
+  #       EnableDiscovery survives -- not announcing yourself is still a real choice.
+  #       ping now answers with the core's {"ok":true,"protocol":N,"app":"..."} rather than the bare string
+  #       "pong". The sidecar accepts BOTH, because it ships separately from the app it drives: its old
+  #       `GetString() ?? "pong"` would have THROWN on an object, and its liveness probe would have reported a
+  #       healthy app as dead. It also now connects to 127.0.0.1 instead of the discovery reply's source
+  #       address, which a Hyper-V or WSL bridge makes the one address guaranteed to refuse a loopback-bound
+  #       server. Corrected a sidecar comment claiming the pump drains from OnPostFrame: it is
+  #       OnLoopIteration, which is why a minimized window still answers and is correctly reported alive.
+  #       4 host-contract tests (suite 43 passed / 1 skipped).
+  VERSION_PREFIX: 7.3.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

@@ -1,14 +1,12 @@
 #if DEBUG
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Net;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using DIR.Lib;
+using DIR.Lib.Diagnostics;
 using Layout = DIR.Lib.Layout;
 
 namespace SdlVulkan.Renderer;
@@ -29,110 +27,14 @@ namespace SdlVulkan.Renderer;
 /// </para>
 /// The entire type is compiled only in DEBUG builds, so no release artifact carries it.
 /// </summary>
-public sealed class DebugInspector : IDisposable
+public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugInspectorSteppedHost
 {
-    private const int ProtocolVersion = 1;
-
-    // --- Commands: enqueued by the socket thread, executed on the render thread. Each carries a
-    // TaskCompletionSource whose result is the JSON value fragment for the "result" field. ---
-    private abstract record InspectorCommand
-    {
-        public TaskCompletionSource<string> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        /// <summary>How long the socket side waits for this command to drain on the render
-        /// thread before giving up. A single command drains within a frame or two; a batch
-        /// runs one step per rendered frame, so it overrides this to scale with its length.</summary>
-        public virtual TimeSpan Timeout => TimeSpan.FromSeconds(10);
-    }
-    private sealed record PingCommand : InspectorCommand;
-    private sealed record DescribeCommand : InspectorCommand;
-    private sealed record DescribeLayoutCommand : InspectorCommand;
-    private sealed record ScreenshotCommand : InspectorCommand;
-    private sealed record ListSignalsCommand : InspectorCommand;
-    /// <summary>Window state changes (iconify / maximize / restore). These call SDL window ops, which
-    /// must run on the render thread -- which the pump guarantees. They keep working while minimized
-    /// because the pump drains every loop iteration (see <see cref="SdlEventLoop.OnLoopIteration"/>),
-    /// so <c>restore</c> can un-minimize a window the loop is idling.</summary>
-    private sealed record MinimizeCommand : InspectorCommand;
-    private sealed record MaximizeCommand : InspectorCommand;
-    private sealed record RestoreCommand : InspectorCommand;
-    private sealed record ClickCommand(float X, float Y, InputModifier Mods = InputModifier.None) : InspectorCommand;
-    private sealed record ClickLabelCommand(string Label) : InspectorCommand;
-    private sealed record KeyCommand(InputKey Key, InputModifier Mods) : InspectorCommand;
-    private sealed record TextCommand(string Text) : InspectorCommand;
-    private sealed record PostSignalCommand(string Name, JsonElement Args) : InspectorCommand;
-    /// <summary>Synthesize a mouse-wheel scroll at (X, Y). ScrollY &gt; 0 is wheel-up (zoom in in most views).</summary>
-    private sealed record ScrollCommand(float X, float Y, float ScrollY) : InspectorCommand;
-    /// <summary>Synthesize a press-drag-release from (X1,Y1) to (X2,Y2) with <see cref="Steps"/> interpolated
-    /// motion events between, so integrate-per-move pan handlers see a smooth path rather than a teleport.</summary>
-    private sealed record DragCommand(float X1, float Y1, float X2, float Y2, InputModifier Mods, int Steps) : InspectorCommand;
-    /// <summary>Synthesize a left-button PRESS-AND-HOLD at (X,Y): button down, held for <see cref="DurationMs"/>
-    /// ms while the loop keeps pumping (so a long-press / hold-to-repeat / charge-up timer ticks THROUGH the
-    /// hold), then button up. Advanced by DrainCommands one non-blocking step per loop iteration, like a batch --
-    /// it never sleeps the render thread.</summary>
-    private sealed record HoldCommand(float X, float Y, InputModifier Mods, int DurationMs) : InspectorCommand
-    {
-        // The socket waits out the hold plus slack; the render loop stays responsive throughout.
-        public override TimeSpan Timeout => TimeSpan.FromSeconds(Math.Min(300, DurationMs / 1000.0 + 15));
-    }
-    /// <summary>Read back the loop's rolling average frame time (the same EWMA that drives the
-    /// [rdiag] frame.slow log), so jank can be measured numerically instead of by eye.</summary>
-    private sealed record FrameStatsCommand : InspectorCommand;
-    /// <summary>Reads the Vulkan validation-layer report (enabled flags, message/hazard counts, recent
-    /// messages). Pure read of process-wide state, but runs on the render thread via the pump like
-    /// every other command.</summary>
-    private sealed record ValidationReportCommand : InspectorCommand;
-    /// <summary>Idle for <see cref="Frames"/> rendered frames (e.g. to let async work settle).
-    /// Only meaningful as a step inside a <see cref="BatchCommand"/>.</summary>
-    private sealed record WaitCommand(int Frames) : InspectorCommand;
-    /// <summary>A sequence of commands executed one-per-rendered-frame, so a real frame renders
-    /// between each step (a zoom/pan takes effect before the next step reads state). Returns a
-    /// JSON array of the per-step result fragments.</summary>
-    private sealed record BatchCommand(IReadOnlyList<InspectorCommand> Steps) : InspectorCommand
-    {
-        // ~1 frame per step plus the wait frames; pad generously and cap. This is just the
-        // socket's patience -- the event loop stays responsive throughout regardless.
-        public override TimeSpan Timeout => TimeSpan.FromSeconds(Math.Min(300,
-            15 + Steps.Count + Steps.OfType<WaitCommand>().Sum(w => w.Frames) / 30.0));
-    }
-
-    // In-progress batch, advanced one step per frame by DrainCommands (null when idle).
-    private BatchState? _activeBatch;
-    private sealed class BatchState(IReadOnlyList<InspectorCommand> steps, TaskCompletionSource<string> result)
-    {
-        public readonly IReadOnlyList<InspectorCommand> Steps = steps;
-        public readonly TaskCompletionSource<string> Result = result;
-        public readonly List<string> Results = [];
-        public int Index;
-        public int WaitFrames;
-    }
-
-    // In-progress press-and-hold, advanced one non-blocking step per loop iteration by DrainCommands
-    // (null when idle). Mirrors _activeBatch: the button stays held across frames so the app ticks THROUGH
-    // the hold (a long-press timer advances) instead of the render thread blocking for the duration.
-    private HoldState? _activeHold;
-    private sealed class HoldState(TaskCompletionSource<string> result, long startTick, long durationMs, float x, float y)
-    {
-        public readonly TaskCompletionSource<string> Result = result;
-        public readonly long StartTick = startTick;
-        public readonly long DurationMs = durationMs;
-        // Press position, so the deferred release can carry real coordinates (position-dependent
-        // release logic -- tap-vs-drag slop, tap-to-select -- reads them off the MouseUp event).
-        public readonly float X = x;
-        public readonly float Y = y;
-    }
 
     private readonly DebugInspectorOptions _opts;
     private readonly SdlWindowView _view;
     private readonly SdlEventLoop _loop; // for frame-timing readback (frameStats)
-    private readonly ConcurrentQueue<InspectorCommand> _queue = new();
-    private readonly TcpListener _listener;
     private readonly string _startedAtUtc;
-    private readonly int _tcpPort;
-
-    private CancellationTokenSource? _cts;
-    private Task? _acceptTask;
-    private Task? _discoveryTask;
+    private DebugInspectorCore? _core;
 
     private DebugInspector(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
     {
@@ -140,16 +42,43 @@ public sealed class DebugInspector : IDisposable
         _view = view;
         _loop = loop;
         _startedAtUtc = DateTimeOffset.UtcNow.ToString("o");
-        _listener = new TcpListener(opts.BindAddress, opts.Port);
-        _listener.Start();
-        _tcpPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
     }
 
+    /// <summary>The ephemeral loopback port the command server bound to; 0 before <see cref="Attach"/>.</summary>
+    public int Port => _core?.Port ?? 0;
+
+    // ---------------- IDebugInspectorHost: the parts that are actually SDL ----------------
+
+    /// <inheritdoc />
+    public string AppName => string.IsNullOrEmpty(_opts.AppName)
+        ? System.Diagnostics.Process.GetCurrentProcess().ProcessName
+        : _opts.AppName;
+
     /// <summary>
-    /// Attaches the inspector to the given loop + window view and starts the background servers.
-    /// Chains the command pump onto the loop's <see cref="SdlEventLoop.OnLoopIteration"/>. Call once,
-    /// under <c>#if DEBUG</c>, after the loop's callbacks are wired but before <see cref="SdlEventLoop.Run"/>.
-    /// The returned <see cref="IDisposable"/> stops the servers when disposed.
+    /// An SDL-hosted pixel window. Lets a sidecar drop replies from surfaces whose verbs it does not speak:
+    /// discovery is one shared group, so a terminal app on the same machine answers the same query.
+    /// </summary>
+    public string SurfaceKind => "sdl";
+
+    /// <summary>
+    /// Wakes the loop so a queued command is serviced promptly. The loop parks in WaitEventTimeout when
+    /// idle, so without this a command waits on unrelated input.
+    /// </summary>
+    public void Poke() => _view.RequestRedraw();
+
+    /// <summary>
+    /// Window title and start time, added to the discovery reply so a driver can tell two windows of the
+    /// same app apart. Read per reply, which is what keeps a title that changes at runtime current.
+    /// </summary>
+    public string? DiscoveryExtras =>
+        $"\"title\":{DebugInspectorCore.Quote(SafeInvoke(_opts.WindowTitle))}," +
+        $"\"startedAt\":{DebugInspectorCore.Quote(_startedAtUtc)}";
+
+    /// <summary>
+    /// Attaches the inspector to the given loop + window view and starts the command server. Chains the
+    /// core's pump onto the loop's <see cref="SdlEventLoop.OnLoopIteration"/>. Call once, under
+    /// <c>#if DEBUG</c>, after the loop's callbacks are wired but before <see cref="SdlEventLoop.Run"/>.
+    /// The returned <see cref="IDisposable"/> stops the server when disposed.
     /// </summary>
     public static DebugInspector Attach(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
     {
@@ -162,18 +91,18 @@ public sealed class DebugInspector : IDisposable
             LayoutInspection.Enabled = true;
         }
 
-        inspector.Start();
+        inspector._core = DebugInspectorCore.Start(inspector, opts.EnableDiscovery);
 
-        // Wire the pump onto the loop's per-iteration hook (OnLoopIteration), NOT OnPostFrame: the
-        // drain must run every iteration -- including when nothing rendered because the window is
-        // minimized -- so commands (notably `restore`) are still serviced on a minimized window. The
-        // hook fires inside Run on the render thread, so all Vulkan/widget/input access stays
-        // render-thread-safe. Lambda-compose (the framework's wiring style) so any prior hook runs first.
+        // The pump goes on the loop's per-iteration hook (OnLoopIteration), NOT OnPostFrame: it must run
+        // every iteration -- including when nothing rendered because the window is minimized -- so commands
+        // (notably `restore`) are still serviced on a minimized window. The hook fires inside Run on the
+        // render thread, so all Vulkan/widget/input access stays render-thread-safe. Lambda-compose (the
+        // framework's wiring style) so any prior hook runs first.
         var prev = loop.OnLoopIteration;
         loop.OnLoopIteration = () =>
         {
             prev?.Invoke();
-            inspector.DrainCommands();
+            inspector._core!.Pump();
         };
         return inspector;
     }
@@ -184,168 +113,7 @@ public sealed class DebugInspector : IDisposable
             ?? throw new InvalidOperationException("DebugInspector.Attach(loop, opts) requires the single-window SdlEventLoop constructor; pass an explicit SdlWindowView otherwise."),
             opts);
 
-    private void Start()
-    {
-        _cts = new CancellationTokenSource();
-        var ct = _cts.Token;
-        var appName = string.IsNullOrEmpty(_opts.AppName)
-            ? System.Diagnostics.Process.GetCurrentProcess().ProcessName
-            : _opts.AppName;
-        Console.Error.WriteLine($"[inspector] '{appName}' command server on {_opts.BindAddress}:{_tcpPort}" +
-            (_opts.EnableDiscovery ? $", discovery on {_opts.DiscoveryGroup}:{_opts.DiscoveryPort}" : " (discovery off)"));
-
-        _acceptTask = Task.Run(() => AcceptLoopAsync(ct), ct);
-        if (_opts.EnableDiscovery)
-            _discoveryTask = Task.Run(() => DiscoveryLoopAsync(ct), ct);
-    }
-
-    public void Dispose()
-    {
-        try { _cts?.Cancel(); } catch { /* best-effort */ }
-        try { _listener.Stop(); } catch { /* best-effort */ }
-        try { _acceptTask?.Wait(TimeSpan.FromSeconds(2)); } catch { /* best-effort */ }
-        try { _discoveryTask?.Wait(TimeSpan.FromSeconds(2)); } catch { /* best-effort */ }
-        _cts?.Dispose();
-    }
-
-    // ---------------- TCP command server (background thread) ----------------
-
-    private async Task AcceptLoopAsync(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            TcpClient client;
-            try { client = await _listener.AcceptTcpClientAsync(ct); }
-            catch (OperationCanceledException) { break; }
-            catch (ObjectDisposedException) { break; }
-            catch (SocketException) { break; }
-            _ = Task.Run(() => HandleClientAsync(client, ct), ct);
-        }
-    }
-
-    private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
-    {
-        try
-        {
-            using (client)
-            using (var stream = client.GetStream())
-            using (var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true))
-            using (var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true })
-            {
-                string? line;
-                while ((line = await reader.ReadLineAsync(ct)) is not null)
-                {
-                    var response = await DispatchRequestAsync(line, ct);
-                    await writer.WriteLineAsync(response.AsMemory(), ct);
-                }
-            }
-        }
-        catch (OperationCanceledException) { /* shutting down */ }
-        catch (IOException) { /* client dropped */ }
-        catch (Exception ex) { Console.Error.WriteLine($"[inspector] client error: {ex.Message}"); }
-    }
-
-    // Request:  {"id":1,"method":"describe","params":{...}}
-    // Response: {"id":1,"result":<value>} or {"id":1,"error":"<msg>"}
-    private async Task<string> DispatchRequestAsync(string requestJson, CancellationToken ct)
-    {
-        var id = 0;
-        try
-        {
-            InspectorCommand cmd;
-            using (var doc = JsonDocument.Parse(requestJson))
-            {
-                var root = doc.RootElement;
-                id = root.TryGetProperty("id", out var idEl) ? idEl.GetInt32() : 0;
-                var method = root.GetProperty("method").GetString() ?? "";
-                root.TryGetProperty("params", out var p);
-                cmd = BuildCommand(method, p);
-            }
-
-            _queue.Enqueue(cmd);
-            _view.RequestRedraw(); // wake the loop promptly so the per-iteration pump drains this command
-
-            var fragment = await cmd.Result.Task.WaitAsync(cmd.Timeout, ct);
-            return $"{{\"id\":{id},\"result\":{fragment}}}";
-        }
-        catch (Exception ex)
-        {
-            return ToJson(w =>
-            {
-                w.WriteStartObject();
-                w.WriteNumber("id", id);
-                w.WriteString("error", ex.Message);
-                w.WriteEndObject();
-            });
-        }
-    }
-
-    private static InspectorCommand BuildCommand(string method, JsonElement p) => method switch
-    {
-        "ping" => new PingCommand(),
-        "describe" => new DescribeCommand(),
-        "describeLayout" => new DescribeLayoutCommand(),
-        "screenshot" => new ScreenshotCommand(),
-        "signals" => new ListSignalsCommand(),
-        "minimize" => new MinimizeCommand(),
-        "maximize" => new MaximizeCommand(),
-        "restore" => new RestoreCommand(),
-        "validationReport" => new ValidationReportCommand(),
-        "click" => new ClickCommand(
-            p.GetProperty("x").GetSingle(),
-            p.GetProperty("y").GetSingle(),
-            ResolveModifier(p.TryGetProperty("mods", out var cm) && cm.ValueKind == JsonValueKind.String ? cm.GetString() : null)),
-        "clickLabel" => new ClickLabelCommand(p.GetProperty("label").GetString() ?? ""),
-        "key" => new KeyCommand(
-            ResolveInputKey(p.GetProperty("key").GetString() ?? ""),
-            ResolveModifier(p.TryGetProperty("mods", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null)),
-        "text" => new TextCommand(p.GetProperty("s").GetString() ?? ""),
-        "scroll" => new ScrollCommand(
-            p.GetProperty("x").GetSingle(),
-            p.GetProperty("y").GetSingle(),
-            p.GetProperty("scrollY").GetSingle()),
-        "drag" => new DragCommand(
-            p.GetProperty("x1").GetSingle(),
-            p.GetProperty("y1").GetSingle(),
-            p.GetProperty("x2").GetSingle(),
-            p.GetProperty("y2").GetSingle(),
-            ResolveModifier(p.TryGetProperty("mods", out var dm) && dm.ValueKind == JsonValueKind.String ? dm.GetString() : null),
-            p.TryGetProperty("steps", out var ds) && ds.ValueKind == JsonValueKind.Number ? Math.Clamp(ds.GetInt32(), 1, 64) : 8),
-        "pressHold" => new HoldCommand(
-            p.GetProperty("x").GetSingle(),
-            p.GetProperty("y").GetSingle(),
-            ResolveModifier(p.TryGetProperty("mods", out var hm) && hm.ValueKind == JsonValueKind.String ? hm.GetString() : null),
-            (int)Math.Clamp((p.TryGetProperty("seconds", out var hs) && hs.ValueKind == JsonValueKind.Number ? hs.GetDouble() : 1.0) * 1000.0, 50, 300000)),
-        "frameStats" => new FrameStatsCommand(),
-        "postSignal" => new PostSignalCommand(
-            p.GetProperty("name").GetString() ?? "",
-            p.TryGetProperty("args", out var a) ? a.Clone() : default),
-        "wait" => new WaitCommand(p.TryGetProperty("frames", out var wf) && wf.ValueKind == JsonValueKind.Number
-            ? Math.Clamp(wf.GetInt32(), 1, 600) : 1),
-        "batch" => BuildBatch(p),
-        _ => throw new ArgumentException($"unknown method: {method}")
-    };
-
-    // Parses {steps:[{method,params}, ...]} into a BatchCommand. Each step is built through the
-    // same BuildCommand path as a standalone request; nesting a batch inside a batch is rejected
-    // (the one-step-per-frame pump only tracks a single active batch).
-    private static BatchCommand BuildBatch(JsonElement p)
-    {
-        if (!p.TryGetProperty("steps", out var steps) || steps.ValueKind != JsonValueKind.Array)
-            throw new ArgumentException("batch requires a 'steps' array of {method, params}");
-        var list = new List<InspectorCommand>(steps.GetArrayLength());
-        foreach (var step in steps.EnumerateArray())
-        {
-            var m = step.GetProperty("method").GetString() ?? "";
-            if (m == "batch")
-                throw new ArgumentException("nested batch is not supported");
-            step.TryGetProperty("params", out var sp);
-            list.Add(BuildCommand(m, sp));
-        }
-        if (list.Count == 0)
-            throw new ArgumentException("batch 'steps' must be non-empty");
-        return new BatchCommand(list);
-    }
+    public void Dispose() => _core?.Dispose();
 
     // Resolve a "key" command string to an InputKey.
     //
@@ -437,215 +205,105 @@ public sealed class DebugInspector : IDisposable
 
     // ---------------- UDP multicast discovery responder (background thread) ----------------
 
-    private async Task DiscoveryLoopAsync(CancellationToken ct)
-    {
-        using var udp = new UdpClient { ExclusiveAddressUse = false };
-        try
-        {
-            udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            udp.Client.Bind(new IPEndPoint(IPAddress.Any, _opts.DiscoveryPort));
-            udp.JoinMulticastGroup(_opts.DiscoveryGroup);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[inspector] discovery disabled (bind failed): {ex.Message}");
-            return;
-        }
-
-        while (!ct.IsCancellationRequested)
-        {
-            UdpReceiveResult recv;
-            try { recv = await udp.ReceiveAsync(ct); }
-            catch (OperationCanceledException) { break; }
-            catch (SocketException) { continue; }
-            catch (ObjectDisposedException) { break; }
-
-            if (!IsDiscoveryQuery(recv.Buffer)) continue;
-
-            var descriptor = BuildDescriptor();
-            var bytes = Encoding.UTF8.GetBytes(descriptor);
-            try { await udp.SendAsync(bytes, bytes.Length, recv.RemoteEndPoint); }
-            catch (SocketException) { /* reply best-effort */ }
-        }
-    }
-
-    private static bool IsDiscoveryQuery(byte[] buffer)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(buffer);
-            return doc.RootElement.TryGetProperty("q", out var q)
-                && q.ValueKind == JsonValueKind.String
-                && q.GetString() == "sdlvk-inspect";
-        }
-        catch { return false; }
-    }
-
-    private string BuildDescriptor() => ToJson(w =>
-    {
-        w.WriteStartObject();
-        w.WriteString("app", string.IsNullOrEmpty(_opts.AppName)
-            ? System.Diagnostics.Process.GetCurrentProcess().ProcessName
-            : _opts.AppName);
-        var title = SafeInvoke(_opts.WindowTitle);
-        if (title is null) w.WriteNull("title"); else w.WriteString("title", title);
-        w.WriteNumber("tcpPort", _tcpPort);
-        w.WriteNumber("pid", Environment.ProcessId);
-        w.WriteNumber("proto", ProtocolVersion);
-        w.WriteString("startedAt", _startedAtUtc);
-        w.WriteEndObject();
-    });
-
-    // ---------------- Render-thread command pump ----------------
+    // ---------------- The verbs ----------------
 
     /// <summary>
-    /// Drains and executes queued commands on the render thread. Wired into the loop's OnLoopIteration
-    /// so all Vulkan/widget/input access is on the render thread. Never throws (per-command failures
-    /// are routed to the command's TaskCompletionSource as an error response).
+    /// Every instantaneous verb, run on the render thread by the core's pump. Parameters are read straight
+    /// off the request: there is no intermediate command object any more, because the only reason one
+    /// existed was to carry a parsed request across the queue the core now owns.
     /// </summary>
-    private void DrainCommands()
+    public string? Invoke(string method, JsonElement p) => method switch
     {
-        // A batch owns its frames: advance one step (or burn one wait-frame) and return, so a
-        // real frame renders before the next step. New single commands queued meanwhile drain
-        // once the batch completes.
-        if (_activeBatch is not null)
-        {
-            AdvanceBatch();
-            return;
-        }
-        // A press-and-hold advances every iteration but, UNLIKE a batch, does not own the queue: it
-        // releases the button once its duration elapses, then we fall through to drain other commands
-        // below. So observe commands (ping/describe/screenshot) sent mid-hold are serviced WHILE the
-        // button stays held -- the point of a hold test is to inspect the hold-triggered UI in progress.
-        if (_activeHold is not null)
-        {
-            AdvanceHold();
-        }
-
-        while (_queue.TryDequeue(out var cmd))
-        {
-            if (cmd is BatchCommand b)
-            {
-                if (_activeHold is not null)
-                {
-                    cmd.Result.TrySetException(new InvalidOperationException("cannot start a batch while a press-and-hold is in progress"));
-                    continue;
-                }
-                _activeBatch = new BatchState(b.Steps, b.Result);
-                AdvanceBatch();
-                return;
-            }
-            if (cmd is HoldCommand h)
-            {
-                if (_activeHold is not null)
-                {
-                    cmd.Result.TrySetException(new InvalidOperationException("a press-and-hold is already in progress"));
-                    continue;
-                }
-                StartHold(h); // hold now active; keep draining simple commands queued behind it this iteration
-                continue;
-            }
-            try { cmd.Result.TrySetResult(ExecuteCommand(cmd)); }
-            catch (Exception ex) { cmd.Result.TrySetException(ex); }
-        }
-    }
-
-    /// <summary>
-    /// Begins a press-and-hold: press the button now and arm <see cref="_activeHold"/>, which
-    /// <see cref="AdvanceHold"/> releases once the duration elapses. Non-blocking -- the loop keeps
-    /// rendering during the hold.
-    /// </summary>
-    private void StartHold(HoldCommand h)
-    {
-        _view.DispatchPointerMove(h.X, h.Y); // update cached pointer position (consumers may read it on MouseUp)
-        _view.DispatchPointerDown(1, h.X, h.Y, 1, h.Mods);
-        _activeHold = new HoldState(h.Result, Environment.TickCount64, h.DurationMs, h.X, h.Y);
-        _view.RequestRedraw();
-    }
-
-    /// <summary>
-    /// Releases the active press-and-hold once its duration has elapsed (monotonic
-    /// <see cref="Environment.TickCount64"/>); until then it just keeps the loop awake so the app renders
-    /// frames while the button is held. One non-blocking step per call, like <see cref="AdvanceBatch"/>.
-    /// </summary>
-    private void AdvanceHold()
-    {
-        var h = _activeHold!;
-        if (Environment.TickCount64 - h.StartTick < h.DurationMs)
-        {
-            _view.RequestRedraw(); // still holding -- keep the loop pumping so the app ticks through the hold
-            return;
-        }
-        _view.DispatchPointerUp(1, h.X, h.Y);
-        _view.RequestRedraw();
-        h.Result.TrySetResult(ToJson(w => w.WriteStringValue($"held {h.DurationMs}ms")));
-        _activeHold = null;
-    }
-
-    /// <summary>
-    /// Executes the next step of <see cref="_activeBatch"/> (one per call = one per rendered
-    /// frame), or burns a pending wait-frame. Completes the batch's result with a JSON array of
-    /// per-step fragments once all steps are done. A failing step records an error fragment and
-    /// the batch continues -- one bad step doesn't abort the sequence.
-    /// </summary>
-    private void AdvanceBatch()
-    {
-        var b = _activeBatch!;
-        if (b.WaitFrames > 0)
-        {
-            b.WaitFrames--;
-            _view.RequestRedraw();
-            return;
-        }
-
-        if (b.Index < b.Steps.Count)
-        {
-            var step = b.Steps[b.Index++];
-            if (step is WaitCommand w)
-            {
-                b.WaitFrames = Math.Max(0, w.Frames - 1);
-                b.Results.Add("\"waited\"");
-            }
-            else
-            {
-                try { b.Results.Add(ExecuteCommand(step)); }
-                // Encode the error fragment via Utf8JsonWriter (ToJson) like every other result,
-                // not JsonSerializer.Serialize -- the reflection-based serializer trips IL2026/IL3050.
-                catch (Exception ex) { b.Results.Add(ToJson(w => w.WriteStringValue($"error: {ex.Message}"))); }
-            }
-        }
-
-        if (b.Index >= b.Steps.Count && b.WaitFrames == 0)
-        {
-            b.Result.TrySetResult("[" + string.Join(",", b.Results) + "]");
-            _activeBatch = null;
-            return;
-        }
-        _view.RequestRedraw(); // more steps / wait-frames remain -- keep the loop awake
-    }
-
-    private string ExecuteCommand(InspectorCommand cmd) => cmd switch
-    {
-        PingCommand => "\"pong\"",
-        DescribeCommand => ExecuteDescribe(),
-        DescribeLayoutCommand => ExecuteDescribeLayout(),
-        ScreenshotCommand => ExecuteScreenshot(),
-        ListSignalsCommand => ExecuteListSignals(),
-        MinimizeCommand => ExecuteWindowState(static w => w.Minimize()),
-        MaximizeCommand => ExecuteWindowState(static w => w.Maximize()),
-        RestoreCommand => ExecuteWindowState(static w => w.Restore()),
-        ClickCommand c => ExecuteClickAt(c.X, c.Y, c.Mods),
-        ClickLabelCommand c => ExecuteClickLabel(c.Label),
-        KeyCommand c => ExecuteKey(c.Key, c.Mods),
-        TextCommand c => ExecuteText(c.Text),
-        ScrollCommand c => ExecuteScroll(c.X, c.Y, c.ScrollY),
-        DragCommand c => ExecuteDrag(c.X1, c.Y1, c.X2, c.Y2, c.Mods, c.Steps),
-        FrameStatsCommand => ExecuteFrameStats(),
-        ValidationReportCommand => ExecuteValidationReport(),
-        PostSignalCommand c => ExecutePostSignal(c.Name, c.Args),
-        WaitCommand => "\"waited\"", // only reached if used outside a batch; harmless no-op
-        _ => throw new ArgumentException($"unknown command: {cmd.GetType().Name}")
+        "describe" => ExecuteDescribe(),
+        "describeLayout" => ExecuteDescribeLayout(),
+        "screenshot" => ExecuteScreenshot(),
+        "signals" => ExecuteListSignals(),
+        "minimize" => ExecuteWindowState(static w => w.Minimize()),
+        "maximize" => ExecuteWindowState(static w => w.Maximize()),
+        "restore" => ExecuteWindowState(static w => w.Restore()),
+        "validationReport" => ExecuteValidationReport(),
+        "frameStats" => ExecuteFrameStats(),
+        "click" => ExecuteClickAt(Coord(p, "x"), Coord(p, "y"), Mods(p)),
+        "clickLabel" => ExecuteClickLabel(p.GetProperty("label").GetString() ?? ""),
+        "key" => ExecuteKey(ResolveInputKey(p.GetProperty("key").GetString() ?? ""), Mods(p)),
+        "text" => ExecuteText(p.GetProperty("s").GetString() ?? ""),
+        "scroll" => ExecuteScroll(Coord(p, "x"), Coord(p, "y"), Coord(p, "scrollY")),
+        "drag" => ExecuteDrag(Coord(p, "x1"), Coord(p, "y1"), Coord(p, "x2"), Coord(p, "y2"), Mods(p), DragSteps(p)),
+        "postSignal" => ExecutePostSignal(p.GetProperty("name").GetString() ?? "",
+            p.TryGetProperty("args", out var a) ? a.Clone() : default),
+        // Reachable only OUTSIDE a batch, where there are no frames to wait for -- inside one the core
+        // handles it. A no-op rather than an error, so a driver can send a uniform step list either way.
+        "wait" => "\"waited\"",
+        // Null rather than a throw: the core owns the "unknown method" wording, and it should read the same
+        // whichever surface refused it.
+        _ => null,
     };
+
+    private static float Coord(JsonElement p, string name) => p.GetProperty(name).GetSingle();
+
+    private static InputModifier Mods(JsonElement p) => ResolveModifier(
+        p.TryGetProperty("mods", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null);
+
+    private static int DragSteps(JsonElement p)
+        => p.TryGetProperty("steps", out var s) && s.ValueKind == JsonValueKind.Number
+            ? Math.Clamp(s.GetInt32(), 1, 64) : 8;
+
+    // ---------------- IDebugInspectorSteppedHost: the one verb that spans frames ----------------
+
+    /// <summary>
+    /// The frame-spanning verbs. <c>batch</c> is absent because the core owns it now: stepping one command
+    /// per iteration is pure scheduling with no SDL in it, and it only ever lived here because the core
+    /// could not express it.
+    /// </summary>
+    private static readonly string[] FrameSpanningVerbs = ["pressHold"];
+
+    /// <inheritdoc />
+    public IReadOnlyCollection<string> SteppedMethods => FrameSpanningVerbs;
+
+    /// <inheritdoc />
+    public IDebugInspectorOperation Begin(string method, JsonElement p)
+    {
+        var x = Coord(p, "x");
+        var y = Coord(p, "y");
+        var mods = Mods(p);
+        var durationMs = (int)Math.Clamp(
+            (p.TryGetProperty("seconds", out var s) && s.ValueKind == JsonValueKind.Number ? s.GetDouble() : 1.0)
+            * 1000.0, 50, 300000);
+
+        // Pressed HERE and released in Advance, so the button stays down across frames and the app ticks
+        // THROUGH the hold -- a long-press or hold-to-repeat timer advances -- instead of the render thread
+        // blocking for the duration. Begin runs on the render thread, so touching the view is safe.
+        _view.DispatchPointerMove(x, y); // cache the position; consumers may read it on MouseUp
+        _view.DispatchPointerDown(1, x, y, 1, mods);
+        return new HoldOperation(_view, x, y, durationMs);
+    }
+
+    /// <summary>The left button held down for a wall-clock duration, then released.</summary>
+    private sealed class HoldOperation(SdlWindowView view, float x, float y, int durationMs)
+        : IDebugInspectorOperation
+    {
+        private readonly long _startTick = Environment.TickCount64;
+
+        /// <summary>
+        /// NOT exclusive, deliberately. A hold that owned the pump would make the UI it puts on screen
+        /// unobservable, and inspecting exactly that is the reason to hold a button down.
+        /// </summary>
+        public bool Exclusive => false;
+
+        public TimeSpan Timeout => TimeSpan.FromSeconds(Math.Min(300, durationMs / 1000.0 + 15));
+
+        public string? Advance()
+        {
+            if (Environment.TickCount64 - _startTick < durationMs)
+            {
+                return null; // the core pokes the loop, so the app keeps ticking while held
+            }
+
+            view.DispatchPointerUp(1, x, y);
+            view.RequestRedraw();
+            return $"\"held {durationMs}ms\"";
+        }
+    }
 
     private string ExecuteDescribe()
     {

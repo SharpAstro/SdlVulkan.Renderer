@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -39,7 +40,7 @@ public sealed class InspectorSocketClient
         CancellationToken ct = default)
     {
         using var tcp = new TcpClient();
-        await tcp.ConnectAsync(target.Address, target.TcpPort, ct);
+        await tcp.ConnectAsync(IPAddress.Loopback, target.TcpPort, ct);
         using var stream = tcp.GetStream();
         using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
         using var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
@@ -60,8 +61,10 @@ public sealed class InspectorSocketClient
 
     /// <summary>
     /// Probes whether <paramref name="target"/>'s RENDER THREAD is alive, blocked, or dead. The app
-    /// executes every inspector command -- including <c>ping</c> -- on the render thread (drained from
-    /// the loop's OnPostFrame, which only fires on a rendered frame). So a ping that round-trips within
+    /// executes every inspector command -- including <c>ping</c> -- on the render thread, drained from the
+    /// loop's OnLoopIteration hook. NOT OnPostFrame, which this comment used to claim: the distinction
+    /// matters to what a verdict MEANS, because OnLoopIteration fires even when nothing rendered, so a
+    /// minimized window still answers and is correctly reported alive. So a ping that round-trips within
     /// <paramref name="budget"/> proves the render loop completed a frame and drained its queue; a TCP
     /// connection that succeeds but yields no ping reply within the budget means the render thread is
     /// wedged even though the process is alive; a refused connection means the process is gone. Uses a
@@ -77,12 +80,12 @@ public sealed class InspectorSocketClient
         {
             using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             connectCts.CancelAfter(budget);
-            await tcp.ConnectAsync(target.Address, target.TcpPort, connectCts.Token);
+            await tcp.ConnectAsync(IPAddress.Loopback, target.TcpPort, connectCts.Token);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             return new RenderProbeResult(RenderLiveness.Dead, budget.TotalMilliseconds,
-                $"TCP connect to {target.Address}:{target.TcpPort} timed out in {budget.TotalMilliseconds:F0} ms");
+                $"TCP connect to 127.0.0.1:{target.TcpPort} timed out in {budget.TotalMilliseconds:F0} ms");
         }
         catch (SocketException ex)
         {
@@ -106,8 +109,12 @@ public sealed class InspectorSocketClient
 
             if (line is null)
                 return new RenderProbeResult(RenderLiveness.Dead, sw.Elapsed.TotalMilliseconds, "connection closed with no response");
-            if (line.Contains("pong"))
-                return new RenderProbeResult(RenderLiveness.Alive, sw.Elapsed.TotalMilliseconds, "pong");
+            // Two accepted shapes, on purpose. Since the inspector moved onto DebugInspectorCore the reply is
+            // {"ok":true,...}; before that it was the bare string "pong". This sidecar ships separately from
+            // the app it drives, so it can meet either, and a liveness probe that reported a live app as dead
+            // because of a reply-shape change would be worse than useless.
+            if (line.Contains("\"ok\":true") || line.Contains("pong"))
+                return new RenderProbeResult(RenderLiveness.Alive, sw.Elapsed.TotalMilliseconds, "alive");
             // An app-side error (e.g. its own command timed out) means the render thread is not draining.
             if (line.Contains("\"error\""))
                 return new RenderProbeResult(RenderLiveness.Blocked, sw.Elapsed.TotalMilliseconds, $"app error (render thread not draining): {line}");

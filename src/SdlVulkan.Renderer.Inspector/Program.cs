@@ -11,8 +11,8 @@ using SdlVulkan.Renderer.Inspector;
 // Discovery overrides (optional): --group <multicast-ip> / --port <n>, or the
 // SDLVK_INSPECTOR_GROUP / SDLVK_INSPECTOR_PORT environment variables. Defaults match the framework.
 
-var group = IPAddress.Parse(GetOption("--group", "SDLVK_INSPECTOR_GROUP") ?? "239.255.77.90");
-var port = int.TryParse(GetOption("--port", "SDLVK_INSPECTOR_PORT"), out var p) ? p : 47891;
+var group = IPAddress.Parse(GetOption("--group", "SDLVK_INSPECTOR_GROUP") ?? "239.255.77.91");
+var port = int.TryParse(GetOption("--port", "SDLVK_INSPECTOR_PORT"), out var p) ? p : 47892;
 
 // Headless protocol self-test (no MCP server): discover + ping + describe + screenshot, then exit.
 if (Array.Exists(args, a => a == "selftest"))
