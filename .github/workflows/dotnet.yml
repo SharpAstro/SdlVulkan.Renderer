@@ -117,7 +117,15 @@ env:
   #       server. Corrected a sidecar comment claiming the pump drains from OnPostFrame: it is
   #       OnLoopIteration, which is why a minimized window still answers and is correctly reported alive.
   #       4 host-contract tests (suite 43 passed / 1 skipped).
-  VERSION_PREFIX: 7.3.${{ github.run_number }}
+  # 7.4 - lockstep rebuild against DIR.Lib 7.4, no code change here. 7.4 gives PixelMeasureContext
+  #       per-axis scales plus a CellAuthored factory, the mirror of Console.Lib's
+  #       CellMeasureContext.PixelAuthored, so a cell-authored tree can now be arranged on a pixel
+  #       surface. It also adds PixelWidgetBase Arrange/Paint/RenderLayout overloads taking the measure
+  #       CONTEXT instead of a bare dpiScale, so the painter reads FontPath / FontScale / corner radius
+  #       from the same object the measure pass used; previously the scalar was threaded into both by
+  #       hand. Additive, and the scalar overloads delegate to the context ones with an isotropic
+  #       context, so this renderer paints byte-identically. Rebuilt to keep the family on one DIR.Lib.
+  VERSION_PREFIX: 7.4.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
