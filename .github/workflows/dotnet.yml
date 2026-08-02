@@ -130,6 +130,14 @@ env:
   #       from the same object the measure pass used; previously the scalar was threaded into both by
   #       hand. Additive, and the scalar overloads delegate to the context ones with an isotropic
   #       context, so this renderer paints byte-identically. Rebuilt to keep the family on one DIR.Lib.
+  # 7.5 - lockstep rebuild against DIR.Lib 7.5, and the pin now tracks the latest RELEASED DIR.Lib
+  #       rather than trailing a line behind it. No renderer code change. DIR.Lib 7.5 resolves installed
+  #       fonts by the family each face DECLARES rather than by a guessed file name, so a face whose file
+  #       isn't named after it resolves (Segoe UI Symbol lives in seguisym.ttf) and so does every face of
+  #       a .ttc past the first -- both previously unreachable. Those are named by FontFaceId (a path, or
+  #       path#index for a collection), which ManagedFontRasterizer honours; since the id is already every
+  #       glyph/atlas/shaper cache key, faces separate without further plumbing. FontFallbackResolver
+  #       gains TryResolveFont/CanRender and role-based construction. ADDITIVE.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
