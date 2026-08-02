@@ -1,0 +1,31 @@
+<Project>
+
+  <!-- Chains to a consumer's props rather than shadowing it. This repo is consumed as a nested
+       submodule by downstream projects, whose own Directory.Build.props its projects would otherwise
+       inherit; MSBuild stops at the first file it finds walking up, so a plain <Project> here would
+       silently cut that inheritance and change settings only when built through the consumer.
+       GetPathOfFileAbove finds the parent when nested, returns empty standalone. Captured into a
+       property first because nested quotes inside a Condition attribute do not parse (MSB4092). -->
+  <PropertyGroup>
+    <ParentBuildProps>$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))</ParentBuildProps>
+  </PropertyGroup>
+  <Import Project="$(ParentBuildProps)" Condition="Exists('$(ParentBuildProps)')" />
+
+  <PropertyGroup>
+    <!-- THE version for every package in this repo, and the only place it is written. CI stamps one
+         -p:Version across all of them, so a per-csproj prefix only ever served local builds and
+         drifted unnoticed: Inspector, WebView and WebView.Native sat at 6.0.0 while SdlVulkan.Renderer was 7.4.0, so a local
+         `dotnet pack` shipped them more than a major behind the renderer they ship with.
+         The workflow READS this back (dotnet msbuild -getProperty:VersionMajorMinor) rather than
+         restating it, so a release bump is this one line and CI cannot disagree with the packages it
+         builds. Add the matching changelog entry above the version's resolve step in
+         .github/workflows/dotnet.yml — that comment block is the de-facto release notes, and it stays
+         in the yml because several entries contain a double hyphen, which XML forbids inside a
+         comment. -->
+    <VersionMajorMinor>7.4</VersionMajorMinor>
+    <!-- Local builds get Major.Minor.0; CI passes -p:Version=Major.Minor.<run><attempt>+<sha>, and the
+         condition lets it win. -->
+    <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(VersionMajorMinor).0</VersionPrefix>
+  </PropertyGroup>
+
+</Project>

@@ -27,7 +27,6 @@
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageId>SdlVulkan.Renderer.Inspector</PackageId>
     <ToolCommandName>sdlvulkan-inspector</ToolCommandName>
-    <VersionPrefix>6.0.0</VersionPrefix>
     <Description>MCP server that discovers running Debug-build SDL3+Vulkan apps (built on SdlVulkan.Renderer) on the LAN and lets an AI agent inspect, screenshot, and drive their live UI.</Description>
     <PackageTags>mcp;ai;sdl;vulkan;debugging;inspector;ui</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>

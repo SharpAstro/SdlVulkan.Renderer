@@ -7,6 +7,11 @@ on:
     branches: [ main ]
 
 env:
+  # Release notes, one entry per Major.Minor. The version NUMBER is deliberately not here any more —
+  # it lives in src/Directory.Build.props (VersionMajorMinor) and the build job reads it back, so it
+  # cannot drift from what the packages declare. Add the entry here when you bump it there. (The
+  # entries stay in the yml rather than moving next to the number because several contain a double
+  # hyphen, which is illegal inside an XML comment.)
   # Major bump 4.1 -> 5.0: multi-page SDF glyph atlas. The atlas is now a list of fixed-size
   # page textures (default 2048²); a full page appends a new page instead of reallocating, so
   # glyph-atlas growth no longer does a vkDeviceWaitIdle + image realloc + re-upload (the visible
@@ -125,19 +130,43 @@ env:
   #       from the same object the measure pass used; previously the scalar was threaded into both by
   #       hand. Additive, and the scalar overloads delegate to the context ones with an isotropic
   #       context, so this renderer paints byte-identically. Rebuilt to keep the family on one DIR.Lib.
-  VERSION_PREFIX: 7.4.${{ github.run_number }}
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
+  # The build job CAPTURES a dotnet invocation's stdout to resolve the version, so the SDK's
+  # first-run banner must not be able to land in it.
+  DOTNET_NOLOGO: 1
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Published for the test job, so the version is resolved ONCE per run rather than each job
+    # re-deriving it.
+    outputs:
+      version-prefix: ${{ steps.version.outputs.prefix }}
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
+    - name: Resolve version prefix
+      id: version
+      # Read the version back from the one place it is written (src/Directory.Build.props) instead of
+      # restating it here — CI stamps -p:Version across every package, so a hard-coded copy here could
+      # ship packages whose version disagrees with the one they declare. -getProperty only EVALUATES
+      # the file: nothing is built and no restore is needed, so this can run before restore.
+      # The value is CAPTURED, so nothing else may print to stdout: DOTNET_NOLOGO (workflow env) keeps
+      # the SDK first-run banner out — this is the job's first dotnet call — and the shape check makes
+      # anything else unexpected, or a renamed property, fail the run rather than quietly stamping
+      # every package ".<run>".
+      run: |
+        MM="$(dotnet msbuild src/Directory.Build.props -getProperty:VersionMajorMinor -nologo)"
+        case "$MM" in
+          [0-9]*.[0-9]*) ;;
+          *) echo "::error::VersionMajorMinor did not resolve from src/Directory.Build.props (got '$MM')"; exit 1 ;;
+        esac
+        echo "VERSION_PREFIX=${MM}.${{ github.run_number }}" >> "$GITHUB_ENV"
+        echo "prefix=${MM}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
     - name: Install Android workload
       # The package multi-targets net10.0-android (SdlVulkanActivity host); restore resolves all TFMs,
       # so it needs the android workload. ubuntu runners already ship the Android SDK + JDK.
@@ -167,6 +196,9 @@ jobs:
   test:
     needs: build
     timeout-minutes: 15
+    # Inherited from the build job rather than resolved again — same run, same version.
+    env:
+      VERSION_PREFIX: ${{ needs.build.outputs.version-prefix }}
     strategy:
       fail-fast: false
       matrix:
