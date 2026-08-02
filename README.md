@@ -9,9 +9,9 @@ SDL3 + Vortice.Vulkan rendering library built on [DIR.Lib](https://github.com/Sh
   - `VulkanContext.Create(instance, surface, w, h, ...)` — on-screen path with a swapchain tied to an `SdlVulkanWindow`.
   - `VulkanContext.CreateOffscreen(instance, w, h, ...)` — headless path rendering to a standalone `VkImage`; no surface, no swapchain, no SDL window. See **Headless / offscreen rendering** below.
 - **`VkRenderer`** — `Renderer<VulkanContext>` implementation with FillRectangle, DrawRectangle, FillEllipse, DrawText, plus batched glyph and persistent-vertex-buffer draw APIs. Exposes `FontAtlasDirty` so callers can trigger redraws after glyph rasterization. Has `BeginFrame` / `BeginOffscreenFrame` variants that match the two `VulkanContext` modes.
-- **`VkPipelineSet`** — GLSL 450 shader compilation and Vulkan pipeline creation (flat, textured, ellipse, stroke, SDF, blend variants).
+- **`VkPipelineSet`** — Vulkan pipeline creation from pre-baked SPIR-V (flat, textured, ellipse, page, stroke, SDF, round-rect, blend variants). Shaders are authored as GLSL 450 and baked by `tools/BakeShaders` at build time — see **Dependencies** below.
 - **`VkFontAtlas`** — Dynamic bitmap glyph atlas with ManagedFontRasterizer (from DIR.Lib) rasterization and Vulkan texture upload. Supports grow (512→4096), deferred eviction, and `skipUnflushed` to prevent sampling stale GPU texture data.
-- **`VkSdfFontAtlas`** — Signed-distance-field glyph atlas side-car for resolution-independent text. `SdfRasterSize = 128`, `fwidth`-driven AA in the fragment shader auto-tunes to ±0.5 screen pixels at any zoom. Single-channel R8_Unorm texture, keyed on `(font, size, character, charCode)` so CID subset fonts don't collide.
+- **`VkSdfFontAtlas`** — Signed-distance-field glyph atlas side-car for resolution-independent text. `SdfRasterSize = 64` (overridable per atlas), `fwidth`-driven AA in the fragment shader auto-tunes to ±0.5 screen pixels at any zoom. Four-channel R8G8B8A8Unorm MTSDF texture — RGB carry pseudo-distance, which the shader medians to keep corners sharp, and A the true distance. Keyed on `(font, size, gid, glyph name)`: glyph identity rather than code point, so subset fonts that reuse code points don't collide.
 
 ## Font Atlas Lifecycle
 
