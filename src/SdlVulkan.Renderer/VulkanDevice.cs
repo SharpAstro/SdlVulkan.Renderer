@@ -19,7 +19,10 @@ namespace SdlVulkan.Renderer;
 /// </summary>
 public sealed unsafe class VulkanDevice : IDisposable
 {
-    private const uint MaxDescriptorSets = 512; // font atlas + textures
+    // Capacity of ONE descriptor pool, not a global ceiling: when a pool fills, another is added
+    // (see AllocateDescriptorSet). A pool cannot be resized once created, so growth is always by
+    // chaining — existing sets keep their handles and stay valid across a grow.
+    private const uint DescriptorSetsPerPool = 512; // font atlas + textures
 
     public VkInstance Instance { get; }
     public VkInstanceApi InstanceApi { get; }
@@ -37,7 +40,17 @@ public sealed unsafe class VulkanDevice : IDisposable
     /// fixed to B8G8R8A8Unorm on the offscreen path. Render pass and swapchain MUST agree on it.</summary>
     public VkFormat ColorFormat { get; }
 
-    public VkDescriptorPool DescriptorPool { get; }
+    /// <summary>The pool the next descriptor set will be taken from. Not the only one — see
+    /// <see cref="AllocateDescriptorSet"/>; kept single-valued for callers that just need a
+    /// representative handle.</summary>
+    public VkDescriptorPool DescriptorPool => _currentPool;
+
+    /// <summary>One linear/clamp-to-edge sampler shared by every <see cref="VkTexture"/>. Textures
+    /// used to create their own identical sampler each, which put a page of a few thousand small
+    /// images straight into <c>maxSamplerAllocationCount</c> (commonly 4096) for no benefit —
+    /// samplers carry no per-image state.</summary>
+    public VkSampler LinearClampSampler { get; }
+
     public VkDescriptorSetLayout DescriptorSetLayout { get; }
     public VkDescriptorSet DescriptorSet { get; }
     public VkPipelineLayout PipelineLayout { get; }
@@ -75,6 +88,17 @@ public sealed unsafe class VulkanDevice : IDisposable
 
     // Descriptor pool operations need external synchronization for multi-threaded access
     private readonly Lock _descriptorPoolLock = new();
+    // Every pool created so far, in creation order — all destroyed together at teardown.
+    private readonly List<VkDescriptorPool> _descriptorPools = new();
+    // Sets handed back by FreeDescriptorSet, ready to be re-issued. Every set in this device has
+    // the SAME single-combined-image-sampler layout, so a returned set is re-pointed at another
+    // image by UpdateDescriptorSet and reused as-is. That is why nothing here calls
+    // vkFreeDescriptorSets: recycling keeps the handle valid (strictly safer than freeing a set a
+    // command buffer might still reference) and means the pool count tracks PEAK live sets rather
+    // than growing with churn.
+    private readonly Stack<VkDescriptorSet> _freeDescriptorSets = new();
+    private VkDescriptorPool _currentPool;
+    private uint _setsLeftInCurrentPool;
     // Whether this device's Dispose also destroys the VkInstance. True on the standalone and
     // offscreen paths (the device was handed an instance it's expected to tear down). False under
     // SdlVulkanApp, which owns the instance and shares one device across windows — there the app
@@ -102,11 +126,29 @@ public sealed unsafe class VulkanDevice : IDisposable
         CommandPool = commandPool;
         RenderPass = renderPass;
         ColorFormat = colorFormat;
-        DescriptorPool = descriptorPool;
+        _descriptorPools.Add(descriptorPool);
+        _currentPool = descriptorPool;
+        // Create() already took the shared set below out of this pool.
+        _setsLeftInCurrentPool = DescriptorSetsPerPool - 1;
         DescriptorSetLayout = descriptorSetLayout;
         DescriptorSet = descriptorSet;
         PipelineLayout = pipelineLayout;
         MsaaSamples = msaaSamples;
+
+        // Linear filtering, clamp to edge, no mips — the settings every VkTexture used to ask for
+        // individually.
+        VkSamplerCreateInfo samplerCI = new()
+        {
+            magFilter = VkFilter.Linear,
+            minFilter = VkFilter.Linear,
+            addressModeU = VkSamplerAddressMode.ClampToEdge,
+            addressModeV = VkSamplerAddressMode.ClampToEdge,
+            addressModeW = VkSamplerAddressMode.ClampToEdge,
+            mipmapMode = VkSamplerMipmapMode.Linear,
+            maxLod = 1.0f
+        };
+        deviceApi.vkCreateSampler(&samplerCI, null, out var sharedSampler).CheckResult();
+        LinearClampSampler = sharedSampler;
     }
 
     /// <summary>
@@ -216,12 +258,12 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkDescriptorPoolSize poolSize = new()
         {
             type = VkDescriptorType.CombinedImageSampler,
-            descriptorCount = MaxDescriptorSets
+            descriptorCount = DescriptorSetsPerPool
         };
         VkDescriptorPoolCreateInfo dpCI = new()
         {
             flags = VkDescriptorPoolCreateFlags.FreeDescriptorSet,
-            maxSets = MaxDescriptorSets,
+            maxSets = DescriptorSetsPerPool,
             poolSizeCount = 1,
             pPoolSizes = &poolSize
         };
@@ -282,17 +324,73 @@ public sealed unsafe class VulkanDevice : IDisposable
     {
         lock (_descriptorPoolLock)
         {
-            var layout = DescriptorSetLayout;
-            VkDescriptorSetAllocateInfo dsAI = new()
+            // Recycle first: a returned set is indistinguishable from a fresh one here, since all
+            // sets share the single-combined-image-sampler layout.
+            if (_freeDescriptorSets.Count > 0) return _freeDescriptorSets.Pop();
+
+            var set = TryAllocateFromCurrentPool();
+            if (set == VkDescriptorSet.Null)
             {
-                descriptorPool = DescriptorPool,
-                descriptorSetCount = 1,
-                pSetLayouts = &layout
-            };
-            VkDescriptorSet set;
-            DeviceApi.vkAllocateDescriptorSets(&dsAI, &set).CheckResult();
+                // The pool is full. It cannot be enlarged, so add another and take from that. A
+                // fixed pool used to be a hard ceiling on how many textures a document could have:
+                // a page carrying a few thousand small images exhausted it, and because the glyph
+                // atlas draws from the same pool, TEXT could be the thing that got refused.
+                AddDescriptorPool();
+                set = TryAllocateFromCurrentPool();
+                if (set == VkDescriptorSet.Null)
+                    throw new InvalidOperationException(
+                        "descriptor set allocation failed against a freshly created pool");
+            }
             return set;
         }
+    }
+
+    /// <summary>Takes one set from the current pool, or returns null if that pool is spent.
+    /// Caller holds <see cref="_descriptorPoolLock"/>.</summary>
+    private VkDescriptorSet TryAllocateFromCurrentPool()
+    {
+        if (_setsLeftInCurrentPool == 0) return VkDescriptorSet.Null;
+
+        var layout = DescriptorSetLayout;
+        VkDescriptorSetAllocateInfo dsAI = new()
+        {
+            descriptorPool = _currentPool,
+            descriptorSetCount = 1,
+            pSetLayouts = &layout
+        };
+        VkDescriptorSet set;
+        var result = DeviceApi.vkAllocateDescriptorSets(&dsAI, &set);
+        // A driver may refuse before our own count says empty (fragmentation, or it accounts for
+        // pool capacity differently). Treat that as "this pool is done" rather than an error.
+        if (result is VkResult.ErrorOutOfPoolMemory or VkResult.ErrorFragmentedPool)
+        {
+            _setsLeftInCurrentPool = 0;
+            return VkDescriptorSet.Null;
+        }
+        result.CheckResult();
+        _setsLeftInCurrentPool--;
+        return set;
+    }
+
+    /// <summary>Caller holds <see cref="_descriptorPoolLock"/>.</summary>
+    private void AddDescriptorPool()
+    {
+        VkDescriptorPoolSize poolSize = new()
+        {
+            type = VkDescriptorType.CombinedImageSampler,
+            descriptorCount = DescriptorSetsPerPool
+        };
+        VkDescriptorPoolCreateInfo dpCI = new()
+        {
+            flags = VkDescriptorPoolCreateFlags.FreeDescriptorSet,
+            maxSets = DescriptorSetsPerPool,
+            poolSizeCount = 1,
+            pPoolSizes = &poolSize
+        };
+        DeviceApi.vkCreateDescriptorPool(&dpCI, null, out var pool).CheckResult();
+        _descriptorPools.Add(pool);
+        _currentPool = pool;
+        _setsLeftInCurrentPool = DescriptorSetsPerPool;
     }
 
     /// <summary>
@@ -302,7 +400,10 @@ public sealed unsafe class VulkanDevice : IDisposable
     {
         lock (_descriptorPoolLock)
         {
-            DeviceApi.vkFreeDescriptorSets(DescriptorPool, 1, &set);
+            // Recycled, not returned to the driver: with several pools in play we would otherwise
+            // have to remember which one issued this set, and re-issuing keeps the handle valid
+            // rather than invalidating one an in-flight command buffer may still name.
+            if (set != VkDescriptorSet.Null) _freeDescriptorSets.Push(set);
         }
     }
 
@@ -440,9 +541,11 @@ public sealed unsafe class VulkanDevice : IDisposable
             DeviceApi.vkDeviceWaitIdle();
         }
 
+        DeviceApi.vkDestroySampler(LinearClampSampler);
         DeviceApi.vkDestroyPipelineLayout(PipelineLayout);
         DeviceApi.vkDestroyDescriptorSetLayout(DescriptorSetLayout);
-        DeviceApi.vkDestroyDescriptorPool(DescriptorPool);
+        foreach (var pool in _descriptorPools)
+            DeviceApi.vkDestroyDescriptorPool(pool);
         DeviceApi.vkDestroyRenderPass(RenderPass);
         DeviceApi.vkDestroyCommandPool(CommandPool);
         DeviceApi.vkDestroyDevice();

@@ -119,18 +119,10 @@ public sealed unsafe class VkTexture : IDisposable
             new VkImageSubresourceRange(VkImageAspectFlags.Color, 0, 1, 0, 1));
         api.vkCreateImageView(&viewCI, null, out var imageView).CheckResult();
 
-        // Create sampler
-        VkSamplerCreateInfo samplerCI = new()
-        {
-            magFilter = VkFilter.Linear,
-            minFilter = VkFilter.Linear,
-            addressModeU = VkSamplerAddressMode.ClampToEdge,
-            addressModeV = VkSamplerAddressMode.ClampToEdge,
-            addressModeW = VkSamplerAddressMode.ClampToEdge,
-            mipmapMode = VkSamplerMipmapMode.Linear,
-            maxLod = 1.0f
-        };
-        api.vkCreateSampler(&samplerCI, null, out var sampler).CheckResult();
+        // Samplers carry no per-image state, so every texture asking for its own identical one only
+        // burned maxSamplerAllocationCount (commonly 4096) — reached by a single page carrying a few
+        // thousand small images. Share the device's.
+        var sampler = ctx.LinearClampSampler;
 
         // Allocate and update descriptor set
         var descriptorSet = ctx.AllocateDescriptorSet();
@@ -205,7 +197,7 @@ public sealed unsafe class VkTexture : IDisposable
         CleanupStaging();
         var api = _ctx.DeviceApi;
         _ctx.FreeDescriptorSet(DescriptorSet);
-        api.vkDestroySampler(_sampler);
+        // _sampler is the device's shared sampler — outlives every texture, never destroyed here.
         api.vkDestroyImageView(_imageView);
         api.vkDestroyImage(_image);
         api.vkFreeMemory(_imageMemory);

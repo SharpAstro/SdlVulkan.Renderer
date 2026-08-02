@@ -80,6 +80,10 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public VkCommandPool CommandPool => _dev.CommandPool;
     public VkRenderPass RenderPass => _dev.RenderPass;
     public VkDescriptorPool DescriptorPool => _dev.DescriptorPool;
+
+    /// <summary>The one linear/clamp sampler every <see cref="VkTexture"/> binds — see
+    /// <see cref="VulkanDevice.LinearClampSampler"/>.</summary>
+    public VkSampler LinearClampSampler => _dev.LinearClampSampler;
     public VkDescriptorSetLayout DescriptorSetLayout => _dev.DescriptorSetLayout;
     public VkDescriptorSet DescriptorSet => _dev.DescriptorSet;
     public VkPipelineLayout PipelineLayout => _dev.PipelineLayout;
