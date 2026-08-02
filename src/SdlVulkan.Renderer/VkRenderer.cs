@@ -711,6 +711,21 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public void DrawTexturedQuad(VkDescriptorSet textureSet,
         float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3)
+        => DrawTexturedQuadRegion(textureSet, x0, y0, x1, y1, x2, y2, x3, y3, 0f, 0f, 1f, 1f);
+
+    /// <summary>
+    /// Draws a SUB-REGION of a texture mapped to an arbitrary quad — <see cref="DrawTexturedQuad"/>
+    /// with the UV rectangle spelled out instead of assumed to be the whole texture. Corners keep
+    /// the same meaning: (x0,y0)=image origin, (x1,y1)=right edge, (x2,y2)=bottom edge,
+    /// (x3,y3)=far corner, now mapping to (u0,v0)…(u1,v1).
+    /// <para>
+    /// This is what lets many small images share one atlas texture: each draws its own sub-rect off
+    /// a single descriptor set, so the per-image descriptor set / sampler / allocation disappears.
+    /// </para>
+    /// </summary>
+    public void DrawTexturedQuadRegion(VkDescriptorSet textureSet,
+        float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+        float u0, float v0, float u1, float v1)
     {
         if (_pipelines is null) return;
 
@@ -718,12 +733,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         ReadOnlySpan<float> vertices =
         [
-            x0, y0, 0f, 0f,  // image origin (UV 0,0)
-            x1, y1, 1f, 0f,  // right edge   (UV 1,0)
-            x3, y3, 1f, 1f,  // far corner    (UV 1,1)
-            x0, y0, 0f, 0f,  // image origin  (UV 0,0)
-            x3, y3, 1f, 1f,  // far corner    (UV 1,1)
-            x2, y2, 0f, 1f   // bottom edge   (UV 0,1)
+            x0, y0, u0, v0,  // image origin
+            x1, y1, u1, v0,  // right edge
+            x3, y3, u1, v1,  // far corner
+            x0, y0, u0, v0,  // image origin
+            x3, y3, u1, v1,  // far corner
+            x2, y2, u0, v1   // bottom edge
         ];
 
         _pushConstants[16] = 1f;
