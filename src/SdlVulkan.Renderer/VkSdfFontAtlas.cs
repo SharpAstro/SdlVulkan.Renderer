@@ -117,7 +117,18 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
             "CreateSampler must run before the core ctor — OnPageCreated(0) fires inline from it");
         var res = new VkPageResources();
         CreateImage(res, pageDimension, pageDimension);
-        res.DescriptorSet = _ctx.AllocateDescriptorSet();
+        try
+        {
+            res.DescriptorSet = _ctx.AllocateDescriptorSet();
+        }
+        catch
+        {
+            // The image and its memory are already allocated. The core rolls its own page record
+            // back when this hook throws, so leaving them behind would leak a full atlas page per
+            // refused append. Freeing the still-null descriptor set is a no-op by spec.
+            DestroyPage(res);
+            throw;
+        }
         _ctx.UpdateDescriptorSet(res.DescriptorSet, res.ImageView, _sampler);
         _pageResources.Add(res);
         RenderDiag.Log("sdf.newpage", $"page {pageIndex} allocated {pageDimension}x{pageDimension}");
