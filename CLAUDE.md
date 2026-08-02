@@ -46,7 +46,7 @@ The `.csproj` uses a conditional ProjectReference: when `../DIR.Lib/` exists loc
 ## Architecture
 
 **Rendering pipeline flow:**
-`SdlVulkanApp` (process-wide SDL lifecycle + shared `VkInstance` + shared `VulkanDevice` for a multi-window app) → `SdlVulkanWindow` (per-window SDL3 window + Vulkan surface) → `VulkanContext` (per-window swapchain, command buffers, per-frame sync with `MaxFramesInFlight = 2`, vertex ring; references a `VulkanDevice`) → `VkRenderer` (2D draw API: rectangles, ellipses, text, textures) → `VkPipelineSet` (10 pipelines compiled from GLSL 450 at runtime)
+`SdlVulkanApp` (process-wide SDL lifecycle + shared `VkInstance` + shared `VulkanDevice` for a multi-window app) → `SdlVulkanWindow` (per-window SDL3 window + Vulkan surface) → `VulkanContext` (per-window swapchain, command buffers, per-frame sync with `MaxFramesInFlight = 2`, vertex ring; references a `VulkanDevice`) → `VkRenderer` (2D draw API: rectangles, ellipses, text, textures) → `VkPipelineSet` (11 pipelines built from pre-baked SPIR-V)
 
 **Device vs. context split (6.0+):** device-level state (logical device, queue, command pool, render pass, descriptor pool/layout, pipeline layout, MSAA) lives in `VulkanDevice`; per-window state (swapchain, framebuffers, sync, vertex ring, command buffers) lives in `VulkanContext`. `VulkanContext` forwards the device-level members (`ctx.RenderPass`, `ctx.PipelineLayout`, etc.) so existing consumers keep working. Three construction paths:
 - `SdlVulkanApp.CreateWindow` + `VulkanContext.CreateForSharedDevice` — multi-window; one `VulkanDevice` shared across windows (GPU resources stay valid in all of them, so a document tab can move between windows without re-uploading geometry).
@@ -57,11 +57,12 @@ A context tears down the device only when it created it; shared-device windows l
 
 **Key design patterns:**
 - **Push-constant-only uniforms** — no UBOs; all per-draw data (projection matrix, color, extra params) goes through an 84-byte push constant block
-- **Single descriptor set layout** — one combined-image-sampler layout owned by `VulkanDevice` and shared by all pipelines; the font atlas gets a fixed set, each `VkTexture` allocates its own (descriptor pool max 512)
+- **Single descriptor set layout** — one combined-image-sampler layout owned by `VulkanDevice` and shared by all pipelines; the font atlas gets a fixed set, each `VkTexture` allocates its own. `DescriptorSetsPerPool = 512` is the capacity of one pool, not a ceiling: a pool cannot be resized, so `AllocateDescriptorSet` chains a new one when the current fills, and `FreeDescriptorSet` recycles into a free-list rather than handing the set back to the driver (the handle stays valid for in-flight command buffers, and nothing has to track which pool issued it)
+- **One shared sampler** — every `VkTexture` binds `VulkanDevice.LinearClampSampler`. Samplers carry no per-image state, so a sampler per texture bought nothing and ran image-dense scenes into `maxSamplerAllocationCount` (commonly 4096)
 - **Per-frame vertex ring buffer** — two host-visible/coherent buffers (one per in-flight frame), written linearly and reset each `BeginFrame`
 - **Deferred texture upload** — `VkTexture.CreateDeferred` + `RecordUpload` records GPU uploads into the frame command buffer before `BeginRenderPass`, avoiding `vkQueueWaitIdle` stalls
 - **Font atlas lifecycle** — `VkFontAtlas` manages a growable bitmap glyph atlas (512→4096) with dirty-region staging upload; eviction is deferred one frame to prevent stale UV sampling; `skipUnflushed` guards draw loops from sampling unuploaded glyphs
-- **Multi-page SDF atlas** — `VkSdfFontAtlas` is a list of fixed-size page textures (default 2048², R8_Unorm); a full page appends a new page instead of reallocating (no `vkDeviceWaitIdle` + realloc + re-upload stall), with per-page LRU eviction. Optional `SdfGlyphDiskCache` persists rasterized SDF glyphs across runs (bounded per-frame load drain)
+- **Multi-page MTSDF atlas** — `VkSdfFontAtlas` is a list of fixed-size page textures (default 2048², R8G8B8A8Unorm: RGB carry pseudo-distance, which the shader medians to keep corners sharp, and A the true distance); a full page appends a new page instead of reallocating (no `vkDeviceWaitIdle` + realloc + re-upload stall), with per-page LRU eviction. Optional `SdfGlyphDiskCache` persists rasterized SDF glyphs across runs (bounded per-frame load drain)
 - **Idle-suppressing event loop** — `SdlEventLoop` uses `WaitEventTimeout` when idle, throttles mouse-motion redraws to ~30 fps; supports multi-window
 - **Live-device thumbnail capture** — `VkRenderer.BeginThumbnailCapture`/`EndThumbnailCapture`/`TryGetThumbnailCapture` re-issue already-tessellated geometry into an offscreen target at thumbnail scale with non-blocking readback (`VulkanContext.ThumbnailCapture`)
 
@@ -73,7 +74,7 @@ and `VkSkyMapPipeline` (3D star/constellation rendering with stereographic proje
 To create a side-car pipeline:
 1. Create your own `VkDescriptorSetLayout` + `VkPipelineLayout` (with your UBO/push constants)
 2. Create `VkPipeline` using `ctx.RenderPass` and `ctx.MsaaSamples` (must match)
-3. Compile GLSL 450 → SPIR-V at runtime using `Vortice.ShaderCompiler.Compiler`
+3. Bring your own SPIR-V — this package bakes its shaders at build time and no longer references `Vortice.ShaderCompiler`, so a side-car wanting runtime GLSL 450 → SPIR-V has to take that package itself
 4. Record draw commands via `renderer.CurrentCommandBuffer` between `BeginFrame`/`EndFrame`
 5. Use `ctx.WriteVertices()` for per-frame geometry or `ctx.CreatePersistentVertexBuffer()`
    for static geometry. Instancing is supported — just call `vkCmdDraw(vertexCount, instanceCount, ...)`
@@ -84,13 +85,13 @@ Side-car pipelines with their own `VkPipelineLayout` can define any push constan
 **Key files:**
 - `SdlVulkanApp.cs` — process-wide SDL + shared `VkInstance`/`VulkanDevice` for multi-window apps
 - `SdlVulkanWindow.cs` — per-window SDL3 window + Vulkan surface
-- `VulkanDevice.cs` — shared device-level state: queue, command pool, render pass, descriptor pool/layout, pipeline layout, MSAA
+- `VulkanDevice.cs` — shared device-level state: queue, command pool, render pass, the descriptor pool chain + layout, the shared sampler, pipeline layout, MSAA
 - `VkRenderer.cs` — high-level draw API, extends `Renderer<VulkanContext>` from DIR.Lib
 - `VulkanContext.cs` — per-window swapchain/sync/vertex-ring lifecycle (references a `VulkanDevice`); partials: `VulkanContext.Offscreen.cs` (headless render-to-image), `VulkanContext.SwapchainReadback.cs`, `VulkanContext.ThumbnailCapture.cs`
 - `VkFontAtlas.cs` — bitmap glyph rasterization cache + GPU texture management
-- `VkSdfFontAtlas.cs` — multi-page SDF glyph atlas (R8_Unorm pages) for resolution-independent text
+- `VkSdfFontAtlas.cs` — multi-page MTSDF glyph atlas (R8G8B8A8Unorm pages) for resolution-independent text
 - `SdfGlyphDiskCache.cs` — opt-in on-disk cache of rasterized SDF glyphs
-- `VkPipelineSet.cs` — GLSL→SPIR-V compilation + pipeline creation (Flat, Textured, Ellipse, Page, Stroke, SDF, blend variants)
+- `VkPipelineSet.cs` — pipeline creation from the pre-baked SPIR-V embedded in the assembly (Flat, Textured, Ellipse, Page, Stroke, SDF, RoundRect, blend variants). Shaders are authored as GLSL 450 in `Shaders/*.vert|*.frag` and baked to `Shaders/spirv/*.spv` by `tools/BakeShaders`; re-run it after editing one and commit the `.spv`
 - `VkTexture.cs` — per-image Vulkan texture with blocking and deferred upload modes
 - `SdlEventLoop.cs` — event-driven (multi-window) render loop with resize handling
 - `SdlInputMapping.cs` — SDL3 scancode/keymod → DIR.Lib `InputKey`/`InputModifier` mapping
