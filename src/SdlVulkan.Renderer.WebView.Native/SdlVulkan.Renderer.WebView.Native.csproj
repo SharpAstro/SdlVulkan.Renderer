@@ -15,7 +15,6 @@
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
     <IsAotCompatible>true</IsAotCompatible>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <VersionPrefix>6.0.0</VersionPrefix>
     <AssemblyVersion>6.0.0.0</AssemblyVersion>
     <PackageId>SdlVulkan.Renderer.WebView.Native</PackageId>
     <Description>Native WebView2Loader.dll assets (win-x64 / win-arm64 / win-x86) for SdlVulkan.Renderer.WebView.</Description>
