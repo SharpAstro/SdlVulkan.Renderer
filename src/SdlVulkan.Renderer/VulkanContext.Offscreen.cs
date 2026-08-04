@@ -179,8 +179,12 @@ public sealed unsafe partial class VulkanContext
 
         var fence = _inFlightFences[_currentFrame];
         DeviceApi.vkWaitForFences(1, &fence, true, ulong.MaxValue);
-        DeviceApi.vkResetFences(1, &fence);
 
+        // Not reset here — EndOffscreenFrame resets it immediately before the submit that signals it,
+        // for the same reason as the swapchain path (see the note in BeginFrame). It matters MORE here:
+        // this wait is unbounded, so a draw that threw between begin and end would orphan the fence and
+        // the next BeginOffscreenFrame would block forever with no timeout to escape through — a
+        // permanently hung export/thumbnail thread rather than a recoverable stall.
         var cmd = _commandBuffers[_currentFrame];
         DeviceApi.vkResetCommandBuffer(cmd, 0);
         VkCommandBufferBeginInfo bi = new() { flags = VkCommandBufferUsageFlags.OneTimeSubmit };
@@ -234,7 +238,14 @@ public sealed unsafe partial class VulkanContext
             commandBufferCount = 1,
             pCommandBuffers = &cmd
         };
-        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &si, _inFlightFences[_currentFrame]).CheckResult();
+        // No queue-ownership assertion here, deliberately: CreateOffscreen gives this context its OWN
+        // device, so this queue is private and can never race a window's frame submit. Successive jobs
+        // driven from Task.Run also land on different pool threads, which is legal (they never overlap)
+        // and would trip an identity-based check. The invariant that matters — one offscreen context is
+        // not used concurrently — belongs to its owner, not here.
+        var frameFence = _inFlightFences[_currentFrame];
+        DeviceApi.vkResetFences(1, &frameFence);
+        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &si, frameFence).CheckResult();
 
         _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
     }
@@ -308,6 +319,8 @@ public sealed unsafe partial class VulkanContext
 
         DeviceApi.vkEndCommandBuffer(cmd);
         VkSubmitInfo si2 = new() { commandBufferCount = 1, pCommandBuffers = &cmd };
+        // Queue submit + wait + a command-pool free — all external-synchronization points, all on this
+        // offscreen device's OWN private queue (see the note in EndOffscreenFrame).
         DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &si2, VkFence.Null).CheckResult();
         DeviceApi.vkQueueWaitIdle(GraphicsQueue);
         DeviceApi.vkFreeCommandBuffers(CommandPool, 1, &cmd);

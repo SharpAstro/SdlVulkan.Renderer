@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Vortice.Vulkan;
 using static Vortice.Vulkan.Vulkan;
 
@@ -451,8 +452,51 @@ public sealed unsafe class VulkanDevice : IDisposable
         throw new InvalidOperationException("Failed to find suitable memory type");
     }
 
+    // ---- Queue ownership: enforced, not locked ---------------------------------------------------
+    // Vulkan requires external synchronization of a VkQueue (vkQueueSubmit / vkQueuePresentKHR /
+    // vkQueueWaitIdle) and of a VkCommandPool. The obvious implementation is a lock on every submit —
+    // but that puts a lock on the hot path to guard a hazard this design does not actually have.
+    //
+    // Submission here is SINGLE-OWNER per device, checked against every call site: windows share one
+    // device but all render on the SDL event-loop thread; every offscreen context (the viewer's
+    // rasterizer, all test fixtures) is built by CreateOffscreen with its OWN device and therefore its
+    // own private queue; live thumbnail capture rides the window's own frame; and ExecuteOneShot is
+    // reachable only from VkTexture.CreateFromBgra — the legacy eager-upload path that CreateDeferred
+    // superseded, whose only remaining caller is a single-threaded fork test. One owner needs no
+    // mutual exclusion.
+    //
+    // That property is what makes the lock unnecessary, so it is asserted rather than left to prose:
+    // if a future change submits from a second thread, this fails immediately with a name attached
+    // instead of surfacing months later as an unexplained fence that never signals. DEBUG-only, so
+    // the shipped path carries neither a lock nor a check.
+    //
+    // Scope: identity-based, so it is applied only where "the owning thread" is a stable invariant —
+    // the windowed frame submit and the DEBUG readback. Offscreen paths opt out (see
+    // VulkanContext.Offscreen.cs): their queue is private, and successive Task.Run jobs legitimately
+    // arrive on different pool threads without ever overlapping.
+    private int _queueThreadId;
+
+    [Conditional("DEBUG")]
+    internal void AssertQueueThread(string method)
+    {
+        var id = Environment.CurrentManagedThreadId;
+        var owner = Interlocked.CompareExchange(ref _queueThreadId, id, 0);
+        if (owner != 0 && owner != id)
+        {
+            throw new InvalidOperationException(
+                $"{method} submitted to this device's queue from thread {id}, but the queue is owned by " +
+                $"thread {owner}. VkQueue and VkCommandPool require external synchronization; this device " +
+                "relies on single-owner submission instead of a lock. Either submit from the owning " +
+                "thread (hand the work to it), or give this path its own device via CreateOffscreen.");
+        }
+    }
+
     public void ExecuteOneShot(Action<VkCommandBuffer> action)
     {
+        // Touches both the queue and the shared command pool, each of which needs external
+        // synchronization; this device provides it by single ownership (see AssertQueueThread).
+        AssertQueueThread(nameof(ExecuteOneShot));
+
         DeviceApi.vkAllocateCommandBuffer(CommandPool, out var cmd).CheckResult();
 
         VkCommandBufferBeginInfo beginInfo = new()
