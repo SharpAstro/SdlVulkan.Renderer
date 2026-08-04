@@ -138,6 +138,14 @@ env:
   #       path#index for a collection), which ManagedFontRasterizer honours; since the id is already every
   #       glyph/atlas/shaper cache key, faces separate without further plumbing. FontFallbackResolver
   #       gains TryResolveFont/CanRender and role-based construction. ADDITIVE.
+  # 7.6 - lockstep rebuild against DIR.Lib 7.8 (7.5 -> 7.8; 7.6 and 7.7 needed nothing here). No renderer
+  #       code change. DIR.Lib 7.8 makes the PIXEL painter fit every text run to the rect the layout engine
+  #       arranged for it, this renderer being one of the surfaces that painter draws on. 7.7 had shipped
+  #       Layout.Content.Text.Trim as an author's declaration that only the cell painter acted on, so on a
+  #       GPU surface an over-wide run still drew over its neighbour; TextTrim gains Shrink (scale down,
+  #       keep every character) and None (draw whole and overhang, the previous behaviour). BEHAVIOUR
+  #       CHANGE upstream, not additive: a run left on the default TextTrim.End now ellipsizes here where
+  #       it used to overhang. 7.6 also drops a superseded local pin bump that upstream had already landed.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
