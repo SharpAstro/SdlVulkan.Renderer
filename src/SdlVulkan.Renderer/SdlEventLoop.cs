@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using DIR.Lib;
 using Vortice.Vulkan;
@@ -314,7 +315,7 @@ public sealed class SdlEventLoop
             if (recovery.IsCompletedSuccessfully)
             {
                 v.GpuRecoveryTask = null;
-                Console.Error.WriteLine($"[SdlEventLoop] GPU recovery completed (window {v.Window.WindowId}); resuming.");
+                SdlVulkanLog.Logger.GpuRecoveryCompleted(v.Window.WindowId);
                 // A surface rebuild queued up while recovery ran (Android backgrounded mid-recovery):
                 // recovery rebuilt against the OLD surface, which is dead — don't present to it. Hand
                 // control back to the rebuild branch next frame, now that the task is cleared.
@@ -337,7 +338,7 @@ public sealed class SdlEventLoop
             else if (recovery.IsFaulted)
             {
                 v.GpuRecoveryTask = null;
-                Console.Error.WriteLine($"[SdlEventLoop] GPU recovery failed: {recovery.Exception?.GetBaseException().Message}. Stopping event loop.");
+                SdlVulkanLog.Logger.GpuRecoveryFailed(recovery.Exception?.GetBaseException().Message);
                 _running = false;
                 return false;
             }
@@ -346,9 +347,9 @@ public sealed class SdlEventLoop
                 // The driver is blocking inside teardown on a hung device. Abandon the task (its
                 // thread stays blocked — leaked deliberately; the alternative is freezing THIS
                 // thread) and hand the terminal decision to the host.
-                Console.Error.WriteLine($"[SdlEventLoop] GPU wedged: recovery did not return within {GpuWedgeRecoveryDeadlineMs}ms (window {v.Window.WindowId}). Abandoning device.");
+                SdlVulkanLog.Logger.GpuWedgedRecoveryDeadline(GpuWedgeRecoveryDeadlineMs, v.Window.WindowId);
                 try { v.OnGpuWedged?.Invoke(); }
-                catch (Exception ex) { Console.Error.WriteLine($"[SdlEventLoop] OnGpuWedged handler threw: {ex.GetType().Name}: {ex.Message}"); }
+                catch (Exception ex) { SdlVulkanLog.Logger.OnGpuWedgedHandlerThrew(ex.GetType().Name, ex.Message); }
                 _running = false;
                 return false;
             }
@@ -417,7 +418,7 @@ public sealed class SdlEventLoop
             {
                 // The fence signaled after one or more late polls — the GPU was busy, not broken.
                 // Log the one-line resume so a "late" episode is visible end-to-end in the log.
-                Console.Error.WriteLine($"[SdlEventLoop] GPU fence recovered after {Environment.TickCount64 - v.FenceStuckSinceTick}ms (window {v.Window.WindowId}); no teardown needed.");
+                SdlVulkanLog.Logger.GpuFenceRecovered(Environment.TickCount64 - v.FenceStuckSinceTick, v.Window.WindowId);
                 v.FenceStuckSinceTick = 0;
             }
             v.NextRenderAttemptTick = 0;
@@ -447,7 +448,7 @@ public sealed class SdlEventLoop
                 {
                     v.FenceStuckSinceTick = now;
                     var idle = v.LastCleanFrameTick > 0 ? $"{now - v.LastCleanFrameTick}ms since last clean frame" : "no clean frame yet";
-                    Console.Error.WriteLine($"[SdlEventLoop] GPU fence late (window {v.Window.WindowId}); retrying without teardown ({idle}).");
+                    SdlVulkanLog.Logger.GpuFenceLate(v.Window.WindowId, idle, renderer.SubmissionLedger);
                 }
                 if (now - v.FenceStuckSinceTick < FenceEscalateMs)
                 {
@@ -455,14 +456,15 @@ public sealed class SdlEventLoop
                     v.NeedsRedraw = true;
                     return false;
                 }
-                Console.Error.WriteLine($"[SdlEventLoop] GPU fence stuck for {now - v.FenceStuckSinceTick}ms (window {v.Window.WindowId}); escalating to full recovery.");
+                SdlVulkanLog.Logger.GpuFenceStuckEscalating(now - v.FenceStuckSinceTick, v.Window.WindowId);
                 v.FenceStuckSinceTick = 0;
 
                 // Breadcrumb: what the frames leading into the hang were doing. A field wedge report
                 // with this line attached tells us whether a glyph-upload storm / page append was in
                 // flight without needing a repro (the hang itself lives GPU-side and leaves no dump).
-                Console.Error.WriteLine($"[SdlEventLoop] wedge breadcrumb (window {v.Window.WindowId}): {renderer.GlyphAtlasBreadcrumb}; {renderer.DeviceChurnBreadcrumb}; " +
-                    (v.LastCleanFrameTick > 0 ? $"last clean frame {now - v.LastCleanFrameTick}ms ago" : "no clean frame yet"));
+                SdlVulkanLog.Logger.WedgeBreadcrumb(v.Window.WindowId,
+                    renderer.GlyphAtlasBreadcrumb, renderer.DeviceChurnBreadcrumb, renderer.SubmissionLedger,
+                    v.LastCleanFrameTick > 0 ? $"last clean frame {now - v.LastCleanFrameTick}ms ago" : "no clean frame yet");
 
                 // A stuck fence means the GPU may be truly hung — and on a hung device the driver can
                 // block INSIDE the teardown entry points themselves (observed on Adreno:
@@ -473,9 +475,9 @@ public sealed class SdlEventLoop
                 // decision to the host instead of ping-ponging stuck→recover→stuck forever.
                 if (++v.StuckEscalations >= GpuStuckEscalationLimit)
                 {
-                    Console.Error.WriteLine($"[SdlEventLoop] GPU wedged: {v.StuckEscalations} stuck escalations without a clean frame (window {v.Window.WindowId}). Abandoning device.");
+                    SdlVulkanLog.Logger.GpuWedgedEscalationLimit(v.StuckEscalations, v.Window.WindowId);
                     try { v.OnGpuWedged?.Invoke(); }
-                    catch (Exception ex) { Console.Error.WriteLine($"[SdlEventLoop] OnGpuWedged handler threw: {ex.GetType().Name}: {ex.Message}"); }
+                    catch (Exception ex) { SdlVulkanLog.Logger.OnGpuWedgedHandlerThrew(ex.GetType().Name, ex.Message); }
                     _running = false;
                     return false;
                 }
@@ -490,7 +492,7 @@ public sealed class SdlEventLoop
             // after a window resize during submit, or driver bugs that surface
             // ErrorInitializationFailed). Killing the process on every recoverable hiccup is too
             // aggressive — try to rebuild sync + swapchain for this window and continue.
-            Console.Error.WriteLine($"[SdlEventLoop] Vulkan error mid-frame (window {v.Window.WindowId}): {vk.Result}. Recovering swapchain.");
+            SdlVulkanLog.Logger.VulkanErrorMidFrame(v.Window.WindowId, vk.Result);
             try
             {
                 // Track consecutive recoveries (errors within 1s of each other) so we can back off
@@ -504,10 +506,9 @@ public sealed class SdlEventLoop
                 if (v.RecoverStreak >= RenderDegradedStreakThreshold && !v.RenderDegradedNotified)
                 {
                     v.RenderDegradedNotified = true;
-                    Console.Error.WriteLine(
-                        $"[SdlEventLoop] render degraded (recover streak {v.RecoverStreak}, window {v.Window.WindowId}); requesting load-shed.");
+                    SdlVulkanLog.Logger.RenderDegraded(v.RecoverStreak, v.Window.WindowId);
                     try { v.OnRenderDegraded?.Invoke(); }
-                    catch (Exception ex) { Console.Error.WriteLine($"[SdlEventLoop] OnRenderDegraded handler threw: {ex.GetType().Name}: {ex.Message}"); }
+                    catch (Exception ex) { SdlVulkanLog.Logger.OnRenderDegradedHandlerThrew(ex.GetType().Name, ex.Message); }
                 }
 
                 v.Window.GetSizeInPixels(out var sw, out var sh);
@@ -536,10 +537,29 @@ public sealed class SdlEventLoop
             {
                 // Recovery itself failed (likely a true device-lost) — there's no sensible way to
                 // continue, so bail out of the loop cleanly so the caller can dispose state.
-                Console.Error.WriteLine($"[SdlEventLoop] Vulkan recovery failed: {inner.GetType().Name}: {inner.Message}. Stopping event loop.");
+                SdlVulkanLog.Logger.VulkanRecoveryFailed(inner.GetType().Name, inner.Message);
                 _running = false;
             }
             return false;
+        }
+        catch (Exception)
+        {
+            // A NON-Vulkan exception escaped OnRender (or an atlas flush) with a frame already begun:
+            // an app-side bug, not a GPU fault. Resolve the frame before letting it propagate. An
+            // abandoned frame keeps its acquired image and leaves its acquire semaphore signaled with
+            // no waiter, and the next acquire on that index would then signal an already-signaled
+            // binary semaphore — illegal, and a plausible route to a submit that waits forever. The
+            // fence itself is safe (it is only reset at submit time), so this is about the semaphore
+            // and the image.
+            //
+            // Rethrown deliberately: an app bug must still surface as that bug. This only ensures it
+            // does not ALSO leave the device in a state that looks like a driver wedge.
+            try { renderer.AbortFrame(); }
+            catch (Exception abort)
+            {
+                SdlVulkanLog.Logger.AbortFrameThrew(abort.GetType().Name, abort.Message);
+            }
+            throw;
         }
     }
 

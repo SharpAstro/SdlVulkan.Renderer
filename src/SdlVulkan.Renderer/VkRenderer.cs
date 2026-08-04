@@ -412,6 +412,21 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         UpdateProjection();
     }
 
+    /// <summary>
+    /// Resolve a frame that was begun but will not reach <see cref="EndFrame"/>, so its fence and
+    /// acquired image cannot leak into the next frame. See <see cref="VulkanContext.AbortFrame"/>.
+    /// </summary>
+    public void AbortFrame()
+    {
+        Surface.AbortFrame();
+        _currentCmd = VkCommandBuffer.Null;
+        _lastBoundPipeline = VkPipeline.Null;
+    }
+
+    /// <summary>Submission ledger for the wedge breadcrumb — whether the fence being waited on ever
+    /// had work submitted under it. See <see cref="VulkanContext.SubmissionLedger"/>.</summary>
+    public string SubmissionLedger => Surface.SubmissionLedger;
+
     /// <summary>CPU-side composition of the current frame's glyph-atlas activity. The event loop
     /// logs it when a fence sticks (the wedge breadcrumb) — a GPU hang leaves no readable GPU
     /// state, so this is the best available record of what the hung submission contained.</summary>

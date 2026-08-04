@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 #if DEBUG
 using Vortice.Vulkan;
 
@@ -27,7 +28,7 @@ public sealed unsafe partial class VulkanContext
         // Returns null; the caller surfaces a "readback unavailable" result instead of crashing.
         if (_fenceWaitStuck)
         {
-            Console.Error.WriteLine("[VulkanContext] screenshot readback skipped: GPU known stuck.");
+            SdlVulkanLog.Logger.ReadbackSkippedGpuStuck();
             return null;
         }
 
@@ -92,11 +93,14 @@ public sealed unsafe partial class VulkanContext
         // degraded state where a one-off leak is far cheaper than a freeze.
         VkSubmitInfo si = new() { commandBufferCount = 1, pCommandBuffers = &cmd };
         DeviceApi.vkCreateFence(VkFenceCreateFlags.None, out var readbackFence).CheckResult();
+        // DEBUG-only, and on a window's device — so it must run on the render thread like every other
+        // submit to it. The assertion catches an inspector/MCP thread calling in, which would be
+        // concurrent queue access (see VulkanDevice.AssertQueueThread).
+        _dev.AssertQueueThread("swapchain readback");
         DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &si, readbackFence).CheckResult();
         if (DeviceApi.vkWaitForFences(1, &readbackFence, true, DrainTimeoutNs) == VkResult.Timeout)
         {
-            Console.Error.WriteLine(
-                $"[VulkanContext] screenshot readback timed out after {DrainTimeoutNs / 1_000_000}ms; aborting (GPU saturated).");
+            SdlVulkanLog.Logger.ReadbackTimedOut(DrainTimeoutNs / 1_000_000);
             return null;
         }
         DeviceApi.vkDestroyFence(readbackFence);

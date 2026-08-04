@@ -160,6 +160,38 @@ env:
   #       significant -- the build counter stays out -- so republishing 7.6 does not churn identity again.
   #       Matches DIR.Lib 7.8's identical correction; the property now lives in the props file in all seven
   #       sibling repos, with none left in any csproj.
+  # 7.9 - GPU wedge root cause: a queue submit the driver REJECTS is no longer treated as one in
+  #       flight. Adreno (X1-85 / qcdx8380, Windows-on-ARM) returns VK_ERROR_INITIALIZATION_FAILED from
+  #       vkQueueSubmit, which is not a legal return there, and this code tolerated it on the belief that
+  #       the work executed anyway and the fence still signalled. It does not. A rejected submit left a
+  #       fence reset with nothing behind it, so the next BeginFrame waited on a fence nothing could ever
+  #       signal -- indistinguishable from a hung GPU while the GPU sat idle (Windows logged no TDR for
+  #       any of these). Escalation recreated the sync objects, which bought exactly MaxFramesInFlight
+  #       more frames before the same stall, and it looped: a field capture caught 7 cycles / 14
+  #       rejections and a black-but-responsive window. A rejected submit is now a dropped frame -- fence
+  #       left unmarked and never waited on, present skipped, acquire semaphore replaced (it is signalled
+  #       with no queued wait, so reuse would double-signal a binary semaphore), pending thumbnail copy
+  #       cancelled, frame index advanced.
+  #       Two related fixes. (a) The frame fence is now reset immediately before the submit that signals
+  #       it rather than in BeginFrame, so no exit between the two -- atlas grow, texture upload, the
+  #       consumer's whole render callback -- can orphan it; same on the offscreen path, where the wait is
+  #       unbounded and the resulting hang therefore permanent. (b) The stuck-fence recovery drain now
+  #       runs even in stuck mode (it is on the sacrificial task, where a block is abandonable): tearing
+  #       down fences and semaphores a merely-SLOW frame still references is illegal, and is what poisoned
+  #       the driver into rejecting every later submit.
+  #       Diagnostics that found it, and keep it findable: a submission ledger (does the fence being
+  #       waited on have work behind it, and how many frames back) plus device-object churn and the idle
+  #       gap since the last clean frame, all on the wedge breadcrumb and the "fence late" line;
+  #       VK_ERROR_DEVICE_LOST is now reported distinctly instead of as a generic VkException, so a log
+  #       can tell a real GPU reset from a fence with no submission. Queue/command-pool external
+  #       synchronization is ASSERTED (submission is single-owner per device) rather than locked, DEBUG
+  #       only. Unconditional diagnostics now go through an injectable ILogger (SdlVulkanLog, defaulting
+  #       to a stderr sink so an unwired host still gets the breadcrumbs) with every message a
+  #       [LoggerMessage] source-generated event. NEW dependency: Microsoft.Extensions.Logging.Abstractions
+  #       (interface-only). NEW: VulkanContext.AbortFrame/SubmissionLedger/DeviceLost,
+  #       VkRenderer.AbortFrame/SubmissionLedger, VulkanDevice.ChurnCounters/DeviceChurn, SdlVulkanLog.
+  #       Version jumps 7.6 -> 7.9 to match the downstream fork this landed in first, so a consumer
+  #       tracking either cannot see the chain move backwards.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

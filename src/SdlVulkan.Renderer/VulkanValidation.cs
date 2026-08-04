@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Vortice.Vulkan;
@@ -104,7 +105,7 @@ internal static unsafe class VulkanValidation
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[validation] messenger install failed: {ex.Message}");
+            SdlVulkanLog.Logger.ValidationMessengerInstallFailed(ex.Message);
         }
     }
 
@@ -131,7 +132,12 @@ internal static unsafe class VulkanValidation
         {
             var text = Marshal.PtrToStringUTF8((nint)data->pMessage) ?? string.Empty;
             var line = $"[validation:{severity}] {text}";
-            Console.Error.WriteLine(line);
+            // The layer's own severity maps onto the log level; the {ValidationLine} hole is a
+            // source-generated template parameter, so validation text containing braces is safe.
+            var level = (severity & VkDebugUtilsMessageSeverityFlagsEXT.Error) != 0 ? LogLevel.Error
+                : (severity & VkDebugUtilsMessageSeverityFlagsEXT.Warning) != 0 ? LogLevel.Warning
+                : LogLevel.Information;
+            SdlVulkanLog.Logger.ValidationMessage(level, line);
             Interlocked.Increment(ref s_totalMessages);
             if (text.Contains("SYNC-HAZARD", StringComparison.OrdinalIgnoreCase))
                 Interlocked.Increment(ref s_syncHazards);
