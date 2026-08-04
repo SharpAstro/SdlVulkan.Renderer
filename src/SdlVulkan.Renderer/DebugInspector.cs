@@ -18,7 +18,7 @@ namespace SdlVulkan.Renderer;
 /// screenshot, inject input, and post named signals.
 /// <para>
 /// Threading: the socket/UDP servers run on background tasks and only ENQUEUE commands. Every
-/// command executes on the RENDER THREAD inside <see cref="DrainCommands"/>, which is chained onto
+/// command executes on the RENDER THREAD inside the core's <c>Pump</c>, which is chained onto
 /// <see cref="SdlEventLoop.OnLoopIteration"/> by <see cref="Attach(SdlEventLoop, SdlWindowView, DebugInspectorOptions)"/>.
 /// That per-iteration hook fires EVERY loop iteration -- including while a window is minimized and
 /// nothing renders -- so commands keep draining on a minimized window (a per-frame hook would not).
@@ -44,7 +44,8 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         _startedAtUtc = DateTimeOffset.UtcNow.ToString("o");
     }
 
-    /// <summary>The ephemeral loopback port the command server bound to; 0 before <see cref="Attach"/>.</summary>
+    /// <summary>The ephemeral loopback port the command server bound to; 0 before
+    /// <see cref="Attach(SdlEventLoop, DebugInspectorOptions)"/>.</summary>
     public int Port => _core?.Port ?? 0;
 
     // ---------------- IDebugInspectorHost: the parts that are actually SDL ----------------
@@ -224,13 +225,13 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         "validationReport" => ExecuteValidationReport(),
         "frameStats" => ExecuteFrameStats(),
         "click" => ExecuteClickAt(Coord(p, "x"), Coord(p, "y"), Mods(p)),
-        "clickLabel" => ExecuteClickLabel(p.GetProperty("label").GetString() ?? ""),
-        "key" => ExecuteKey(ResolveInputKey(p.GetProperty("key").GetString() ?? ""), Mods(p)),
-        "text" => ExecuteText(p.GetProperty("s").GetString() ?? ""),
+        "clickLabel" => ExecuteClickLabel(RequiredString(p, "label")),
+        "key" => ExecuteKey(ResolveInputKey(RequiredString(p, "key")), Mods(p)),
+        // "text" is the name the batch contract advertises; "s" is what the direct verb has always sent.
+        "text" => ExecuteText(RequiredString(p, "text", "s")),
         "scroll" => ExecuteScroll(Coord(p, "x"), Coord(p, "y"), Coord(p, "scrollY")),
         "drag" => ExecuteDrag(Coord(p, "x1"), Coord(p, "y1"), Coord(p, "x2"), Coord(p, "y2"), Mods(p), DragSteps(p)),
-        "postSignal" => ExecutePostSignal(p.GetProperty("name").GetString() ?? "",
-            p.TryGetProperty("args", out var a) ? a.Clone() : default),
+        "postSignal" => ExecutePostSignal(RequiredString(p, "name"), SignalArgs(p)),
         // Reachable only OUTSIDE a batch, where there are no frames to wait for -- inside one the core
         // handles it. A no-op rather than an error, so a driver can send a uniform step list either way.
         "wait" => "\"waited\"",
@@ -239,7 +240,64 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         _ => null,
     };
 
-    private static float Coord(JsonElement p, string name) => p.GetProperty(name).GetSingle();
+    // Every reader below NAMES what it wanted when it is not there. GetProperty throws
+    // "The given key was not present in the dictionary", which reaches the caller as the whole
+    // explanation of a refused step: it says nothing about which step, which parameter, or what would
+    // have worked. That cost real time to diagnose from the other end of the wire.
+    private static float Coord(JsonElement p, string name)
+        => p.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number
+            ? v.GetSingle()
+            : throw new ArgumentException($"missing or non-numeric parameter '{name}'");
+
+    /// <summary>
+    /// First present string among <paramref name="names"/>. Several verbs are reachable both directly
+    /// and as a batch step, and the two spellings drifted apart; accepting either makes a step list and
+    /// a direct call interchangeable, which is what a caller assumes to begin with.
+    /// </summary>
+    internal static string RequiredString(JsonElement p, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (p.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String)
+            {
+                return v.GetString() ?? "";
+            }
+        }
+
+        throw new ArgumentException(names.Length == 1
+            ? $"missing string parameter '{names[0]}'"
+            : $"missing string parameter, expected one of: {string.Join(", ", names)}");
+    }
+
+    /// <summary>
+    /// Signal arguments as either an object (<c>args</c>) or a JSON string (<c>argsJson</c>, which is
+    /// what the direct postSignal verb carries). Absent or blank yields a default element, so the
+    /// signal is built from its own declared defaults.
+    /// <para>
+    /// Reading only <c>args</c> is why a batch step that passed <c>argsJson</c> reported success and
+    /// then did nothing: every field fell back to its default, and for a set-view signal whose fields
+    /// all default to "leave unchanged", doing nothing is indistinguishable from working.
+    /// </para>
+    /// </summary>
+    internal static JsonElement SignalArgs(JsonElement p)
+    {
+        if (p.TryGetProperty("args", out var args)
+            && args.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
+        {
+            return args.Clone();
+        }
+
+        if (p.TryGetProperty("argsJson", out var json)
+            && json.ValueKind == JsonValueKind.String
+            && json.GetString() is { Length: > 0 } text
+            && !string.IsNullOrWhiteSpace(text))
+        {
+            using var parsed = JsonDocument.Parse(text);
+            return parsed.RootElement.Clone();
+        }
+
+        return default;
+    }
 
     private static InputModifier Mods(JsonElement p) => ResolveModifier(
         p.TryGetProperty("mods", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null);
