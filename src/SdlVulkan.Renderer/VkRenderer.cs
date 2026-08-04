@@ -234,6 +234,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (resized || _currentCmd == VkCommandBuffer.Null)
             return false;
 
+        // Churn snapshot for the wedge breadcrumb. Taken only after the fence wait succeeds — like
+        // the atlas counters below, so on a stuck fence DeviceChurnBreadcrumb reports what the LAST
+        // SUBMITTED frame (the hung one) plus the stall was doing, not a half-begun frame.
+        _churnAtFrameStart = Surface.GraphicsDevice.ChurnCounters;
+
         // Handle deferred eviction, then flush font atlas changes before render pass
         _fontAtlas?.BeginFrame();
         _sdfFontAtlas?.BeginFrame();
@@ -411,6 +416,25 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// logs it when a fence sticks (the wedge breadcrumb) — a GPU hang leaves no readable GPU
     /// state, so this is the best available record of what the hung submission contained.</summary>
     public string GlyphAtlasBreadcrumb => _sdfFontAtlas is { } a ? $"sdf atlas: {a.FrameStats}" : "sdf atlas: n/a";
+
+    private VulkanDevice.DeviceChurn _churnAtFrameStart;
+
+    /// <summary>Device-object churn since the last frame that got past its fence wait — the second
+    /// half of the wedge breadcrumb. The 2026-08-04 field wedge had the SDF atlas (the breadcrumb's
+    /// only subsystem at the time) completely idle while buffers and image textures churned at
+    /// fling rate; this line means the next report distinguishes those on its own.</summary>
+    public string DeviceChurnBreadcrumb
+    {
+        get
+        {
+            var c = Surface.GraphicsDevice.ChurnCounters;
+            var s = _churnAtFrameStart;
+            return $"device churn since frame: buf +{c.BuffersCreated - s.BuffersCreated}/-{c.BuffersFreed - s.BuffersFreed} " +
+                $"img +{c.ImagesCreated - s.ImagesCreated}/-{c.ImagesFreed - s.ImagesFreed} " +
+                $"mem +{c.MemAllocs - s.MemAllocs}/-{c.MemFrees - s.MemFrees} " +
+                $"(lifetime buf {c.BuffersCreated} img {c.ImagesCreated})";
+        }
+    }
 
     /// <summary>Per-tier SDF atlas residency (pages + glyphs) for the tiered-atlas A/B — the small
     /// tier, plus the large tier when it's enabled. Cheap; intended for DEBUG/diagnostic reads.</summary>

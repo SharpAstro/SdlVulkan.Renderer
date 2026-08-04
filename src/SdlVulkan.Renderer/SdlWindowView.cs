@@ -190,6 +190,12 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     // gates the next render attempt for BOTH the gentle retry and the recovery-storm backoff.
     internal long FenceStuckSinceTick;
     internal long NextRenderAttemptTick;
+    // Tick of the last frame that completed cleanly (submit + present). The gap between this and a
+    // fence-late event is the idle-before-stall figure the wedge forensics need: every field wedge
+    // so far followed an idle-burst pattern (parse stalls, atlas grows) and a steady synthetic load
+    // could not reproduce one, so HOW LONG the GPU sat idle before the hung submission is the
+    // discriminating datum a report must carry.
+    internal long LastCleanFrameTick;
 
     // Sacrificial GPU-error recovery, per window (see SdlEventLoop.RenderView). When the fence is
     // known stuck the recovery teardown runs on a background task instead of the render thread —

@@ -73,6 +73,7 @@ public sealed unsafe class VkTexture : IDisposable
         api.vkCreateBuffer(&bufCI, null, out var stagingBuffer).CheckResult();
 
         api.vkGetBufferMemoryRequirements(stagingBuffer, out var memReqs);
+        ctx.GraphicsDevice.NoteBufferCreated();
         VkMemoryAllocateInfo allocInfo = new()
         {
             allocationSize = memReqs.size,
@@ -102,6 +103,7 @@ public sealed unsafe class VkTexture : IDisposable
             initialLayout = VkImageLayout.Undefined
         };
         api.vkCreateImage(&imageCI, null, out var image).CheckResult();
+        ctx.GraphicsDevice.NoteImageCreated();
 
         api.vkGetImageMemoryRequirements(image, out var imgMemReqs);
         VkMemoryAllocateInfo imgAllocInfo = new()
@@ -172,6 +174,7 @@ public sealed unsafe class VkTexture : IDisposable
         var api = _ctx.DeviceApi;
         api.vkDestroyBuffer(_stagingBuffer);
         api.vkFreeMemory(_stagingMemory);
+        _ctx.GraphicsDevice.NoteBufferDestroyed();
         _stagingBuffer = VkBuffer.Null;
         _stagingMemory = VkDeviceMemory.Null;
     }
@@ -201,5 +204,6 @@ public sealed unsafe class VkTexture : IDisposable
         api.vkDestroyImageView(_imageView);
         api.vkDestroyImage(_image);
         api.vkFreeMemory(_imageMemory);
+        _ctx.GraphicsDevice.NoteImageDestroyed();
     }
 }

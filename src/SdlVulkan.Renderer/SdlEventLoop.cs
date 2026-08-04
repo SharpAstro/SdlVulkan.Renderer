@@ -421,6 +421,7 @@ public sealed class SdlEventLoop
                 v.FenceStuckSinceTick = 0;
             }
             v.NextRenderAttemptTick = 0;
+            v.LastCleanFrameTick = Environment.TickCount64;
             v.RecoverStreak = 0; // a clean frame ends any recovery storm accounting
             v.StuckEscalations = 0; // ... and any stuck-fence escalation streak
             v.RenderDegradedNotified = false; // re-arm the load-shed request for the next storm
@@ -445,7 +446,8 @@ public sealed class SdlEventLoop
                 if (v.FenceStuckSinceTick == 0)
                 {
                     v.FenceStuckSinceTick = now;
-                    Console.Error.WriteLine($"[SdlEventLoop] GPU fence late (window {v.Window.WindowId}); retrying without teardown.");
+                    var idle = v.LastCleanFrameTick > 0 ? $"{now - v.LastCleanFrameTick}ms since last clean frame" : "no clean frame yet";
+                    Console.Error.WriteLine($"[SdlEventLoop] GPU fence late (window {v.Window.WindowId}); retrying without teardown ({idle}).");
                 }
                 if (now - v.FenceStuckSinceTick < FenceEscalateMs)
                 {
@@ -459,7 +461,8 @@ public sealed class SdlEventLoop
                 // Breadcrumb: what the frames leading into the hang were doing. A field wedge report
                 // with this line attached tells us whether a glyph-upload storm / page append was in
                 // flight without needing a repro (the hang itself lives GPU-side and leaves no dump).
-                Console.Error.WriteLine($"[SdlEventLoop] wedge breadcrumb (window {v.Window.WindowId}): {renderer.GlyphAtlasBreadcrumb}");
+                Console.Error.WriteLine($"[SdlEventLoop] wedge breadcrumb (window {v.Window.WindowId}): {renderer.GlyphAtlasBreadcrumb}; {renderer.DeviceChurnBreadcrumb}; " +
+                    (v.LastCleanFrameTick > 0 ? $"last clean frame {now - v.LastCleanFrameTick}ms ago" : "no clean frame yet"));
 
                 // A stuck fence means the GPU may be truly hung — and on a hung device the driver can
                 // block INSIDE the teardown entry points themselves (observed on Adreno:

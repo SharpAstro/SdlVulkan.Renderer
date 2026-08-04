@@ -480,6 +480,33 @@ public sealed unsafe class VulkanDevice : IDisposable
     /// Creates a persistent vertex buffer with the given data. The buffer lives until explicitly destroyed.
     /// Thread-safe — can be called from background tessellation tasks.
     /// </summary>
+    // --- Device-object churn counters (wedge forensics) -------------------------------------------
+    // A GPU hang leaves no GPU-side dump, and the field wedges keep outrunning hypotheses: the
+    // 2026-08-04 one had the SDF atlas (the only instrumented subsystem) completely idle, and the
+    // residency logs had to be read backwards to learn that buffer/texture churn was in flight
+    // instead. These count every buffer/image/memory create+free that goes through the device's own
+    // helpers or VkTexture, cumulatively; VkRenderer snapshots them at each BeginFrame so the wedge
+    // breadcrumb can print what the HUNG submission's frame was doing. Interlocked because creation
+    // can happen off the render thread (thumbnail capture, probes); these are creation paths, never
+    // per-draw, so the cost is noise.
+    private long _buffersCreated, _buffersFreed, _imagesCreated, _imagesFreed, _memAllocs, _memFrees;
+
+    /// <summary>Cumulative device-object churn snapshot. Deltas between two snapshots are the churn
+    /// in between — see <see cref="VkRenderer.DeviceChurnBreadcrumb"/>.</summary>
+    public readonly record struct DeviceChurn(
+        long BuffersCreated, long BuffersFreed, long ImagesCreated, long ImagesFreed,
+        long MemAllocs, long MemFrees);
+
+    public DeviceChurn ChurnCounters => new(
+        Interlocked.Read(ref _buffersCreated), Interlocked.Read(ref _buffersFreed),
+        Interlocked.Read(ref _imagesCreated), Interlocked.Read(ref _imagesFreed),
+        Interlocked.Read(ref _memAllocs), Interlocked.Read(ref _memFrees));
+
+    internal void NoteBufferCreated() { Interlocked.Increment(ref _buffersCreated); Interlocked.Increment(ref _memAllocs); }
+    internal void NoteBufferDestroyed() { Interlocked.Increment(ref _buffersFreed); Interlocked.Increment(ref _memFrees); }
+    internal void NoteImageCreated() { Interlocked.Increment(ref _imagesCreated); Interlocked.Increment(ref _memAllocs); }
+    internal void NoteImageDestroyed() { Interlocked.Increment(ref _imagesFreed); Interlocked.Increment(ref _memFrees); }
+
     public (VkBuffer Buffer, VkDeviceMemory Memory) CreatePersistentVertexBuffer(ReadOnlySpan<float> data)
     {
         var size = (ulong)(data.Length * sizeof(float));
@@ -508,6 +535,7 @@ public sealed unsafe class VulkanDevice : IDisposable
             System.Buffer.MemoryCopy(pData, mapped, (long)size, (long)size);
         DeviceApi.vkUnmapMemory(memory);
 
+        NoteBufferCreated();
         return (buffer, memory);
     }
 
@@ -515,6 +543,7 @@ public sealed unsafe class VulkanDevice : IDisposable
     {
         DeviceApi.vkDestroyBuffer(buffer);
         DeviceApi.vkFreeMemory(memory);
+        NoteBufferDestroyed();
     }
 
     /// <summary>
