@@ -146,6 +146,20 @@ env:
   #       keep every character) and None (draw whole and overhang, the previous behaviour). BEHAVIOUR
   #       CHANGE upstream, not additive: a run left on the default TextTrim.End now ellipsizes here where
   #       it used to overhang. 7.6 also drops a superseded local pin bump that upstream had already landed.
+  #       Later in 7.6, no X.Y bump: AssemblyVersion is now DERIVED from VersionMajorMinor in
+  #       src/Directory.Build.props for every project, instead of being restated as a literal per csproj.
+  #       This repo had the worst case in the family -- SdlVulkan.Renderer published 6.11.0.0 from 6.12 all
+  #       the way through 7.6, and both WebView projects published 6.0.0.0, each against an informational
+  #       version two majors ahead. The VersionPrefix half of exactly this drift was fixed earlier and the
+  #       AssemblyVersion half was missed, which is the more damaging half: CI stamps -p:Version and
+  #       -p:FileVersion but NOT -p:AssemblyVersion, so a stale VersionPrefix only spoils a local pack while
+  #       a stale AssemblyVersion spoils the package. All three are now 7.6.0.0.
+  #       Deliberately NOT a minor bump: the value only moves UP, and the runtime rejects a loaded assembly
+  #       LOWER than the compiled reference, never higher, so anything already built against 6.11.0.0 or
+  #       6.0.0.0 keeps loading. Floating 7.6.* consumers take it on the next restore. Only Major.Minor is
+  #       significant -- the build counter stays out -- so republishing 7.6 does not churn identity again.
+  #       Matches DIR.Lib 7.8's identical correction; the property now lives in the props file in all seven
+  #       sibling repos, with none left in any csproj.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

@@ -14,7 +14,6 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsAotCompatible>true</IsAotCompatible>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <AssemblyVersion>6.0.0.0</AssemblyVersion>
     <PackageId>SdlVulkan.Renderer.WebView</PackageId>
     <Description>Cross-platform native WebView (WebView2 / WebKitGTK / WKWebView) hosted inside an SdlVulkan.Renderer window.</Description>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>

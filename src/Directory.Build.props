@@ -26,6 +26,16 @@
     <!-- Local builds get Major.Minor.0; CI passes -p:Version=Major.Minor.<run><attempt>+<sha>, and the
          condition lets it win. -->
     <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(VersionMajorMinor).0</VersionPrefix>
+    <!-- Assembly identity, derived here for the same reason VersionPrefix is. The VersionPrefix half of
+         the drift above was fixed; the AssemblyVersion half was missed and was WORSE, because CI stamps
+         -p:Version and -p:FileVersion but NOT -p:AssemblyVersion — so where a stale VersionPrefix only
+         hurt local packs, a stale AssemblyVersion shipped. SdlVulkan.Renderer published 6.11.0.0 from
+         6.12 all the way through 7.6, and both WebView projects published 6.0.0.0, each against an
+         informational version two majors ahead. Unconditional on purpose: the value belongs to the repo,
+         and a per-project override is the bug this replaces.
+         Only Major.Minor is significant — the build counter deliberately stays out, so a republish of the
+         same X.Y does not change assembly identity. -->
+    <AssemblyVersion>$(VersionMajorMinor).0.0</AssemblyVersion>
   </PropertyGroup>
 
 </Project>
