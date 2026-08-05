@@ -282,10 +282,15 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// OnPreRenderPass hook (before the main render pass) and bracketed by <see cref="EndThumbnailCapture"/>.
     /// Returns false (and changes nothing) if the target isn't ready or a capture is already in flight.
     /// </summary>
-    public bool BeginThumbnailCapture(uint w, uint h)
+    /// <param name="clearColor">
+    /// What the target is cleared to before the capture draws — the page's paper. Explicit, like
+    /// <see cref="BeginOffscreenFrame"/>'s, rather than assumed white: a consumer rendering a dark page
+    /// gets ink that inverts over a sheet that does not, which reads as a bug in the ink.
+    /// </param>
+    public bool BeginThumbnailCapture(uint w, uint h, DIR.Lib.RGBAColor32 clearColor)
     {
         if (_currentCmd == VkCommandBuffer.Null || _inThumbnailCapture) return false;
-        if (!Surface.BeginThumbnailCapturePass(_currentCmd, w, h)) return false;
+        if (!Surface.BeginThumbnailCapturePass(_currentCmd, w, h, clearColor)) return false;
 
         _savedWidth = _width;
         _savedHeight = _height;

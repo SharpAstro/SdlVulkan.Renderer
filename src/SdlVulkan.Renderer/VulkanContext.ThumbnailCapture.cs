@@ -307,7 +307,8 @@ public sealed unsafe partial class VulkanContext
     /// <see cref="EndThumbnailCapturePassAndCopy"/>. Returns false (records nothing) if the target
     /// isn't ready, a previous capture is still in flight, or (w,h) exceeds the allocated capacity.
     /// </summary>
-    public bool BeginThumbnailCapturePass(VkCommandBuffer cmd, uint w, uint h)
+    public bool BeginThumbnailCapturePass(VkCommandBuffer cmd, uint w, uint h,
+        DIR.Lib.RGBAColor32 clearColor)
     {
         if (!_thumbTargetReady || _thumbPending || _thumbReady) return false;
         if (w == 0 || h == 0 || w > _thumbTargetW || h > _thumbTargetH) return false;
@@ -316,7 +317,8 @@ public sealed unsafe partial class VulkanContext
         _thumbCapH = h;
 
         VkClearValue clear = new();
-        clear.color = new VkClearColorValue(1f, 1f, 1f, 1f); // white page background
+        clear.color = new VkClearColorValue(clearColor.Red / 255f, clearColor.Green / 255f,
+            clearColor.Blue / 255f, clearColor.Alpha / 255f);
         VkRenderPassBeginInfo rpBI = new()
         {
             renderPass = _thumbRenderPass,
