@@ -192,6 +192,24 @@ env:
   #       VkRenderer.AbortFrame/SubmissionLedger, VulkanDevice.ChurnCounters/DeviceChurn, SdlVulkanLog.
   #       Version jumps 7.6 -> 7.9 to match the downstream fork this landed in first, so a consumer
   #       tracking either cannot see the chain move backwards.
+  # 7.10 - offscreen rendering survives a rejected queue submit. 7.9 made a rejected submit a dropped
+  #        frame on the swapchain path only; offscreen submits still went through CheckResult, so on the
+  #        same Adreno rejection an offscreen frame threw -- and threw BEFORE advancing the frame index,
+  #        leaving that fence reset with nothing behind it and the next BeginOffscreenFrame waiting on it
+  #        with ulong.MaxValue. That is the unsignalable-fence wedge 7.9 removed, reached through the
+  #        rejection path instead: moving vkResetFences next to the submit closed the begin-to-end window
+  #        but not this one. Any headless consumer could hang outright rather than fail -- a raster or
+  #        thumbnail worker, or a test. Reproduced on a page carrying 2.5M stroke commands.
+  #        An offscreen submit now RETRIES a rejection rather than degrading: the swapchain path can drop
+  #        a frame because the next one corrects it, but offscreen the frame IS the output, so dropping it
+  #        would read back whatever the target held and return stale or blank pixels indistinguishable
+  #        from a render. A rejected submit never consumed the command buffer, so re-submitting is the
+  #        same work, not a duplicate; attempts are capped and a persistent rejection still surfaces.
+  #        A submit that did not take is recorded as not pending, so no wait can park on a fence that can
+  #        never signal, and readback throws rather than mapping a buffer the copy never wrote.
+  #        Also on the swapchain path: the pending mark is now cleared on a rejection instead of only
+  #        being absent on an index never submitted under, so a rejection FOLLOWING a successful submit on
+  #        the same index no longer leaves the mark set against a just-reset fence. No API change.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

@@ -696,6 +696,13 @@ public sealed unsafe partial class VulkanContext : IDisposable
         else if (submitResult == VkResult.ErrorInitializationFailed)
         {
             Interlocked.Increment(ref _submitsRejected);
+            // Clear the pending mark, do not merely leave it. The ledger has to mean "work is in flight
+            // under this index that will signal its fence", and after an EARLIER successful submit on this
+            // index it would still read 1 — while the fence has just been reset for a submit that did not
+            // take. The next BeginFrame would then wait on a fence with nothing behind it, which is the
+            // very wedge this branch exists to prevent. Only the first rejection on a fresh index was
+            // covered before.
+            Volatile.Write(ref _submitPending[_currentFrame], 0);
             ReplaceImageAvailableSemaphore(_currentFrame);
             // A thumbnail copy recorded into this frame died with it. Cancel it, or the next
             // BeginFrame on this index — which skips the fence wait, there being nothing to wait
@@ -708,6 +715,10 @@ public sealed unsafe partial class VulkanContext : IDisposable
         }
         else
         {
+            // Same reasoning as the rejection branch above: the fence is reset and this submit did not
+            // take, so nothing will ever signal it. Clear the mark before throwing, or the throw leaves
+            // the trap behind for whatever recovers.
+            Volatile.Write(ref _submitPending[_currentFrame], 0);
             submitResult.CheckResult();
         }
 

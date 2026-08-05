@@ -169,6 +169,11 @@ public sealed unsafe partial class VulkanContext
         CreateOffscreenTarget(width, height);
     }
 
+    /// <summary>Submit attempts before an offscreen submit rejection is treated as terminal. Small on
+    /// purpose: this exists to ride out a transient driver rejection, not to grind against a real
+    /// failure, and every attempt after the first is already an anomaly worth surfacing.</summary>
+    private const int OffscreenSubmitAttempts = 4;
+
     /// <summary>
     /// Offscreen counterpart of <see cref="BeginFrame"/>. Waits on the frame fence, resets
     /// the command buffer, and returns it ready for recording. No swapchain acquire.
@@ -178,7 +183,17 @@ public sealed unsafe partial class VulkanContext
         if (!_isOffscreen) throw new InvalidOperationException("BeginOffscreenFrame requires CreateOffscreen");
 
         var fence = _inFlightFences[_currentFrame];
-        DeviceApi.vkWaitForFences(1, &fence, true, ulong.MaxValue);
+        // Skip the wait when nothing is in flight under this index. A fence that was reset for a submit
+        // which then failed is unsignaled with nothing behind it to ever signal it, and this wait has NO
+        // timeout — so waiting on it is a permanent hang, not a stall. That is exactly what happened
+        // before: EndOffscreenFrame threw on a rejected submit without advancing the index, and the next
+        // frame parked here forever. The ledger is the authority on whether a wait can be satisfied.
+        if (Volatile.Read(ref _submitPending[_currentFrame]) != 0)
+        {
+            var waitResult = DeviceApi.vkWaitForFences(1, &fence, true, ulong.MaxValue);
+            NoteDeviceLost(waitResult, "vkWaitForFences(offscreen)");
+        }
+        _frameOrdinal++;
 
         // Not reset here — EndOffscreenFrame resets it immediately before the submit that signals it,
         // for the same reason as the swapchain path (see the note in BeginFrame). It matters MORE here:
@@ -245,9 +260,56 @@ public sealed unsafe partial class VulkanContext
         // not used concurrently — belongs to its owner, not here.
         var frameFence = _inFlightFences[_currentFrame];
         DeviceApi.vkResetFences(1, &frameFence);
-        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &si, frameFence).CheckResult();
+        var submitResult = SubmitOffscreen(&si, frameFence, "submit(offscreen)");
 
+        if (submitResult == VkResult.Success)
+        {
+            Volatile.Write(ref _submitOrdinal[_currentFrame], _frameOrdinal);
+            Volatile.Write(ref _submitPending[_currentFrame], 1);
+            Interlocked.Increment(ref _submitsTotal);
+            _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
+            return;
+        }
+
+        // Nothing is in flight under this index: the fence was reset and the submit did not take. Mark it
+        // so, and advance, so that neither this index's next Begin nor a drain can wait on a fence that
+        // can never signal. Then fail loudly.
+        //
+        // Deliberately NOT the swapchain path's dropped-frame degradation. There, a lost frame is one
+        // flicker and the next frame corrects it. Here the frame IS the deliverable — an export or a
+        // thumbnail — so silently continuing would read back whatever the target happened to hold and
+        // hand the caller stale or blank pixels as if they were the page. A caller can retry a throw; it
+        // cannot detect a plausible-looking wrong image.
+        Volatile.Write(ref _submitPending[_currentFrame], 0);
         _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
+        submitResult.CheckResult();
+    }
+
+    /// <summary>Attempts an offscreen queue submit, retrying a rejection rather than degrading.
+    /// <para>
+    /// Qualcomm Adreno returns <c>VK_ERROR_INITIALIZATION_FAILED</c> from <c>vkQueueSubmit</c>, which is
+    /// not a spec-legal return there, and the work does NOT execute (see the long note in
+    /// <c>SubmitFrame</c>). The swapchain path answers that by dropping the frame, which it can afford.
+    /// This path cannot: its output is the product, so it retries instead — the submit failed, so the
+    /// command buffer was never consumed and re-submitting it is the same work, not a duplicate.
+    /// </para>
+    /// A short backoff between attempts because the rejection is transient and pressure-related; this
+    /// runs on an export/capture thread, never the render thread, so a few ms of sleep on a failure path
+    /// costs nothing. Returns the last result, so a persistent rejection still surfaces to the caller.
+    /// </summary>
+    private VkResult SubmitOffscreen(VkSubmitInfo* si, VkFence fence, string what)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var result = DeviceApi.vkQueueSubmit(GraphicsQueue, 1, si, fence);
+            RenderDiag.Vk(what, result, $"attempt={attempt}/{OffscreenSubmitAttempts}");
+            NoteDeviceLost(result, what);
+            if (result != VkResult.ErrorInitializationFailed) return result;
+
+            Interlocked.Increment(ref _submitsRejected);
+            if (attempt >= OffscreenSubmitAttempts) return result;
+            Thread.Sleep(attempt);
+        }
     }
 
     /// <summary>Blocks until the most recently submitted offscreen frame completes.</summary>
@@ -255,8 +317,12 @@ public sealed unsafe partial class VulkanContext
     {
         // The previous frame's fence is the one we just submitted against.
         var prevFrame = (_currentFrame + MaxFramesInFlight - 1) % MaxFramesInFlight;
+        // ...unless that submit did not take, in which case there is no work to wait for and this
+        // unbounded wait would never return. Same reasoning as BeginOffscreenFrame.
+        if (Volatile.Read(ref _submitPending[prevFrame]) == 0) return;
         var fence = _inFlightFences[prevFrame];
-        DeviceApi.vkWaitForFences(1, &fence, true, ulong.MaxValue);
+        var waitResult = DeviceApi.vkWaitForFences(1, &fence, true, ulong.MaxValue);
+        NoteDeviceLost(waitResult, "vkWaitForFences(offscreen complete)");
     }
 
     /// <summary>
@@ -321,7 +387,17 @@ public sealed unsafe partial class VulkanContext
         VkSubmitInfo si2 = new() { commandBufferCount = 1, pCommandBuffers = &cmd };
         // Queue submit + wait + a command-pool free — all external-synchronization points, all on this
         // offscreen device's OWN private queue (see the note in EndOffscreenFrame).
-        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &si2, VkFence.Null).CheckResult();
+        var copyResult = SubmitOffscreen(&si2, VkFence.Null, "submit(readback copy)");
+        if (copyResult != VkResult.Success)
+        {
+            // The copy never executed, so the staging buffer still holds uninitialized memory. Release it
+            // and fail: mapping it would hand back noise shaped exactly like a page of pixels, and there
+            // is no way for the caller to tell that from a render.
+            DeviceApi.vkFreeCommandBuffers(CommandPool, 1, &cmd);
+            DeviceApi.vkDestroyBuffer(stagingBuffer);
+            DeviceApi.vkFreeMemory(stagingMemory);
+            throw new VkException(copyResult, "offscreen readback copy was never submitted");
+        }
         DeviceApi.vkQueueWaitIdle(GraphicsQueue);
         DeviceApi.vkFreeCommandBuffers(CommandPool, 1, &cmd);
 
