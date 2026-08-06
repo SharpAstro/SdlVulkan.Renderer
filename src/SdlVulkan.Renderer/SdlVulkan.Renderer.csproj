@@ -65,14 +65,48 @@
     <ShaderSource Include="Shaders\*.vert;Shaders\*.frag" />
   </ItemGroup>
 
-  <!-- Warn (never fail) when a shader source is newer than its baked .spv, so an edit that forgets
-       to re-bake is visible. Timestamp-based: fires in a dev tree right after an edit; a fresh clone
-       has near-equal checkout times so it stays quiet on CI. -->
-  <Target Name="WarnStaleBakedShaders" BeforeTargets="CoreCompile"
-          Inputs="@(ShaderSource)"
-          Outputs="@(ShaderSource->'Shaders\spirv\%(Filename)%(Extension).spv')">
-    <Warning Code="SVR0001"
-             Text="Shader source(s) newer than baked SPIR-V; re-run 'dotnet run --project tools/BakeShaders -c Release -- src/SdlVulkan.Renderer/Shaders' and commit Shaders/spirv/*.spv. Stale: @(ShaderSource)" />
+  <!-- Warn (never fail) when a shader source no longer matches what it was baked from, so an edit that
+       forgets to re-bake is visible.
+
+       Compares CONTENT, against the hashes tools/BakeShaders recorded when it last ran. This replaced a
+       timestamp comparison, which a fresh checkout scrambles: git writes files in index order, so every
+       source sorting after `spirv/` (stroke.*, tex.*) lands newer than its own .spv and the warning fired
+       on every CI build while never being able to catch a real one. Hashes are reproducible from any
+       checkout, so a missing re-bake is now caught in CI too. Shaders/.gitattributes keeps the bytes
+       identical everywhere, which is what makes the hash portable. -->
+  <Target Name="WarnStaleBakedShaders" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <_BakedShaderManifest>Shaders\spirv\sources.sha256</_BakedShaderManifest>
+      <_BakeShadersCommand>dotnet run --project tools/BakeShaders -c Release -- src/SdlVulkan.Renderer/Shaders</_BakeShadersCommand>
+    </PropertyGroup>
+
+    <GetFileHash Files="@(ShaderSource)" MetadataName="SourceHash" HashEncoding="hex"
+                 Condition="Exists('$(_BakedShaderManifest)')">
+      <Output TaskParameter="Items" ItemName="_HashedShaderSource" />
+    </GetFileHash>
+    <ReadLinesFromFile File="$(_BakedShaderManifest)" Condition="Exists('$(_BakedShaderManifest)')">
+      <Output TaskParameter="Lines" ItemName="_BakedShaderLine" />
+    </ReadLinesFromFile>
+
+    <ItemGroup>
+      <!-- Join the two sides by content: each carries the manifest's `name=hash` line as metadata, so
+           Remove/MatchOnMetadata leaves exactly the sources whose line the manifest does not have: a
+           changed shader, or one that was never baked. Survivors keep the source path as their identity,
+           which is what the warning goes on to name. -->
+      <_ShaderBakeLine Include="@(_HashedShaderSource)">
+        <BakeLine>%(Filename)%(Extension)=%(SourceHash)</BakeLine>
+      </_ShaderBakeLine>
+      <_BakedShaderHash Include="@(_BakedShaderLine)">
+        <BakeLine>%(Identity)</BakeLine>
+      </_BakedShaderHash>
+      <_StaleShader Include="@(_ShaderBakeLine)" />
+      <_StaleShader Remove="@(_BakedShaderHash)" MatchOnMetadata="BakeLine" />
+    </ItemGroup>
+
+    <Warning Code="SVR0001" Condition="!Exists('$(_BakedShaderManifest)')"
+             Text="No baked-shader manifest ($(_BakedShaderManifest)), so whether Shaders/spirv/*.spv is current cannot be told; re-run '$(_BakeShadersCommand)'." />
+    <Warning Code="SVR0001" Condition="'@(_StaleShader)' != ''"
+             Text="Shader source(s) changed since they were baked; re-run '$(_BakeShadersCommand)' and commit Shaders/spirv/*.spv plus $(_BakedShaderManifest). Stale: @(_StaleShader)" />
   </Target>
 
   <!-- Android-only: SDL Java bridge (Org.Libsdl.App.SDLActivity) + per-ABI libSDL3.so natives. -->

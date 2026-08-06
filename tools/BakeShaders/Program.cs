@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Vortice.ShaderCompiler;
 
 // Bakes the renderer's GLSL 450 shaders (Shaders/*.vert, Shaders/*.frag) to a target format at
@@ -70,6 +71,7 @@ if (sources.Length == 0)
 
 using var compiler = new Compiler();
 var baked = 0;
+var manifest = new List<string>(sources.Length);
 foreach (var src in sources)
 {
     var fileName = Path.GetFileName(src);
@@ -100,7 +102,20 @@ foreach (var src in sources)
     File.WriteAllBytes(outPath, result.Bytecode);
     Console.WriteLine($"{fileName} -> {Path.GetFileName(outPath)} ({result.Bytecode.Length} bytes)");
     baked++;
+
+    // Hash the file's BYTES, not the decoded text: the build-time staleness check (SVR0001) hashes the
+    // file with MSBuild's GetFileHash, and only raw bytes can agree with it. Uppercase hex matches that
+    // task's output too -- a lowercase digest here would report every shader as stale.
+    manifest.Add($"{fileName}={Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(src)))}");
 }
 
+// What this bake was made from. The build compares these against the sources on disk to spot an edit
+// that never got re-baked; it can only do that honestly if the bake itself records its inputs.
+// Written only on full success, so a failed run never claims stale output is current, and with '\n'
+// regardless of platform so the committed file does not depend on who baked it.
+var manifestPath = Path.Combine(outDir, "sources.sha256");
+File.WriteAllText(manifestPath, string.Join('\n', manifest) + '\n');
+
 Console.WriteLine($"baked {baked} shader(s) [{target}] -> {outDir}");
+Console.WriteLine($"recorded {manifest.Count} source hash(es) -> {Path.GetFileName(manifestPath)}");
 return 0;

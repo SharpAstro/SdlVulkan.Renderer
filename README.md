@@ -9,7 +9,7 @@ SDL3 + Vortice.Vulkan rendering library built on [DIR.Lib](https://github.com/Sh
   - `VulkanContext.Create(instance, surface, w, h, ...)` — on-screen path with a swapchain tied to an `SdlVulkanWindow`.
   - `VulkanContext.CreateOffscreen(instance, w, h, ...)` — headless path rendering to a standalone `VkImage`; no surface, no swapchain, no SDL window. See **Headless / offscreen rendering** below.
 - **`VkRenderer`** — `Renderer<VulkanContext>` implementation with FillRectangle, DrawRectangle, FillEllipse, DrawText, plus batched glyph and persistent-vertex-buffer draw APIs. Exposes `FontAtlasDirty` so callers can trigger redraws after glyph rasterization. Has `BeginFrame` / `BeginOffscreenFrame` variants that match the two `VulkanContext` modes.
-- **`VkPipelineSet`** — Vulkan pipeline creation from pre-baked SPIR-V (flat, textured, ellipse, page, stroke, SDF, round-rect, blend variants). Shaders are authored as GLSL 450 and baked by `tools/BakeShaders` at build time — see **Dependencies** below.
+- **`VkPipelineSet`** — Vulkan pipeline creation from pre-baked SPIR-V (flat, textured, ellipse, page, stroke, SDF, round-rect, blend variants). Shaders are authored as GLSL 450 and baked to committed SPIR-V by `tools/BakeShaders`, re-run by hand after editing one — see **Dependencies** below.
 - **`VkFontAtlas`** — Dynamic bitmap glyph atlas with ManagedFontRasterizer (from DIR.Lib) rasterization and Vulkan texture upload. Supports grow (512→4096), deferred eviction, and `skipUnflushed` to prevent sampling stale GPU texture data.
 - **`VkSdfFontAtlas`** — Signed-distance-field glyph atlas side-car for resolution-independent text. `SdfRasterSize = 64` (overridable per atlas), `fwidth`-driven AA in the fragment shader auto-tunes to ±0.5 screen pixels at any zoom. Four-channel R8G8B8A8Unorm MTSDF texture — RGB carry pseudo-distance, which the shader medians to keep corners sharp, and A the true distance. Keyed on `(font, size, gid, glyph name)`: glyph identity rather than code point, so subset fonts that reuse code points don't collide.
 
@@ -224,7 +224,7 @@ Backend notes:
 - [SDL3-CS.Android](https://www.nuget.org/packages/SDL3-CS.Android) — android TFM only: SDL Java bridge + per-ABI `libSDL3.so` (see [Android](#android) for the version pin)
 - [Vortice.Vulkan](https://www.nuget.org/packages/Vortice.Vulkan) — Vulkan bindings
 
-Not a runtime dependency: [Vortice.ShaderCompiler](https://www.nuget.org/packages/Vortice.ShaderCompiler) (GLSL to SPIR-V) is used only by `tools/BakeShaders` at build time. Shaders ship pre-baked as embedded SPIR-V, which keeps the shaderc native — it has no Android RID — out of the package entirely.
+Not a runtime dependency: [Vortice.ShaderCompiler](https://www.nuget.org/packages/Vortice.ShaderCompiler) (GLSL to SPIR-V) is used only by `tools/BakeShaders`, which is run by hand and its output committed — no build here invokes it. Shaders ship pre-baked as embedded SPIR-V, which keeps the shaderc native — it has no Android RID — out of the package entirely. A build only *checks* the bake is current, via warning SVR0001.
 
 ## License
 
