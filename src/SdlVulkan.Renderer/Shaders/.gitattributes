@@ -1,0 +1,16 @@
+# Shader sources are hashed by the SVR0001 stale-bake check, so the bytes on disk have to be the bytes
+# in the commit on every machine -- `-text` turns off end-of-line translation for them entirely.
+# `text eol=lf` would not do: an editor that saves CRLF would hash CRLF locally and commit LF, leaving
+# the recorded hash unreachable from any clean checkout. With `-text` whatever gets committed is what
+# every checkout gets back, so the hash always agrees.
+*.vert -text
+*.frag -text
+
+# Baked bytecode: never translate. Git's binary detection already infers this from the NUL bytes; state
+# it anyway, so a repo-wide `text=auto` added later cannot corrupt an embedded resource.
+spirv/*.spv binary
+
+# The recorded hashes are an output of the bake, like the bytecode, and BakeShaders always writes them
+# with LF. Left to translation they arrive CRLF wherever core.autocrlf is on, which survives only because
+# MSBuild's line reader happens to strip the CR; pin them rather than rely on that.
+spirv/sources.sha256 -text
