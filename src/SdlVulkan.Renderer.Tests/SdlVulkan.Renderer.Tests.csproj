@@ -28,9 +28,11 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <!-- Vortice.Vulkan is a transitive of the renderer ProjectReference but we use its types
-         (VkInstance, VkBlendOp etc.) directly in the test, so pin it explicitly. The 3.2.1
-         version matches the lib's Directory.Packages.props. -->
-    <PackageReference Include="Vortice.Vulkan" Version="3.2.1" />
+         (VkInstance, VkBlendOp etc.) directly in the test, so pin it explicitly. This project sits
+         outside src/SdlVulkan.Renderer/, so it is out of that Directory.Packages.props' scope and
+         states the version inline — it has to be bumped in step with the lib, or restore fails the
+         build outright on NU1605 (a downgrade from the lib's transitive). -->
+    <PackageReference Include="Vortice.Vulkan" Version="3.2.3" />
   </ItemGroup>
 
   <ItemGroup>
