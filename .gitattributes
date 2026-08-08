@@ -1,0 +1,16 @@
+# The shader sources are HASHED, and the hash is recorded in the repo
+# (Shaders/spirv/sources.sha256) so the build can tell a stale bake from a current one.
+# That makes their bytes part of the build contract: a working tree where core.autocrlf
+# rewrote them to CRLF hashes differently from the LF blob, and SVR0001 fires on a
+# checkout nobody has edited. Pin them verbatim.
+#
+# `-text` and not `eol=lf`: -text disables the filter outright, so the bytes on disk are
+# the bytes in the object store on every platform. eol=lf still runs the filter and only
+# happens to agree today.
+*.vert  -text
+*.frag  -text
+*.comp  -text
+*.glsl  -text
+
+# The baked output is binary; never let a filter near it.
+*.spv   -text -diff
