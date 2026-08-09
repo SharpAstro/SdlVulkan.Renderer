@@ -808,6 +808,49 @@ public sealed unsafe class VulkanDevice : IDisposable
         return formats[0].format;
     }
 
+    /// <summary>How many subpass dependencies every render pass here declares. See
+    /// <see cref="FillSubpassDependencies"/> for why this is uniform.</summary>
+    internal const uint SubpassDependencyCount = 2;
+
+    /// <summary>
+    /// The subpass dependencies EVERY render pass in this renderer declares, identical in content and
+    /// count across all of them (swapchain, offscreen, thumbnail capture).
+    /// <para>
+    /// Render-pass compatibility is not only about attachments. Two passes whose dependency lists
+    /// differ are incompatible, so a pipeline baked against one may not legally be used inside the
+    /// other. The swapchain pass declared one dependency and the thumbnail-capture pass two, while
+    /// both drew with the same pre-baked pipelines: the validation layer reports that as
+    /// VUID-vkCmdDraw-renderPass-02684, "dependencyCount is incompatible ... 2 != 1". Declaring one
+    /// shared pair everywhere is what keeps the shared pipelines legal, and the trailing transfer
+    /// dependency costs the present path nothing it can measure.
+    /// </para>
+    /// <para>
+    /// The external-to-subpass entry carries <c>srcAccessMask = ColorAttachmentWrite</c> on purpose.
+    /// At 0 it orders execution but establishes no memory dependency against the PREVIOUS frame's
+    /// storeOp write to the same attachment, so vkCmdBeginRenderPass's layout transition races it and
+    /// synchronization validation reports a WRITE_AFTER_WRITE hazard on every alternating frame pair.
+    /// </para>
+    /// </summary>
+    internal static void FillSubpassDependencies(Span<VkSubpassDependency> deps)
+    {
+        deps[0] = new()
+        {
+            srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
+            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
+            srcAccessMask = VkAccessFlags.ColorAttachmentWrite,
+            dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
+            dstAccessMask = VkAccessFlags.ColorAttachmentWrite
+        };
+        deps[1] = new()
+        {
+            srcSubpass = 0, dstSubpass = VK_SUBPASS_EXTERNAL,
+            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
+            srcAccessMask = VkAccessFlags.ColorAttachmentWrite,
+            dstStageMask = VkPipelineStageFlags.Transfer,
+            dstAccessMask = VkAccessFlags.TransferRead
+        };
+    }
+
     private static VkRenderPass CreateRenderPass(VkDeviceApi deviceApi, VkFormat format,
         VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
     {
@@ -835,23 +878,21 @@ public sealed unsafe class VulkanDevice : IDisposable
                 pColorAttachments = &colorRef
             };
 
-            VkSubpassDependency dependency = new()
-            {
-                srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
-                srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput, srcAccessMask = 0,
-                dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-                dstAccessMask = VkAccessFlags.ColorAttachmentWrite
-            };
+            Span<VkSubpassDependency> deps = stackalloc VkSubpassDependency[(int)SubpassDependencyCount];
+            FillSubpassDependencies(deps);
 
-            VkRenderPassCreateInfo rpCI = new()
+            fixed (VkSubpassDependency* pDeps = deps)
             {
-                attachmentCount = 1, pAttachments = &colorAttachment,
-                subpassCount = 1, pSubpasses = &subpass,
-                dependencyCount = 1, pDependencies = &dependency
-            };
+                VkRenderPassCreateInfo rpCI = new()
+                {
+                    attachmentCount = 1, pAttachments = &colorAttachment,
+                    subpassCount = 1, pSubpasses = &subpass,
+                    dependencyCount = SubpassDependencyCount, pDependencies = pDeps
+                };
 
-            deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
-            return rp;
+                deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
+                return rp;
+            }
         }
 
         // MSAA — multisample color attachment (0) + resolve to swapchain (1)
@@ -890,21 +931,17 @@ public sealed unsafe class VulkanDevice : IDisposable
             pResolveAttachments = &resolveRef
         };
 
-        VkSubpassDependency msaaDep = new()
-        {
-            srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
-            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput, srcAccessMask = 0,
-            dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-            dstAccessMask = VkAccessFlags.ColorAttachmentWrite
-        };
+        Span<VkSubpassDependency> msaaDeps = stackalloc VkSubpassDependency[(int)SubpassDependencyCount];
+        FillSubpassDependencies(msaaDeps);
 
         fixed (VkAttachmentDescription* pAttachments = attachments)
+        fixed (VkSubpassDependency* pDeps = msaaDeps)
         {
             VkRenderPassCreateInfo msaaRpCI = new()
             {
                 attachmentCount = 2, pAttachments = pAttachments,
                 subpassCount = 1, pSubpasses = &msaaSubpass,
-                dependencyCount = 1, pDependencies = &msaaDep
+                dependencyCount = SubpassDependencyCount, pDependencies = pDeps
             };
 
             deviceApi.vkCreateRenderPass(&msaaRpCI, null, out var renderPass).CheckResult();
@@ -935,21 +972,19 @@ public sealed unsafe class VulkanDevice : IDisposable
                 colorAttachmentCount = 1,
                 pColorAttachments = &colorRef
             };
-            VkSubpassDependency dep = new()
+            Span<VkSubpassDependency> deps = stackalloc VkSubpassDependency[(int)SubpassDependencyCount];
+            FillSubpassDependencies(deps);
+            fixed (VkSubpassDependency* pDeps = deps)
             {
-                srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
-                srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput, srcAccessMask = 0,
-                dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-                dstAccessMask = VkAccessFlags.ColorAttachmentWrite
-            };
-            VkRenderPassCreateInfo rpCI = new()
-            {
-                attachmentCount = 1, pAttachments = &colorAttachment,
-                subpassCount = 1, pSubpasses = &subpass,
-                dependencyCount = 1, pDependencies = &dep
-            };
-            deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
-            return rp;
+                VkRenderPassCreateInfo rpCI = new()
+                {
+                    attachmentCount = 1, pAttachments = &colorAttachment,
+                    subpassCount = 1, pSubpasses = &subpass,
+                    dependencyCount = SubpassDependencyCount, pDependencies = pDeps
+                };
+                deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
+                return rp;
+            }
         }
 
         // MSAA: multisample color (0) resolves to offscreen image (1)
@@ -975,20 +1010,16 @@ public sealed unsafe class VulkanDevice : IDisposable
             pipelineBindPoint = VkPipelineBindPoint.Graphics,
             colorAttachmentCount = 1, pColorAttachments = &msaaColorRef, pResolveAttachments = &resolveRef
         };
-        VkSubpassDependency msaaDep = new()
-        {
-            srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
-            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput, srcAccessMask = 0,
-            dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-            dstAccessMask = VkAccessFlags.ColorAttachmentWrite
-        };
+        Span<VkSubpassDependency> msaaDeps = stackalloc VkSubpassDependency[(int)SubpassDependencyCount];
+        FillSubpassDependencies(msaaDeps);
         fixed (VkAttachmentDescription* pAtt = attachments)
+        fixed (VkSubpassDependency* pDeps = msaaDeps)
         {
             VkRenderPassCreateInfo rpCI = new()
             {
                 attachmentCount = 2, pAttachments = pAtt,
                 subpassCount = 1, pSubpasses = &msaaSubpass,
-                dependencyCount = 1, pDependencies = &msaaDep
+                dependencyCount = SubpassDependencyCount, pDependencies = pDeps
             };
             deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
             return rp;
