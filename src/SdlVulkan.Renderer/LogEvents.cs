@@ -14,7 +14,7 @@ namespace SdlVulkan.Renderer;
 /// the <c>[SdlEventLoop]</c>/<c>[VulkanContext]</c> prefixes: field-log tooling greps these lines,
 /// and the default stderr sink prints message-only, so the prefix is the only component identity
 /// the line carries there. Event ids: 1xx event loop, 2xx context/frame, 3xx readback,
-/// 4xx validation.
+/// 4xx validation, 5xx device selection.
 /// </para>
 /// </summary>
 internal static partial class LogEvents
@@ -94,4 +94,11 @@ internal static partial class LogEvents
     // Level comes from the validation layer's own severity, so it is a runtime parameter.
     [LoggerMessage(EventId = 402, Message = "{ValidationLine}")]
     public static partial void ValidationMessage(this ILogger logger, LogLevel level, string validationLine);
+
+    // Logged once per device creation. On a multi-GPU host (a discrete card plus an iGPU) the picker
+    // takes the first device that satisfies the requirements, and enumeration order is up to the
+    // loader, so which GPU is in use is not otherwise knowable. A later GPU report (device loss, a
+    // wedge, a driver quirk) cannot be attributed to hardware without this line.
+    [LoggerMessage(501, LogLevel.Information, "[VulkanDevice] selected {DeviceName} ({DeviceType}, driver {DriverVersion}, Vulkan {ApiVersion}), queue family {QueueFamily}, from {DeviceCount} enumerated.")]
+    public static partial void PhysicalDeviceSelected(this ILogger logger, string deviceName, string deviceType, string driverVersion, string apiVersion, uint queueFamily, uint deviceCount);
 }
