@@ -487,11 +487,30 @@ public sealed class SdlEventLoop
                 return false;
             }
 
+            // Device loss is terminal by specification, so it must not reach the recovery path below.
+            // The VkDevice and every object owned by it are gone, and each subsequent call on that
+            // device returns DEVICE_LOST again, so rebuilding sync + swapchain cannot bring it back.
+            // Only destroying and recreating the device can, which is what the OnGpuWedged hand-off
+            // does. Letting it fall through instead burned three futile submit attempts inside 34ms
+            // and then reached the right outcome only because the recover-streak detector happened to
+            // trip, i.e. it reported a "recovery storm" (a load problem, with a load-shed request) for
+            // what is actually a dead device. Seen in the field as a driver-level GPU error, with no
+            // OS-level "display driver stopped responding and has recovered" event to go with it.
+            if (vk.Result == VkResult.ErrorDeviceLost)
+            {
+                SdlVulkanLog.Logger.DeviceLostTerminal(v.Window.WindowId);
+                try { v.OnGpuWedged?.Invoke(); }
+                catch (Exception ex) { SdlVulkanLog.Logger.OnGpuWedgedHandlerThrew(ex.GetType().Name, ex.Message); }
+                _running = false;
+                return false;
+            }
+
             // A Vulkan call threw mid-frame — most commonly vkQueueSubmit/Present in EndFrame
             // returning a non-success status that CheckResult turns into a throw (ErrorOutOfDateKHR
             // after a window resize during submit, or driver bugs that surface
             // ErrorInitializationFailed). Killing the process on every recoverable hiccup is too
-            // aggressive — try to rebuild sync + swapchain for this window and continue.
+            // aggressive — try to rebuild sync + swapchain for this window and continue. Device loss
+            // is handled above, so "recovering" is now always something this path can actually do.
             SdlVulkanLog.Logger.VulkanErrorMidFrame(v.Window.WindowId, vk.Result);
             try
             {
