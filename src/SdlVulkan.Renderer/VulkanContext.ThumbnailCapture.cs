@@ -202,22 +202,15 @@ public sealed unsafe partial class VulkanContext
     // subpass→EXTERNAL transfer dependency makes the resolve write visible to vkCmdCopyImageToBuffer.
     private VkRenderPass CreateThumbnailRenderPass(VkFormat format, VkSampleCountFlags msaaSamples)
     {
-        // Make the color write visible to the transfer copy that follows EndRenderPass.
-        VkSubpassDependency toTransfer = new()
-        {
-            srcSubpass = 0, dstSubpass = VK_SUBPASS_EXTERNAL,
-            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-            srcAccessMask = VkAccessFlags.ColorAttachmentWrite,
-            dstStageMask = VkPipelineStageFlags.Transfer,
-            dstAccessMask = VkAccessFlags.TransferRead
-        };
-        VkSubpassDependency fromExternal = new()
-        {
-            srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
-            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput, srcAccessMask = 0,
-            dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-            dstAccessMask = VkAccessFlags.ColorAttachmentWrite
-        };
+        // The shared pair every render pass here declares. Its second entry is the one this pass
+        // actually needs (it makes the colour write visible to the vkCmdCopyImageToBuffer that follows
+        // EndRenderPass), but the pair must be declared IDENTICALLY everywhere or the pre-baked
+        // pipelines this pass borrows are not render-pass compatible with it. See
+        // VulkanDevice.FillSubpassDependencies; this pass having two dependencies while the swapchain
+        // pass had one is precisely what the validation layer flagged.
+        Span<VkSubpassDependency> sharedDeps =
+            stackalloc VkSubpassDependency[(int)VulkanDevice.SubpassDependencyCount];
+        VulkanDevice.FillSubpassDependencies(sharedDeps);
 
         if (msaaSamples == VkSampleCountFlags.Count1)
         {
@@ -239,14 +232,13 @@ public sealed unsafe partial class VulkanContext
                 colorAttachmentCount = 1,
                 pColorAttachments = &colorRef
             };
-            Span<VkSubpassDependency> deps = stackalloc VkSubpassDependency[2] { fromExternal, toTransfer };
-            fixed (VkSubpassDependency* pDeps = deps)
+            fixed (VkSubpassDependency* pDeps = sharedDeps)
             {
                 VkRenderPassCreateInfo rpCI = new()
                 {
                     attachmentCount = 1, pAttachments = &colorAttachment,
                     subpassCount = 1, pSubpasses = &subpass,
-                    dependencyCount = 2, pDependencies = pDeps
+                    dependencyCount = VulkanDevice.SubpassDependencyCount, pDependencies = pDeps
                 };
                 DeviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
                 return rp;
@@ -286,15 +278,14 @@ public sealed unsafe partial class VulkanContext
             pColorAttachments = &msaaColorRef,
             pResolveAttachments = &resolveRef
         };
-        Span<VkSubpassDependency> msaaDeps = stackalloc VkSubpassDependency[2] { fromExternal, toTransfer };
         fixed (VkAttachmentDescription* pAttachments = attachments)
-        fixed (VkSubpassDependency* pDeps = msaaDeps)
+        fixed (VkSubpassDependency* pDeps = sharedDeps)
         {
             VkRenderPassCreateInfo msaaRpCI = new()
             {
                 attachmentCount = 2, pAttachments = pAttachments,
                 subpassCount = 1, pSubpasses = &msaaSubpass,
-                dependencyCount = 2, pDependencies = pDeps
+                dependencyCount = VulkanDevice.SubpassDependencyCount, pDependencies = pDeps
             };
             DeviceApi.vkCreateRenderPass(&msaaRpCI, null, out var renderPass).CheckResult();
             return renderPass;
