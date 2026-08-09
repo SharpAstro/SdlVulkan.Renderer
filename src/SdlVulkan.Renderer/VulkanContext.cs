@@ -112,7 +112,14 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     // Per-frame sync
     private readonly VkSemaphore[] _imageAvailableSemaphores = new VkSemaphore[MaxFramesInFlight];
-    private readonly VkSemaphore[] _renderFinishedSemaphores = new VkSemaphore[MaxFramesInFlight];
+    // One per SWAPCHAIN IMAGE, not per frame in flight, and therefore owned by the swapchain rather
+    // than by CreateSyncObjects. vkQueuePresentKHR waits on this semaphore, and the wait is only
+    // finished once the presentation engine is done with that image, which is NOT bounded by
+    // MaxFramesInFlight: with more swapchain images than frames in flight, a per-frame semaphore gets
+    // re-signaled while a previous present is still waiting on it. That is
+    // VUID-vkQueueSubmit-pSignalSemaphores-00067, and it is a real hang/device-loss source rather
+    // than a papercut, because it only misbehaves once present timing turns irregular.
+    private VkSemaphore[] _renderFinishedSemaphores = [];
     private readonly VkFence[] _inFlightFences = new VkFence[MaxFramesInFlight];
     private readonly VkCommandBuffer[] _commandBuffers = new VkCommandBuffer[MaxFramesInFlight];
     private int _currentFrame;
@@ -391,11 +398,13 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // and on a truly dead fence it degrades to today's behaviour after the cap.
         TryDrainDevice(DrainTimeoutNs, "GPU-error recovery", attemptEvenIfStuck: true);
 
+        // Present-wait semaphores are deliberately absent here: they belong to the swapchain, and the
+        // CleanupSwapchain/CreateSwapchain pair at the end of this method replaces them. Destroying
+        // them here as well would double-free them.
         for (var i = 0; i < MaxFramesInFlight; i++)
         {
             DeviceApi.vkDestroyFence(_inFlightFences[i]);
             DeviceApi.vkDestroySemaphore(_imageAvailableSemaphores[i]);
-            DeviceApi.vkDestroySemaphore(_renderFinishedSemaphores[i]);
         }
         CreateSyncObjects();
         _currentFrame = 0;
@@ -622,7 +631,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
         DeviceApi.vkEndCommandBuffer(cmd);
 
         var waitSemaphore = _imageAvailableSemaphores[_currentFrame];
-        var signalSemaphore = _renderFinishedSemaphores[_currentFrame];
+        // Indexed by ACQUIRED IMAGE, not by frame slot: this is the semaphore vkQueuePresentKHR waits
+        // on below, and its availability tracks the image's presentation, not the frame in flight.
+        var signalSemaphore = _renderFinishedSemaphores[_currentImageIndex];
         VkPipelineStageFlags waitStage = VkPipelineStageFlags.ColorAttachmentOutput;
 
         VkSubmitInfo submitInfo = new()
@@ -808,10 +819,11 @@ public sealed unsafe partial class VulkanContext : IDisposable
             }
         }
 
+        // Present-wait semaphores were already destroyed by the CleanupSwapchain call above, which is
+        // why this loop only covers the per-frame objects.
         for (var i = 0; i < MaxFramesInFlight; i++)
         {
             DeviceApi.vkDestroySemaphore(_imageAvailableSemaphores[i]);
-            DeviceApi.vkDestroySemaphore(_renderFinishedSemaphores[i]);
             DeviceApi.vkDestroyFence(_inFlightFences[i]);
         }
 
@@ -937,6 +949,13 @@ public sealed unsafe partial class VulkanContext : IDisposable
         DeviceApi.vkGetSwapchainImagesKHR(Swapchain, images).CheckResult();
         _swapchainImages = images.ToArray();
 
+        // Present-wait semaphores are per image (see the field), so they are built here and torn down
+        // in CleanupSwapchain. Rebuilding them with the swapchain also keeps the count correct when a
+        // resize changes how many images the surface hands out.
+        _renderFinishedSemaphores = new VkSemaphore[imgCount];
+        for (var i = 0; i < imgCount; i++)
+            DeviceApi.vkCreateSemaphore(out _renderFinishedSemaphores[i]).CheckResult();
+
         // Create image views
         _swapchainImageViews = new VkImageView[imgCount];
         for (var i = 0; i < imgCount; i++)
@@ -1052,6 +1071,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
         if (Swapchain != VkSwapchainKHR.Null)
             DeviceApi.vkDestroySwapchainKHR(Swapchain);
 
+        // Per-image present-wait semaphores die with the swapchain that sized them. Callers drain the
+        // device before getting here (resize / GPU-error recovery / dispose), so nothing is waiting.
+        foreach (var s in _renderFinishedSemaphores)
+            DeviceApi.vkDestroySemaphore(s);
+        _renderFinishedSemaphores = [];
+
         _framebuffers = [];
         _swapchainImageViews = [];
         _swapchainImages = [];
@@ -1062,8 +1087,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     {
         for (var i = 0; i < MaxFramesInFlight; i++)
         {
+            // Only the acquire semaphore and the fence are per frame in flight. The present-wait
+            // semaphore is per swapchain image and is created in CreateSwapchain (see the field).
             DeviceApi.vkCreateSemaphore(out _imageAvailableSemaphores[i]).CheckResult();
-            DeviceApi.vkCreateSemaphore(out _renderFinishedSemaphores[i]).CheckResult();
             DeviceApi.vkCreateFence(VkFenceCreateFlags.Signaled, out _inFlightFences[i]).CheckResult();
         }
     }
