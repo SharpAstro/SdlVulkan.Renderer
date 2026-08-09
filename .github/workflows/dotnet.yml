@@ -210,6 +210,60 @@ env:
   #        Also on the swapchain path: the pending mark is now cleared on a rejection instead of only
   #        being absent on an index never submitted under, so a rejection FOLLOWING a successful submit on
   #        the same index no longer leaves the mark set against a just-reset fence. No API change.
+  # 7.11 - the fallout of one device-loss investigation, plus a lockstep rebuild against DIR.Lib 7.14.
+  #        Five renderer changes, four of them things the validation layer had been unable to tell us.
+  #        VK_ERROR_DEVICE_LOST is now TERMINAL rather than entering mid-frame recovery. Recovery rebuilds
+  #        sync and the swapchain and continues, which cannot work once the device and every object it owns
+  #        are gone: each later call returns DEVICE_LOST again, so the rebuild re-failed on the next submit
+  #        -- three attempts burned inside 34ms, and the right outcome (hand the session to a successor)
+  #        was reached only because the recover-streak detector happened to trip. That detector logs a
+  #        "recovery storm" and asks the app to shed load, which reads as a workload problem and points
+  #        diagnosis away from a dead device. Event 110 "Recovering swapchain" is now logged only for
+  #        errors that path can actually recover; new event 115 names device loss for what it is.
+  #        Each swapchain image gets its OWN present-wait semaphore. render-finished was allocated per
+  #        frame in flight and indexed by frame slot, but vkQueuePresentKHR's wait completes only when the
+  #        presentation engine is done with the IMAGE, and image count is not bounded by MaxFramesInFlight
+  #        -- so with more images than frames a new submit could re-signal a semaphore an earlier present
+  #        was still waiting on (VUID-vkQueueSubmit-pSignalSemaphores-00067). Its lifetime moves onto the
+  #        swapchain so a resize that changes the image count rebuilds it. Latent while presentation is
+  #        regular, which is why it surfaced over Remote Desktop.
+  #        ONE shared subpass-dependency pair, in VulkanDevice.FillSubpassDependencies, used by all six
+  #        creation sites. Every pass had written its own: render-pass compatibility covers dependencies,
+  #        so pre-baked pipelines drawing in a pass with a different dependency count were rejected
+  #        (VUID-vkCmdDraw-renderPass-02684, "2 != 1"). And every external dependency used srcAccessMask =
+  #        0, which orders execution but creates no memory dependency against the previous frame's storeOp
+  #        write, so the layout transition raced it -- a WRITE_AFTER_WRITE hazard on every alternating pair
+  #        of frames. srcAccessMask is now ColorAttachmentWrite.
+  #        Diagnostics that were lying: validationReport now reports layerAvailable and active, not just
+  #        the DEBUG + SDLVK_VALIDATION gate -- on a host with no Khronos layer installed it read
+  #        enabled:true with zero messages and zero hazards, indistinguishable from a clean run, and was
+  #        read as one during the very investigation above. A zero message count is evidence only when
+  #        active is true. The sync-hazard counter matched only the retired "SYNC-HAZARD" token and so
+  #        reported zero while the ring buffer plainly held WRITE_AFTER_WRITE messages.
+  #        And a DiscreteGpu PREFERENCE (never a requirement, so integrated-only hosts are unaffected):
+  #        both pickers took the first device meeting their requirements, so a machine with both cards ran
+  #        on whatever the loader enumerated first, possibly integrated graphics on shared memory. New
+  #        event 501 records device name, type, driver version, API version, queue family and how many
+  #        devices were enumerated -- nothing had logged the selection, so no GPU report could be
+  #        attributed to hardware from our own logs.
+  #        Then the rebuild: the DIR.Lib pin moves 7.11 -> 7.14 (that the OLD pin and this package's NEW
+  #        version both read 7.11 is coincidence -- the two version lines are independent). Everything in
+  #        that range is upstream text metrics, which a Vulkan surface feels in full, being a pixel surface.
+  #        DIR.Lib 7.12 is additive: TextInputRenderer takes a palette, the shape TabBar got in 7.10.
+  #        DIR.Lib 7.13 bounds the SDF atlas's rasterize retry -- directly relevant here, because this
+  #        backend's VkSdfFontAtlas is a thin shell over that core, and an unrasterizable glyph used to
+  #        pin IsDirty true and present as "the render never settles" with nothing naming a font. It ALSO
+  #        carried an unannounced measurement fix, only written up in 7.14's notes: a whitespace advance
+  #        now comes from the font instead of being borrowed from the 'n' glyph, and in DejaVu every
+  #        measured space had been 1.99x too wide. Text laid out with space padding therefore moves
+  #        narrower here; U+2007 FIGURE SPACE is the pad that holds a column, being digit-width by
+  #        definition.
+  #        DIR.Lib 7.14 makes TextFit.ShrinkToWidth return a size it actually measured, so a run fitted
+  #        with TextTrim.Shrink stops drawing a fraction of a pixel past its rect. Shrink is opt-in and
+  #        the default is End, so a consumer that never asks for it renders byte-identically.
+  #        Released alongside Console.Lib 4.20 and WebGl.Renderer 1.18, deliberately as a set: a consumer
+  #        holding two backends built against different DIR.Lib minors unifies on the higher one by luck
+  #        rather than by intent.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
