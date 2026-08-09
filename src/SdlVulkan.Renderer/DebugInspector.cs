@@ -605,7 +605,16 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     {
         var snap = VulkanValidation.Snapshot();
         w.WriteStartObject();
+        // Report whether the layer is actually installed, not just whether the gate is on. "enabled"
+        // alone is a trap: with SDLVK_VALIDATION=1 on a host that has no Khronos validation layer
+        // (no Vulkan SDK), nothing validates, yet the counts below still read 0 and look like a clean
+        // bill of health. That misreading turned "no hazards found" into a false all-clear during a
+        // real device-loss investigation. "active" is the only field that means a zero count is
+        // evidence of anything.
+        var layerAvailable = VulkanValidation.LayerAvailable();
         w.WriteBoolean("enabled", VulkanValidation.Enabled);
+        w.WriteBoolean("layerAvailable", layerAvailable);
+        w.WriteBoolean("active", VulkanValidation.Enabled && layerAvailable);
         w.WriteBoolean("syncValidation", VulkanValidation.SyncEnabled);
         w.WriteNumber("totalMessages", snap.TotalMessages);
         w.WriteNumber("syncHazards", snap.SyncHazards);
