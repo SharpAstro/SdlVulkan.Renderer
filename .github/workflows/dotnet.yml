@@ -264,6 +264,12 @@ env:
   #        Released alongside Console.Lib 4.20 and WebGl.Renderer 1.18, deliberately as a set: a consumer
   #        holding two backends built against different DIR.Lib minors unifies on the higher one by luck
   #        rather than by intent.
+  # 7.12 - Additive. SdlVulkanWindow.SetIcon(RgbaImage) sets the window's icon: the title bar mark, the
+  #        taskbar or dock button, the alt-tab entry. Not a Windows convenience: a Win32 icon resource in
+  #        the executable covers Windows and nothing else, because X11 and Wayland read the icon from the
+  #        window, so a Linux build without this call shows the desktop's placeholder. Takes RgbaImage,
+  #        which is what every decoder in this stack already produces, and hands SDL the little-endian
+  #        spelling of memory-order RGBA. SDL copies the pixels, so the caller's array is free on return.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
