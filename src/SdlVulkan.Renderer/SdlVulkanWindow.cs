@@ -1,3 +1,4 @@
+using DIR.Lib;
 using Vortice.Vulkan;
 using static Vortice.Vulkan.Vulkan;
 using static SDL3.SDL;
@@ -171,6 +172,32 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
     }
 
     public void SetTitle(string title) => SDL3.SDL.SetWindowTitle(Handle, title);
+
+    /// <summary>
+    /// Sets the window's icon: the title bar mark, the taskbar or dock button, and the alt-tab entry.
+    /// Pass the largest size the app has (256px is plenty) and let the platform scale down.
+    /// </summary>
+    /// <remarks>
+    /// <para>An app that ships a Win32 icon resource in its executable already gets one on Windows, and
+    /// nowhere else: X11 and Wayland read the icon from the window, and a Linux build with no call to
+    /// this shows the desktop's placeholder. So this is not a Windows-redundant convenience, it is the
+    /// only portable route.</para>
+    /// <para>SDL copies the pixels into its own icon storage, so the surface and the caller's array are
+    /// free the moment this returns. Takes <see cref="RgbaImage"/> because that is what every decoder in
+    /// this stack already produces; the format handed to SDL is the little-endian spelling of
+    /// memory-order RGBA.</para>
+    /// </remarks>
+    public void SetIcon(RgbaImage image)
+    {
+        fixed (byte* pixels = image.Pixels)
+        {
+            var surface = CreateSurfaceFrom((int)image.Width, (int)image.Height,
+                PixelFormat.ABGR8888, (nint)pixels, (int)image.Width * 4);
+            if (surface == nint.Zero) return;   // out of memory or a bad stride; an iconless window is not fatal
+            SetWindowIcon(Handle, surface);
+            DestroySurface(surface);
+        }
+    }
 
     /// <summary>
     /// Returns the DPI display scale factor for this window (e.g. 1.5 for 150% scaling).
