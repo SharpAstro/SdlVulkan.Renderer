@@ -191,8 +191,8 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
     {
         fixed (byte* pixels = image.Pixels)
         {
-            var surface = CreateSurfaceFrom((int)image.Width, (int)image.Height,
-                PixelFormat.ABGR8888, (nint)pixels, (int)image.Width * 4);
+            var surface = CreateSurfaceFrom(image.Width, image.Height,
+                PixelFormat.ABGR8888, (nint)pixels, image.Width * 4);
             if (surface == nint.Zero) return;   // out of memory or a bad stride; an iconless window is not fatal
             SetWindowIcon(Handle, surface);
             DestroySurface(surface);
