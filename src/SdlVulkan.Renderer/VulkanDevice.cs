@@ -641,16 +641,64 @@ public sealed unsafe class VulkanDevice : IDisposable
         fixed (VkPhysicalDevice* pDevices = devices)
             instanceApi.vkEnumeratePhysicalDevices(&count, pDevices);
 
+        // Prefer a discrete GPU, but accept any device that can present. On a host with both a discrete
+        // card and an integrated one, taking the first suitable device means taking whatever the loader
+        // happened to enumerate first, which can silently land on integrated graphics sharing system
+        // memory instead of dedicated VRAM. Preference only, never a requirement: an iGPU-only machine
+        // still gets a device, so this narrows nothing.
+        var fallback = VkPhysicalDevice.Null;
+        uint fallbackFamily = 0;
+
         foreach (var pd in devices)
         {
-            if (TryFindGraphicsQueue(instanceApi, pd, surface, out var family))
+            if (!TryFindGraphicsQueue(instanceApi, pd, surface, out var family))
+                continue;
+
+            instanceApi.vkGetPhysicalDeviceProperties(pd, out var props);
+            if (props.deviceType == VkPhysicalDeviceType.DiscreteGpu)
             {
                 queueFamily = family;
+                LogSelectedDevice(instanceApi, pd, family, count);
                 return pd;
+            }
+
+            if (fallback == VkPhysicalDevice.Null)
+            {
+                fallback = pd;
+                fallbackFamily = family;
             }
         }
 
+        if (fallback != VkPhysicalDevice.Null)
+        {
+            queueFamily = fallbackFamily;
+            LogSelectedDevice(instanceApi, fallback, fallbackFamily, count);
+            return fallback;
+        }
+
         throw new InvalidOperationException("No suitable Vulkan physical device found");
+    }
+
+    /// <summary>
+    /// Records which physical device the picker settled on. Not optional diagnostics: the pickers take
+    /// the FIRST device meeting their requirements and enumeration order belongs to the loader, so on a
+    /// host with a discrete card plus an integrated one there is otherwise no way to tell which GPU is
+    /// driving, and no way to attribute a later device loss or driver quirk to hardware.
+    /// </summary>
+    private static void LogSelectedDevice(VkInstanceApi instanceApi, VkPhysicalDevice device, uint queueFamily, uint deviceCount)
+    {
+        instanceApi.vkGetPhysicalDeviceProperties(device, out var props);
+        var api = props.apiVersion;
+        // apiVersion uses the standard 22/12/10 split. driverVersion does NOT: its encoding is
+        // vendor-specific (NVIDIA and Intel each pack it differently), so it is reported raw rather
+        // than decoded into a version that would be wrong for most vendors.
+        SdlVulkanLog.Logger.PhysicalDeviceSelected(
+            VkStringInterop.ConvertToManaged(props.deviceName) ?? "<unknown>",
+            props.deviceType.ToString(),
+            props.driverVersion.ToString(),
+            $"{api >> 22}.{(api >> 12) & 0x3FF}.{api & 0xFFF}",
+            queueFamily,
+            deviceCount);
     }
 
     private static bool TryFindGraphicsQueue(VkInstanceApi instanceApi, VkPhysicalDevice device, VkSurfaceKHR surface, out uint family)
@@ -685,6 +733,12 @@ public sealed unsafe class VulkanDevice : IDisposable
         fixed (VkPhysicalDevice* pDevices = devices)
             instanceApi.vkEnumeratePhysicalDevices(&count, pDevices);
 
+        // Same discrete-first preference as the surface picker, for the same reason: an offscreen
+        // render (export, headless test) should not silently land on integrated graphics because the
+        // loader listed it first. There is no surface to satisfy here, only a graphics queue.
+        var fallback = VkPhysicalDevice.Null;
+        uint fallbackFamily = 0;
+
         foreach (var pd in devices)
         {
             uint qCount = 0;
@@ -695,12 +749,31 @@ public sealed unsafe class VulkanDevice : IDisposable
 
             for (uint i = 0; i < qCount; i++)
             {
-                if ((props[i].queueFlags & VkQueueFlags.Graphics) != 0)
+                if ((props[i].queueFlags & VkQueueFlags.Graphics) == 0)
+                    continue;
+
+                instanceApi.vkGetPhysicalDeviceProperties(pd, out var devProps);
+                if (devProps.deviceType == VkPhysicalDeviceType.DiscreteGpu)
                 {
                     queueFamily = i;
+                    LogSelectedDevice(instanceApi, pd, i, count);
                     return pd;
                 }
+
+                if (fallback == VkPhysicalDevice.Null)
+                {
+                    fallback = pd;
+                    fallbackFamily = i;
+                }
+                break; // first graphics queue on this device is enough; move to the next device
             }
+        }
+
+        if (fallback != VkPhysicalDevice.Null)
+        {
+            queueFamily = fallbackFamily;
+            LogSelectedDevice(instanceApi, fallback, fallbackFamily, count);
+            return fallback;
         }
 
         throw new InvalidOperationException("No suitable Vulkan physical device found (offscreen)");
