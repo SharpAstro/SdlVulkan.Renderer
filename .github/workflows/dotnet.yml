@@ -270,6 +270,10 @@ env:
   #        window, so a Linux build without this call shows the desktop's placeholder. Takes RgbaImage,
   #        which is what every decoder in this stack already produces, and hands SDL the little-endian
   #        spelling of memory-order RGBA. SDL copies the pixels, so the caller's array is free on return.
+  # 7.13 - No renderer code change: the lockstep rebuild that re-pins DIR.Lib 7.14 -> 7.18, so a
+  #        consumer of both resolves ONE DIR.Lib rather than unifying two by luck. 7.18 adds
+  #        Layout.Content.Icon, whose pixel drawing lives on DIR.Lib's own PixelWidgetBase, so
+  #        nothing here had to learn about it.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
