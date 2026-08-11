@@ -161,6 +161,8 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     // Resolve a (character, PDF charCode, cmap hint) request to the atlas identity key: the glyph
     // id for OpenType fonts, the glyph name for Type1/PFB. Whitespace shares one sentinel key (its
     // advance derives from the 'n' reference glyph in RasterizeGlyph). Size is the quantized size.
+    // Only reached for colour/emoji runs — see VkRenderer.ResolveBitmapGlyph — so in practice the
+    // whitespace branch is the tab/newline case, never a space between words.
     private GlyphKey MakeKey(string fontPath, float size, Rune character, int charCode, GlyphMapHint hint)
     {
         if (Rune.IsWhiteSpace(character))
@@ -287,7 +289,15 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         var glyphWidth = bitmap.Width;
         var glyphHeight = bitmap.Height;
 
-        if (glyphWidth == 0 || glyphHeight == 0) return default;
+        if (glyphWidth == 0 || glyphHeight == 0)
+        {
+            // No ink to pack, but the glyph can still move the pen — a space is the whole point of
+            // the case. Record it as a blank entry CARRYING ITS ADVANCE, both so text lays out with
+            // the right gaps and so the lookup hits instead of re-rasterizing on every draw.
+            var blank = new GlyphInfo(0, 0, 0, 0, 0, 0, bitmap.AdvanceX, 0, 0);
+            _glyphs[key] = blank;
+            return blank;
+        }
 
         if (_cursorX + glyphWidth > _atlasWidth)
         {
