@@ -274,6 +274,10 @@ env:
   #        consumer of both resolves ONE DIR.Lib rather than unifying two by luck. 7.18 adds
   #        Layout.Content.Icon, whose pixel drawing lives on DIR.Lib's own PixelWidgetBase, so
   #        nothing here had to learn about it.
+  # 7.14 - Follows DIR.Lib to 7.19, whose three theme marks (ThemeSystem / ThemeLight / ThemeDark)
+  #        this backend paints through the same PixelWidgetBase every other leaf goes through, so
+  #        there is no renderer change here. Taken in lockstep so a consumer of this and Console.Lib
+  #        resolves ONE DIR.Lib by intent rather than by highest-version.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
