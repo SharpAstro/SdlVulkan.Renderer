@@ -139,7 +139,12 @@ internal static unsafe class VulkanValidation
                 : LogLevel.Information;
             SdlVulkanLog.Logger.ValidationMessage(level, line);
             Interlocked.Increment(ref s_totalMessages);
-            if (text.Contains("SYNC-HAZARD", StringComparison.OrdinalIgnoreCase))
+            // Match both spellings. Older layers tagged these "SYNC-HAZARD-*"; current ones write
+            // "WRITE_AFTER_WRITE hazard detected" with no such token, so matching the old string alone
+            // reported zero sync hazards while the ring buffer visibly held them. A counter that reads
+            // 0 during a real hazard is worse than having no counter, because it gets quoted as proof.
+            if (text.Contains("SYNC-HAZARD", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("hazard detected", StringComparison.OrdinalIgnoreCase))
                 Interlocked.Increment(ref s_syncHazards);
             s_messages.Enqueue(line);
             while (s_messages.Count > MaxRetained && s_messages.TryDequeue(out _)) { }
