@@ -278,6 +278,9 @@ env:
   #        this backend paints through the same PixelWidgetBase every other leaf goes through, so
   #        there is no renderer change here. Taken in lockstep so a consumer of this and Console.Lib
   #        resolves ONE DIR.Lib by intent rather than by highest-version.
+  # 7.15 - Follows DIR.Lib to 7.21 (cross-axis alignment on a Stack, plus icons that draw at their
+  #        declared size and ink one consistent height). All of it lands in the shared painter and the
+  #        arrange pass, so there is no renderer change; the pin keeps the family on one DIR.Lib.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
