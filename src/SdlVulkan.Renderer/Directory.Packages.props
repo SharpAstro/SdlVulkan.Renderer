@@ -8,7 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageVersion Include="DIR.Lib" Version="7.21.*" />
+    <PackageVersion Include="DIR.Lib" Version="7.22.*" />
     <!-- Interface-only (no implementation assemblies): the renderer logs its unconditional
          diagnostics through an injectable ILogger (SdlVulkanLog) with a stderr fallback. -->
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
