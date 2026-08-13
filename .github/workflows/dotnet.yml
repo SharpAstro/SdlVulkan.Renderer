@@ -287,12 +287,9 @@ env:
   #        Worse for an app that reads the modifier off the global keyboard state rather than off the
   #        event: nothing but a real key press moves that state, so no amount of synthesized input can
   #        get there. Both halves change together, the MCP tool and the in-process handler.
-  # 7.17 - Follows DIR.Lib to 7.26 and OVERRIDES its new DrawTriangles. VkRenderer already had a method
-  #        of that name and shape, so the base's arrival turned it into a HIDE -- which compiles, draws
-  #        identically through a VkRenderer reference, and quietly takes DIR.Lib's software scanline
-  #        path the moment a caller holds the renderer as a Renderer<TSurface>. Which is precisely what
-  #        a backend-neutral widget does, so the failure would have shown up as "the GPU path is slow"
-  #        in exactly the code that was written to stop naming this renderer.
+  # 7.17 - Follows DIR.Lib to 7.26 and overrides its new DrawTriangles, so a caller holding this as a
+  #        Renderer<TSurface> keeps the FlatPipeline: one draw call for the whole list, against the
+  #        base's row-at-a-time fill, which here costs a quad and a push-constant update per scanline.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

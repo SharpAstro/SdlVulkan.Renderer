@@ -563,10 +563,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// 3 vertices per triangle). All triangles share the same color.
     /// </summary>
     /// <remarks>
-    /// OVERRIDES the base, whose default is a scanline fill written in terms of FillRectangle. Without
-    /// the keyword this HIDES it, and the difference stays invisible until a caller holds the renderer
-    /// as a <c>Renderer&lt;TSurface&gt;</c> — which is exactly what a backend-neutral widget does — at
-    /// which point every mark it draws this way quietly takes the software path on a GPU.
+    /// One draw call, whatever the triangle count. The base fills a triangle a row at a time through
+    /// FillRectangle, which here is a quad and a push-constant update per scanline — so a 12px
+    /// arrowhead costs a dozen draws instead of one, and anything taller (a filled chart area, a
+    /// polygon) scales with its height where this stays flat.
     /// </remarks>
     public override void DrawTriangles(ReadOnlySpan<float> vertices, DIR.Lib.RGBAColor32 color)
     {
