@@ -234,6 +234,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (resized || _currentCmd == VkCommandBuffer.Null)
             return false;
 
+        // A scissor lives on the command buffer, and this one is fresh, so the region is already gone
+        // whatever the stack says. Drop it to match — otherwise a widget that threw between its push
+        // and its pop leaves every later frame clipped to a rect nobody can name, which reads as
+        // content vanishing rather than as the bug that caused it.
+        ResetClipStack();
+
         // Churn snapshot for the wedge breadcrumb. Taken only after the fence wait succeeds — like
         // the atlas counters below, so on a stuck fence DeviceChurnBreadcrumb reports what the LAST
         // SUBMITTED frame (the hung one) plus the stall was doing, not a half-begun frame.
@@ -341,6 +347,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         _currentCmd = Surface.BeginOffscreenFrame();
         if (_currentCmd == VkCommandBuffer.Null) return false;
+
+        ResetClipStack();   // fresh command buffer, same as BeginFrame
 
         _fontAtlas?.BeginFrame();
         _sdfFontAtlas?.BeginFrame();
@@ -882,18 +890,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         SetScissor(0, 0, _width, _height);
     }
 
-    // DIR.Lib widget clip hooks → Vulkan scissor. Single-level (per the base contract): PopClip
-    // restores the full viewport rather than popping a stack.
-    public override void PushClip(in DIR.Lib.RectInt rect)
-    {
-        var x = Math.Min(rect.UpperLeft.X, rect.LowerRight.X);
-        var y = Math.Min(rect.UpperLeft.Y, rect.LowerRight.Y);
-        var w = (uint)Math.Abs(rect.LowerRight.X - rect.UpperLeft.X);
-        var h = (uint)Math.Abs(rect.LowerRight.Y - rect.UpperLeft.Y);
-        SetScissor(x, y, w, h);
-    }
+    // DIR.Lib's clip stack → Vulkan scissor. The base owns the nesting and hands down one absolute
+    // region already intersected with its parents, which is exactly what vkCmdSetScissor takes; the
+    // rect arrives normalized too, so there is nothing to order here.
+    protected override void ApplyClip(in DIR.Lib.RectInt rect)
+        => SetScissor(rect.UpperLeft.X, rect.UpperLeft.Y, (uint)rect.Width, (uint)rect.Height);
 
-    public override void PopClip() => ResetScissor();
+    protected override void ClearClip() => ResetScissor();
 
     /// <summary>
     /// Pre-warms a glyph in the font atlas so it's available in the current frame's flush.
