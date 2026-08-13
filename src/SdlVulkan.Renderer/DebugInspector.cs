@@ -224,8 +224,8 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         "restore" => ExecuteWindowState(static w => w.Restore()),
         "validationReport" => ExecuteValidationReport(),
         "frameStats" => ExecuteFrameStats(),
-        "click" => ExecuteClickAt(Coord(p, "x"), Coord(p, "y"), Mods(p)),
-        "clickLabel" => ExecuteClickLabel(RequiredString(p, "label")),
+        "click" => ExecuteClickAt(Coord(p, "x"), Coord(p, "y"), Mods(p), Clicks(p)),
+        "clickLabel" => ExecuteClickLabel(RequiredString(p, "label"), Clicks(p)),
         "key" => ExecuteKey(ResolveInputKey(RequiredString(p, "key")), Mods(p)),
         // "text" is the name the batch contract advertises; "s" is what the direct verb has always sent.
         "text" => ExecuteText(RequiredString(p, "text", "s")),
@@ -301,6 +301,14 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
 
     private static InputModifier Mods(JsonElement p) => ResolveModifier(
         p.TryGetProperty("mods", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null);
+
+    /// <summary>
+    /// How many clicks the press is: 1 a single click, 2 a double, 3 a triple. Clamped to what SDL can
+    /// report in a byte and to what any real pointer produces.
+    /// </summary>
+    private static int Clicks(JsonElement p)
+        => p.TryGetProperty("clicks", out var c) && c.ValueKind == JsonValueKind.Number
+            ? Math.Clamp(c.GetInt32(), 1, 7) : 1;
 
     private static int DragSteps(JsonElement p)
         => p.TryGetProperty("steps", out var s) && s.ValueKind == JsonValueKind.Number
@@ -532,16 +540,28 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         return "\"ok\"";
     }
 
-    private string ExecuteClickAt(float x, float y, InputModifier mods = InputModifier.None)
+    /// <summary>
+    /// A click, or a double/triple click.
+    ///
+    /// <para>The whole run is delivered, not just its last press: SDL reports a double click as TWO
+    /// button-down events, the first with a count of 1 and the second with 2, and an app is entitled to
+    /// act on both — a control that opens a menu on the single click and an editor on the double sees
+    /// the menu open first, exactly as it would under a real pointer. Sending only the count-2 press
+    /// would drive a path no mouse can produce, which is worse than not testing it.</para>
+    /// </summary>
+    private string ExecuteClickAt(float x, float y, InputModifier mods = InputModifier.None, int clicks = 1)
     {
         _view.DispatchPointerMove(x, y); // update cached pointer position (some consumers read it on MouseUp)
-        _view.DispatchPointerDown(1, x, y, 1, mods);
-        _view.DispatchPointerUp(1, x, y);
+        for (var n = 1; n <= clicks; n++)
+        {
+            _view.DispatchPointerDown(1, x, y, (byte)n, mods);
+            _view.DispatchPointerUp(1, x, y);
+        }
         _view.RequestRedraw();
         return "\"ok\"";
     }
 
-    private string ExecuteClickLabel(string label)
+    private string ExecuteClickLabel(string label, int clicks = 1)
     {
         var regions = _opts.GetRegions?.Invoke() ?? [];
         // Walk in reverse so the topmost (last-registered) match wins, mirroring HitTest.
@@ -549,7 +569,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         {
             var r = regions[i];
             if (r.Result is HitResult.ButtonHit b && b.Action == label)
-                return ExecuteClickAt(r.X + r.Width * 0.5f, r.Y + r.Height * 0.5f);
+                return ExecuteClickAt(r.X + r.Width * 0.5f, r.Y + r.Height * 0.5f, InputModifier.None, clicks);
         }
         throw new ArgumentException($"no button region with label: {label}");
     }
