@@ -290,6 +290,13 @@ env:
   # 7.17 - Follows DIR.Lib to 7.26 and overrides its new DrawTriangles, so a caller holding this as a
   #        Renderer<TSurface> keeps the FlatPipeline: one draw call for the whole list, against the
   #        base's row-at-a-time fill, which here costs a quad and a push-constant update per scanline.
+  # 7.18 - Follows DIR.Lib to 7.27, where clips nest: a push inside a push draws in the intersection and
+  #        a pop restores the enclosing clip. The base owns the stack now, so this backend implements
+  #        ApplyClip/ClearClip -- one absolute, already-intersected region, which is what
+  #        vkCmdSetScissor takes anyway -- instead of overriding PushClip/PopClip. BeginFrame and
+  #        BeginOffscreenFrame drop the stack: a scissor lives on the command buffer, so a fresh one has
+  #        already discarded the region, and a widget that threw between its push and its pop must not
+  #        leave every later frame clipped to a rect nobody can name.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
