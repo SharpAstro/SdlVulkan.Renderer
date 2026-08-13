@@ -4,8 +4,8 @@ using static SDL3.SDL;
 namespace SdlVulkan.Renderer;
 
 /// <summary>
-/// Maps SDL3 scancodes and key modifiers to the platform-agnostic
-/// <see cref="InputKey"/> and <see cref="InputModifier"/> types from DIR.Lib.
+/// Maps SDL3 scancodes, key modifiers and cursor kinds to and from the platform-agnostic
+/// <see cref="InputKey"/>, <see cref="InputModifier"/> and <see cref="CursorKind"/> types from DIR.Lib.
 /// </summary>
 public static class SdlInputMapping
 {
@@ -63,5 +63,26 @@ public static class SdlInputMapping
                 return mod;
             }
         }
+    }
+
+    extension(CursorKind kind)
+    {
+        /// <summary>
+        /// The SDL cursor for a DIR.Lib cursor kind. The kinds are named by meaning, so this is where
+        /// the meaning meets one platform's set — the same seam <see cref="Scancode.ToInputKey"/> sits
+        /// on, and the only place in the stack that has to know SDL has a cursor called <c>Pointer</c>.
+        /// </summary>
+        public SystemCursor ToSystemCursor => kind switch
+        {
+            CursorKind.Pointer => SystemCursor.Pointer,
+            CursorKind.Text => SystemCursor.Text,
+            CursorKind.Crosshair => SystemCursor.Crosshair,
+            CursorKind.ResizeEW => SystemCursor.EWResize,
+            CursorKind.ResizeNS => SystemCursor.NSResize,
+            CursorKind.Move => SystemCursor.Move,
+            CursorKind.Wait => SystemCursor.Wait,
+            CursorKind.NotAllowed => SystemCursor.NotAllowed,
+            _ => SystemCursor.Default,
+        };
     }
 }
