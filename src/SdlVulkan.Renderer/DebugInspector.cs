@@ -229,7 +229,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         "key" => ExecuteKey(ResolveInputKey(RequiredString(p, "key")), Mods(p)),
         // "text" is the name the batch contract advertises; "s" is what the direct verb has always sent.
         "text" => ExecuteText(RequiredString(p, "text", "s")),
-        "scroll" => ExecuteScroll(Coord(p, "x"), Coord(p, "y"), Coord(p, "scrollY")),
+        "scroll" => ExecuteScroll(Coord(p, "x"), Coord(p, "y"), Coord(p, "scrollY"), Mods(p)),
         "drag" => ExecuteDrag(Coord(p, "x1"), Coord(p, "y1"), Coord(p, "x2"), Coord(p, "y2"), Mods(p), DragSteps(p)),
         "postSignal" => ExecutePostSignal(RequiredString(p, "name"), SignalArgs(p)),
         // Reachable only OUTSIDE a batch, where there are no frames to wait for -- inside one the core
@@ -588,10 +588,16 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         return "\"ok\"";
     }
 
-    private string ExecuteScroll(float x, float y, float scrollY)
+    /// <summary>
+    /// A wheel tick, optionally with a modifier held. The modifier is not decoration: a wheel gesture
+    /// commonly means something else entirely with one down -- Ctrl zooms, Shift scrolls sideways --
+    /// and an app that reads them off the global keyboard state instead of off the event cannot be
+    /// driven into those readings at all, because nothing but a real key press moves that state.
+    /// </summary>
+    private string ExecuteScroll(float x, float y, float scrollY, InputModifier mods = InputModifier.None)
     {
         _view.DispatchPointerMove(x, y); // position the pointer first -- wheel handlers zoom around it
-        _view.DispatchPointerWheel(scrollY, x, y, InputModifier.None);
+        _view.DispatchPointerWheel(scrollY, x, y, mods);
         _view.RequestRedraw();
         return "\"ok\"";
     }

@@ -281,6 +281,12 @@ env:
   # 7.15 - Follows DIR.Lib to 7.21 (cross-axis alignment on a Stack, plus icons that draw at their
   #        declared size and ink one consistent height). All of it lands in the shared painter and the
   #        arrange pass, so there is no renderer change; the pin keeps the family on one DIR.Lib.
+  # 7.16 - The inspector's `scroll` takes modifiers, like `click`, `clickLabel` and `drag` already do.
+  #        A wheel tick usually means something ELSE with one held -- Ctrl zooms, Shift scrolls
+  #        sideways -- so hard-coding None left those readings unreachable from a script or a test.
+  #        Worse for an app that reads the modifier off the global keyboard state rather than off the
+  #        event: nothing but a real key press moves that state, so no amount of synthesized input can
+  #        get there. Both halves change together, the MCP tool and the in-process handler.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

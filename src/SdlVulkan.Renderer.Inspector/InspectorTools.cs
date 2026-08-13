@@ -137,16 +137,17 @@ public sealed class InspectorTools
         return result.GetString() ?? "ok";
     }
 
-    [McpServerTool, Description("Synthesize a mouse-wheel scroll at pixel (x, y), routed through the same path as a real SDL wheel event. scrollY > 0 is wheel-up (zoom IN in most views, e.g. the sky map / FITS viewer); negative zooms out. The view zooms around (x, y). Magnitude ~1 per notch.")]
+    [McpServerTool, Description("Synthesize a mouse-wheel scroll at pixel (x, y), routed through the same path as a real SDL wheel event. scrollY > 0 is wheel-up (zoom IN in most views, e.g. the sky map / FITS viewer); negative zooms out. The view zooms around (x, y). Magnitude ~1 per notch. Pass mods to hold a modifier during the tick -- a wheel gesture usually means something ELSE with one held (Ctrl zooms, Shift scrolls sideways), and those readings are unreachable any other way.")]
     public static async Task<string> scroll(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("X pixel coordinate (the view zooms around this point).")] float x,
         [Description("Y pixel coordinate.")] float y,
         [Description("Wheel delta: positive = up / zoom-in, negative = down / zoom-out. ~1 per notch.")] float scrollY,
+        [Description("InputModifier held during the tick (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None. Unrecognised text (Cmd, Super, a typo) is REFUSED rather than treated as None, because a dropped modifier delivers the unmodified gesture - often a different action rather than a no-op.")] string mods = "None",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "scroll", Json.Obj(("x", x), ("y", y), ("scrollY", scrollY)), ct);
+        var result = await socket.SendAsync(target, "scroll", Json.Obj(("x", x), ("y", y), ("scrollY", scrollY), ("mods", mods)), ct);
         return result.GetString() ?? "ok";
     }
 
