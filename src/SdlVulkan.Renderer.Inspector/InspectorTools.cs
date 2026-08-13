@@ -88,27 +88,29 @@ public sealed class InspectorTools
         return new ImageContentBlock { Data = Encoding.UTF8.GetBytes(base64), MimeType = "image/png" };
     }
 
-    [McpServerTool, Description("Synthesize a left mouse click at pixel coordinates (routes through the same input path as a real SDL click). Pass mods to hold a keyboard modifier during the click, e.g. Ctrl for a Ctrl+click.")]
+    [McpServerTool, Description("Synthesize a left mouse click at pixel coordinates (routes through the same input path as a real SDL click). Pass mods to hold a keyboard modifier during the click, e.g. Ctrl for a Ctrl+click, and clicks:2 for a double click.")]
     public static async Task<string> click(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("X pixel coordinate.")] float x,
         [Description("Y pixel coordinate.")] float y,
         [Description("InputModifier name held during the click (None, Ctrl, Shift, Alt, or combos like CtrlShift). Default None. Unrecognised text (Cmd, Super, a typo) is REFUSED rather than treated as None, because a dropped modifier delivers a bare key or click - often a different binding rather than a no-op.")] string mods = "None",
+        [Description("Clicks in the run: 1 a single click, 2 a double, 3 a triple. The whole run is delivered the way SDL delivers it -- a double click arrives as a press counted 1 then a press counted 2 -- so a control that does one thing on the single click and another on the double sees both.")] int clicks = 1,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "click", Json.Obj(("x", x), ("y", y), ("mods", mods)), ct);
+        var result = await socket.SendAsync(target, "click", Json.Obj(("x", x), ("y", y), ("mods", mods), ("clicks", clicks)), ct);
         return result.GetString() ?? "ok";
     }
 
     [McpServerTool, Description("Click the button whose label (ButtonHit action, e.g. 'Tab:Planner') matches. Use describe_ui to see labels.")]
     public static async Task<string> click_label(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("The button label / action string to click.")] string label,
+        [Description("Clicks in the run: 1 a single click, 2 a double, 3 a triple. The whole run is delivered the way SDL delivers it -- a double click arrives as a press counted 1 then a press counted 2 -- so a control that does one thing on the single click and another on the double sees both.")] int clicks = 1,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "clickLabel", Json.Obj(("label", label)), ct);
+        var result = await socket.SendAsync(target, "clickLabel", Json.Obj(("label", label), ("clicks", clicks)), ct);
         return result.GetString() ?? "ok";
     }
 
