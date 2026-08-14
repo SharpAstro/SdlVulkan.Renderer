@@ -454,6 +454,19 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
                             w.WriteString("text", text.Value);
                             w.WriteNumber("fontSize", text.FontSize);
                             break;
+                        case Layout.Content.TextInput field:
+                            // A field reports what it HOLDS and whether it has the keyboard, because
+                            // "which box is focused" is the question every text-input bug starts from and
+                            // is otherwise unanswerable from a layout dump. The placeholder rides along so
+                            // an empty field is still identifiable -- with no text and no label of its own,
+                            // it would be an anonymous rect.
+                            w.WriteString("textInput", field.State.Text);
+                            w.WriteBoolean("focused", field.State.IsActive);
+                            if (field.State.Placeholder is { Length: > 0 } placeholder)
+                            {
+                                w.WriteString("placeholder", placeholder);
+                            }
+                            break;
                         case Layout.Content.Fill fill when fill.Key is { } key:
                             w.WriteString("fillKey", key);
                             break;
