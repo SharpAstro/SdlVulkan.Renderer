@@ -152,6 +152,9 @@ public sealed class SdlEventLoop
     public Action<float, float, float, PinchSource>? OnPinch { get => Primary.OnPinch; set => Primary.OnPinch = value; }
     public Action? OnPinchEnd { get => Primary.OnPinchEnd; set => Primary.OnPinchEnd = value; }
     public Action<string>? OnTextInput { get => Primary.OnTextInput; set => Primary.OnTextInput = value; }
+
+    /// <inheritdoc cref="SdlWindowView.OnTextEditing"/>
+    public Action<string, int, int>? OnTextEditing { get => Primary.OnTextEditing; set => Primary.OnTextEditing = value; }
     public Action<string>? OnDropFile { get => Primary.OnDropFile; set => Primary.OnDropFile = value; }
     public Func<bool>? CheckNeedsRedraw { get => Primary.CheckNeedsRedraw; set => Primary.CheckNeedsRedraw = value; }
 
@@ -807,6 +810,22 @@ public sealed class SdlEventLoop
                         vt.OnTextInput(text);
                         vt.NeedsRedraw = true;
                     }
+                }
+                break;
+
+            // The input method's in-progress composition. Dropping this is what makes an app
+            // Latin-only: with a CJK IME every keystroke before the commit arrives HERE, and
+            // TextInput fires only once the user picks a candidate, so a handler for TextInput alone
+            // sees nothing at all while the user types.
+            case EventType.TextEditing:
+                if (TryView(evt.Edit.WindowID, out var vte) && vte.OnTextEditing is not null)
+                {
+                    // A null preedit pointer is the normal end-of-composition signal, so it maps to an
+                    // empty string rather than being skipped -- the app has to be told the preedit is
+                    // gone or it keeps drawing the last one forever.
+                    var editing = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(evt.Edit.Text) ?? "";
+                    vte.OnTextEditing(editing, evt.Edit.Start, evt.Edit.Length);
+                    vte.NeedsRedraw = true;
                 }
                 break;
 

@@ -303,6 +303,17 @@ env:
   #        focused" is the question every text-input bug starts from and was unanswerable from a layout
   #        dump. Painting the leaf itself is the base class's job, so this backend needs no other
   #        change; the pin is a FLOOR rather than a follow, since the type does not exist before 7.28.
+  # 7.20 - The IME half of text input, which SDL has always delivered and this backend threw away.
+  #        SdlWindowView.OnTextEditing surfaces SDL_EVENT_TEXT_EDITING (the in-progress composition, its
+  #        caret and its selection length); the event loop had a TextInput case and NO TextEditing case at
+  #        all. With a CJK input method every keystroke before the commit arrives on that event and nowhere
+  #        else, so an app handling only TextInput can accept Latin and nothing else -- and sees nothing on
+  #        screen while the user types.
+  #        SdlVulkanWindow.SetTextInputArea wraps SDL_SetTextInputArea, which is the only way to tell the
+  #        platform where the caret is. SDL does not track it, so without the call an input method has
+  #        nothing to anchor to and puts its candidate window over the text being typed.
+  #        Follows DIR.Lib to 7.29, whose TextInputRenderer.Render is binary-breaking (it returns the caret
+  #        rect now and takes a fallback resolver), so this rebuild is required rather than bookkeeping.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release

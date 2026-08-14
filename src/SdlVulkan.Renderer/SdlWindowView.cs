@@ -124,6 +124,24 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// <summary>Called on SDL TextInput. Parameter is the UTF-8 text string.</summary>
     public Action<string>? OnTextInput { get; set; }
 
+    /// <summary>
+    /// Called on SDL TextEditing: the input method's in-progress composition ("preedit"), which is what
+    /// the user has typed but not yet turned into characters. Parameters are the composition text, the
+    /// caret position within it in characters, and how many characters the next keystroke replaces.
+    /// </summary>
+    /// <remarks>
+    /// <b>An app that handles only <see cref="OnTextInput"/> cannot accept CJK input at all</b>, which is
+    /// the bug this exists to close: with an IME every keystroke before the commit arrives here and
+    /// nowhere else, so a field that ignores it shows nothing while the user types. An empty text ends
+    /// the composition -- that is how both a commit and a cancel are signalled, with committed
+    /// characters arriving separately through <see cref="OnTextInput"/>.
+    /// <para>
+    /// Pair it with <see cref="SdlVulkanWindow.SetTextInputArea"/>, or the platform has no idea where the
+    /// caret is and puts its candidate window over the text being typed.
+    /// </para>
+    /// </remarks>
+    public Action<string, int, int>? OnTextEditing { get; set; }
+
     /// <summary>Called when a file is dropped onto this window. Parameter is the file path.</summary>
     public Action<string>? OnDropFile { get; set; }
 

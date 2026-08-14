@@ -174,6 +174,27 @@ public sealed unsafe class SdlVulkanWindow : IDisposable
     public void SetTitle(string title) => SDL3.SDL.SetWindowTitle(Handle, title);
 
     /// <summary>
+    /// Tells the platform where text is being typed, so an input method can put its candidate window
+    /// beside the caret instead of over it. <paramref name="x"/>/<paramref name="y"/>/<paramref name="w"/>/
+    /// <paramref name="h"/> bound the text being edited, in window coordinates;
+    /// <paramref name="cursorOffset"/> is the caret's offset from the left of that rect.
+    /// </summary>
+    /// <remarks>
+    /// Call it while a field is focused, whenever the caret moves. The platform has no other way to know:
+    /// SDL does not track your caret, so without this the candidate window lands wherever the IME
+    /// defaults to, typically covering the text being typed. Pair it with
+    /// <see cref="SdlWindowView.OnTextEditing"/> -- the area tells the IME where to draw, the event tells
+    /// you what it is composing, and CJK input needs BOTH.
+    /// </remarks>
+    public void SetTextInputArea(int x, int y, int w, int h, int cursorOffset)
+    {
+        var rect = new Rect { X = x, Y = y, W = w, H = h };
+        // The SDL entry point takes a const pointer and copies the rect before returning, so the address
+        // of this stack local is safe to hand over.
+        SDL3.SDL.SetTextInputArea(Handle, (nint)(&rect), cursorOffset);
+    }
+
+    /// <summary>
     /// Sets the window's icon: the title bar mark, the taskbar or dock button, and the alt-tab entry.
     /// Pass the largest size the app has (256px is plenty) and let the platform scale down.
     /// </summary>
