@@ -297,6 +297,12 @@ env:
   #        BeginOffscreenFrame drop the stack: a scissor lives on the command buffer, so a fresh one has
   #        already discarded the region, and a widget that threw between its push and its pop must not
   #        leave every later frame clipped to a rect nobody can name.
+  # 7.19 - Follows DIR.Lib to 7.28, where a text field is a declaration (Layout.Content.TextInput).
+  #        describe_layout reports one: what it holds, whether it has the keyboard, and its placeholder
+  #        so an EMPTY field is still identifiable rather than an anonymous rect. "Which box is
+  #        focused" is the question every text-input bug starts from and was unanswerable from a layout
+  #        dump. Painting the leaf itself is the base class's job, so this backend needs no other
+  #        change; the pin is a FLOOR rather than a follow, since the type does not exist before 7.28.
   VERSION_REV: ${{ github.run_attempt }}
   VERSION_HASH: +${{ github.sha }}
   BUILD_CONF: Release
