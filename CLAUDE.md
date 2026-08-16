@@ -29,9 +29,20 @@ Central package versioning via `src/SdlVulkan.Renderer/Directory.Packages.props`
 
 ## Versioning
 
-The package version is `Major.Minor.RunNumber` where `RunNumber` is the CI build number. Two places must stay in sync when bumping:
-- `VersionPrefix` in `src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj` — used for local builds (`Major.Minor.0`)
-- `VERSION_PREFIX` in `.github/workflows/dotnet.yml` — used for CI builds (`Major.Minor.${{ github.run_number }}`)
+The package version is `Major.Minor.RunNumber`, where `RunNumber` is the CI build number.
+
+**A release bump is ONE line:** `<VersionMajorMinor>` in `src/Directory.Build.props`. Everything else
+derives from it and must not be hand-edited — `VersionPrefix` (guarded on empty so CI's `-p:Version`
+wins), `AssemblyVersion` as `$(VersionMajorMinor).0.0`, and CI's `VERSION_PREFIX`, which the build job
+RESOLVES by reading the property back (`dotnet msbuild src/Directory.Build.props
+-getProperty:VersionMajorMinor`) rather than restating it. So CI cannot stamp a version the packages
+disagree with, and **no csproj declares a `VersionPrefix` of its own** — one that did would silently
+win. (This doc used to describe a two-place scheme, csproj + workflow, that the repo has not used for
+some time; the csproj property it named no longer exists.)
+
+The matching release note goes in [CHANGELOG.md](CHANGELOG.md) at the repo root, in the same commit —
+newest first, one `## Major.Minor` section each. (The notes used to live in a comment block in the
+workflow's `env:`; nothing ever read them there, and they had grown to 329 of that file's 478 lines.)
 
 ## DIR.Lib Dependency
 
