@@ -6,6 +6,19 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.21
+
+Follows DIR.Lib to 8.3, with nothing to port. 8.0's one breaking change is TabBar becoming
+TabBar&lt;TSurface&gt; : PixelWidgetBase&lt;TSurface&gt;, which this backend references zero times;
+8.1 through 8.3 are additive -- the tab strip becomes a shared Layout tree (TabStripTree), plus
+CompositeWidget&lt;TSurface&gt; and IconKind.Plus / Minus.
+
+A pin bump rather than a feature, and it earns a release because this was the LAST member still
+declaring 7.29 while consumers pin 8.3. A declared version below what the graph actually resolves
+makes that consumer unify DIR.Lib upward BY VERSION rather than by intent -- correct by accident,
+and it stops being correct the moment two lagging members disagree. Console.Lib 4.26 and
+WebGl.Renderer closed their halves already, so this closes the set.
+
 ## 7.20
 
 The IME half of text input, which SDL has always delivered and this backend threw away.
