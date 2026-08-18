@@ -152,14 +152,12 @@ public sealed unsafe partial class VulkanContext
     /// Recreate the offscreen render target at a new size, keeping the device, command buffers,
     /// sync objects, vertex buffers, and the renderer's font atlases intact — so glyphs stay warm
     /// across differently-sized pages in a multi-page raster/export job (a fresh context per page
-    /// would re-rasterize every glyph). Count1 (no MSAA) only, which is what the offscreen
-    /// raster/export path uses; CleanupOffscreenTarget doesn't free MSAA attachments.
+    /// would re-rasterize every glyph). Works under MSAA as well as Count1: the resolve target and the
+    /// multisampled attachment are both torn down and recreated at the new size.
     /// </summary>
     public void ResizeOffscreen(uint width, uint height)
     {
         if (!_isOffscreen) throw new InvalidOperationException("ResizeOffscreen requires CreateOffscreen");
-        if (MsaaSamples != VkSampleCountFlags.Count1)
-            throw new InvalidOperationException("ResizeOffscreen supports Count1 offscreen targets only");
         if (width == _offscreenWidth && height == _offscreenHeight) return;
 
         DeviceApi.vkDeviceWaitIdle(); // no in-flight frame may reference the target we're about to destroy
@@ -447,9 +445,22 @@ public sealed unsafe partial class VulkanContext
         if (_offscreenMemory != VkDeviceMemory.Null)
             DeviceApi.vkFreeMemory(_offscreenMemory);
 
+        // The MSAA attachment CreateOffscreenTarget allocates alongside the readback image. Freeing it
+        // here is what lets ResizeOffscreen recreate an MSAA target instead of leaking one per resize
+        // — which is why resizing used to be refused outright for anything but Count1.
+        if (_msaaImageView != VkImageView.Null)
+            DeviceApi.vkDestroyImageView(_msaaImageView);
+        if (_msaaImage != VkImage.Null)
+            DeviceApi.vkDestroyImage(_msaaImage);
+        if (_msaaMemory != VkDeviceMemory.Null)
+            DeviceApi.vkFreeMemory(_msaaMemory);
+
         _offscreenFramebuffer = VkFramebuffer.Null;
         _offscreenImageView = VkImageView.Null;
         _offscreenImage = VkImage.Null;
         _offscreenMemory = VkDeviceMemory.Null;
+        _msaaImageView = VkImageView.Null;
+        _msaaImage = VkImage.Null;
+        _msaaMemory = VkDeviceMemory.Null;
     }
 }
