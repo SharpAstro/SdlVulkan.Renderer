@@ -2,18 +2,35 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
 
+    <!-- Allow floating versions (e.g. "8.3.*") so the DIR.Lib pin auto-picks up new CI publishes
+         without a manual bump here. -->
     <CentralPackageFloatingVersionsEnabled>true</CentralPackageFloatingVersionsEnabled>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageVersion Include="DIR.Lib" Version="8.3.*" />
 
+    <!-- Interface-only (no implementation assemblies): the renderer logs its unconditional
+         diagnostics through an injectable ILogger (SdlVulkanLog) with a stderr fallback. -->
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.301" />
 
+    <!-- SDL3-CS.Android has no 3.5.0 preview, so the android TFM pins a coherent managed+native
+         pair; desktop stays on the 3.5.0 preview. NB: SDL3-CS.Android 3.4.12.x ships a MISMATCHED
+         pair (Java bridge 3.4.10 vs native 3.4.12) that fails SDL's runtime C/Java version check,
+         so pin 3.4.10.5 where both halves agree.
+         BEFORE BUMPING, read the Android section of README.md. Two open constraints ride on this
+         pin: (1) the mismatch above, which only shows at launch on a device, never at build time;
+         (2) the shipped libSDL3.so is NOT 16 KB page-aligned (warning XA0141 in every consumer),
+         which Android 16 rejects and which only an upstream rebuild can fix. A newer release could
+         clear both at once: 3.4.12.6 is the latest as of 2026-07-27 and is well past the 3.4.12.x
+         that broke, but it is unverified here. Test on a real device, not just CI. -->
     <PackageVersion Include="SDL3-CS" Version="3.5.0-preview.20260213-150035" Condition="'$(TargetFramework)' != 'net10.0-android'" />
     <PackageVersion Include="SDL3-CS" Version="3.4.10.5" Condition="'$(TargetFramework)' == 'net10.0-android'" />
     <PackageVersion Include="SDL3-CS.Android" Version="3.4.10.5" />
     <PackageVersion Include="Vortice.Vulkan" Version="3.2.3" />
+    <!-- Vortice.ShaderCompiler (runtime GLSL->SPIR-V) is no longer referenced by the shipped package:
+         shaders are pre-baked to SPIR-V by tools/BakeShaders (which pins its own version inline, outside
+         this CPM scope). Kept out of runtime so the package has no shaderc native (no Android RID). -->
   </ItemGroup>
 </Project>

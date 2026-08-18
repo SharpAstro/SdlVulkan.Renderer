@@ -34,7 +34,9 @@
          informational version two majors ahead. Unconditional on purpose: the value belongs to the repo,
          and a per-project override is the bug this replaces.
          Only Major.Minor is significant — the build counter deliberately stays out, so a republish of the
-         same X.Y does not change assembly identity. -->
+         same X.Y does not change assembly identity. Safe to move: the runtime rejects a loaded assembly
+         LOWER than the compiled reference, never higher, so anything already built against 6.11.0.0 or
+         6.0.0.0 keeps loading. -->
     <AssemblyVersion>$(VersionMajorMinor).0.0</AssemblyVersion>
   </PropertyGroup>
 
