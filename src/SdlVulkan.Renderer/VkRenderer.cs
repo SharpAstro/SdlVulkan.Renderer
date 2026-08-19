@@ -426,6 +426,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// Declare this renderer's device abandoned, after the event loop has stopped waiting for a
+    /// recovery task it can no longer account for. See <see cref="VulkanContext.Abandon"/>.
+    /// </summary>
+    public void AbandonDevice() => Surface.Abandon();
+
+    /// <summary>
     /// Resolve a frame that was begun but will not reach <see cref="EndFrame"/>, so its fence and
     /// acquired image cannot leak into the next frame. See <see cref="VulkanContext.AbortFrame"/>.
     /// </summary>

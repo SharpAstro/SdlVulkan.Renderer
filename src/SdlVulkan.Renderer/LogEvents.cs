@@ -28,6 +28,9 @@ internal static partial class LogEvents
     [LoggerMessage(103, LogLevel.Critical, "[SdlEventLoop] GPU wedged: recovery did not return within {DeadlineMs}ms (window {WindowId}). Abandoning device.")]
     public static partial void GpuWedgedRecoveryDeadline(this ILogger logger, long deadlineMs, uint windowId);
 
+    [LoggerMessage(116, LogLevel.Warning, "[VulkanContext] Context abandoned: leaking device, surface and instance rather than freeing them under a recovery task that is still running.")]
+    public static partial void AbandonedContextLeaked(this ILogger logger);
+
     [LoggerMessage(104, LogLevel.Error, "[SdlEventLoop] OnGpuWedged handler threw: {ExceptionType}: {ExceptionMessage}")]
     public static partial void OnGpuWedgedHandlerThrew(this ILogger logger, string exceptionType, string exceptionMessage);
 
