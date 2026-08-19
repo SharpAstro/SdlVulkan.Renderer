@@ -6,6 +6,38 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.22
+
+The GPU-wedge recovery no longer rebuilds a swapchain on a device it has already abandoned. Two
+bounded waits meet on this path and each is correct alone. SdlEventLoop stops waiting for the
+sacrificial recovery task after GpuWedgeRecoveryDeadlineMs, abandons it, and hands the terminal
+decision to the host; its comment justified that by saying the task's thread stays blocked forever
+on a dead device. TryDrainDevice makes that false. It is bounded too -- deliberately, so an
+unbounded vkDeviceWaitIdle cannot freeze the window -- and it FORCES its teardown on timeout. So a
+recovery that is merely slow rather than permanently blocked reliably wakes up, finishes rebuilding
+sync objects, and calls CreateSwapchain against a surface the host destroyed while it slept. Seen in
+the field on an Adreno X1-85: an access violation inside vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
+after 2.5s of stuck fence, a 1s drain timeout and a 4s abandon. The surface handle is not nulled by
+the destroy, so it is dangling rather than Null and no null check would have caught it.
+
+`VulkanContext.Abandon()` is the missing signal, set by the loop BEFORE it invokes OnGpuWedged.
+`RecoverFromGpuError` checks it at three points -- entry, after the drain (where the deadline is
+realistically blown), and immediately before the swapchain rebuild -- and returns instead of
+touching anything the host may now free. `IsAbandoned` exposes it; `VkRenderer.AbandonDevice()` is
+the pass-through the loop calls.
+
+Dispose then LEAKS the device, surface and instance on an abandoned context rather than freeing
+them. That is the same decision the loop already made about the thread, carried through: a thread
+nobody can join is still entitled to read those handles, so freeing them is what turns a benign leak
+into an access violation. It is reachable only while the app is on its way down, and it logs event
+116 rather than doing it silently.
+
+Pinned by AbandonedContextTests, which reproduces the crash rather than describing it -- deleting
+the checkpoints kills the run with exit code -1073741819, the code the field crash reported. The
+Dispose half is deliberately unpinned: it only matters in the true race, so every deterministic
+sequence a test can write is already safe by the checkpoints, and an assertion that survives the
+removal of its own subject is worse than none.
+
 ## 7.21
 
 Follows DIR.Lib to 8.3, with nothing to port. 8.0's one breaking change is TabBar becoming

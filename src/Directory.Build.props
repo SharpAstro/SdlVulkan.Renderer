@@ -22,7 +22,7 @@
          .github/workflows/dotnet.yml — that comment block is the de-facto release notes, and it stays
          in the yml because several entries contain a double hyphen, which XML forbids inside a
          comment. -->
-    <VersionMajorMinor>7.21</VersionMajorMinor>
+    <VersionMajorMinor>7.22</VersionMajorMinor>
     <!-- Local builds get Major.Minor.0; CI passes -p:Version=Major.Minor.<run><attempt>+<sha>, and the
          condition lets it win. -->
     <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(VersionMajorMinor).0</VersionPrefix>
