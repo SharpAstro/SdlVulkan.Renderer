@@ -22,6 +22,10 @@ env:
 
 jobs:
   build:
+    # Every job is bounded. GitHub's default is 6 hours, which is how an unreachable apt archive
+    # parked webview-smoke-linux for an afternoon; healthy runs here are minutes, so a job over
+    # these limits is stuck rather than slow.
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     # Published for the test job, so the version is resolved ONCE per run rather than each job
     # re-deriving it.
@@ -129,6 +133,7 @@ jobs:
   # in publish-nuget's needs) until proven stable across runners. If a runner's Mesa does not
   # auto-fall-back to software, add LIBGL_ALWAYS_SOFTWARE=1 + WEBKIT_DISABLE_DMABUF_RENDERER=1 below.
   webview-smoke-linux:
+    timeout-minutes: 20
     needs: build
     strategy:
       fail-fast: false
@@ -140,10 +145,29 @@ jobs:
     # Plain apt-get (not cache-apt-pkgs-action): the cache action installs only the named packages
     # without their dependencies, so mesa-vulkan-drivers landed without the driver libs its ICD needs
     # -> "vkCreateInstance: Found no drivers" (-9). apt-get resolves dependencies and installs the ICD.
+    # Bounded and retried because THIS STEP is what hung: apt-get has no timeout of its own, so a
+    # runner that cannot reach the archive sits here until the job's limit -- and with no limit
+    # declared, that was GitHub's 6-hour default. Observed on PR #80, where this job wedged while its
+    # aarch64 twin passed in 1m8s, and the only recovery was cancelling the run by hand. The usual
+    # cause is an AAAA route to the archive that black-holes rather than refuses, hence ForceIPv4.
+    # The package set is deliberately unchanged: this bounds the failure, it does not install less.
+    # (Ported from drawboard/pdf-viewer, which lost a six-hour release lane to the same shape.)
     - name: Install WebKitGTK + software Vulkan + Xvfb
       run: |
-        sudo apt-get update
-        sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libgtk-3-0 libwebkit2gtk-4.1-0 xvfb
+        set -euo pipefail
+        apt_opts="-o Acquire::ForceIPv4=true -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3"
+        for attempt in 1 2 3; do
+          sudo timeout 300 apt-get $apt_opts update && break
+          echo "::warning::apt-get update stalled or failed (attempt $attempt/3)"
+          [ "$attempt" = 3 ] && exit 1
+          sleep 15
+        done
+        for attempt in 1 2 3; do
+          sudo timeout 600 apt-get $apt_opts install -y             mesa-vulkan-drivers libvulkan1 libgtk-3-0 libwebkit2gtk-4.1-0 xvfb && break
+          echo "::warning::apt-get install stalled or failed (attempt $attempt/3)"
+          [ "$attempt" = 3 ] && exit 1
+          sleep 15
+        done
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
@@ -165,6 +189,7 @@ jobs:
         dotnet run --project tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0 -c $BUILD_CONF assert-autosize
 
   publish-nuget:
+    timeout-minutes: 15
     needs: [build, test]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
