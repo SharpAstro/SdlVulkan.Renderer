@@ -8,6 +8,24 @@ this file disagrees with. Bump it there and add the entry here, in the same comm
 
 ## 7.22
 
+The inspector screenshot no longer reads the swapchain image it just presented. The old readback ran
+after vkQueuePresentKHR and transitioned an image the presentation engine owned, without re-acquiring
+it -- two spec violations the Khronos validation layer reports on every single screenshot
+(WRITE_AFTER_PRESENT, plus "layout transition on a presentable image that has not been acquired"),
+verified against SDK 1.4.357 with synchronization validation on. An illegal barrier against an image
+the compositor still holds entitles the driver to park the whole queue behind it, and the readback ran
+at exactly the wedge-shaped moment: between frames, right after a present, with the next frame
+queueing up behind it. That makes it the leading candidate for the field wedge below -- a real
+submission sitting unretired for seconds, no TDR, self-resolving -- and it is in any case the only
+spec violation the layer finds in the renderer.
+
+The capture now rides the frame itself: `screenshot` became a frame-spanning inspector verb,
+`RequestPresentCapture` marks the next presented frame, the copy is recorded into that frame's own
+command buffer between vkCmdEndRenderPass and the present (the process owns the acquired image
+there), and the readback is consumed at the BeginFrame that waits the same fence index -- the
+ThumbnailCapture pattern, no extra submit, no extra fence, no queue-stalling wait. A screenshot must
+never be able to wedge the app it is observing.
+
 The GPU-wedge recovery no longer rebuilds a swapchain on a device it has already abandoned. Two
 bounded waits meet on this path and each is correct alone. SdlEventLoop stops waiting for the
 sacrificial recovery task after GpuWedgeRecoveryDeadlineMs, abandons it, and hands the terminal
