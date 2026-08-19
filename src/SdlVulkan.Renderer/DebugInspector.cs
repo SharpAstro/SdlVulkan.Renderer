@@ -217,7 +217,6 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     {
         "describe" => ExecuteDescribe(),
         "describeLayout" => ExecuteDescribeLayout(),
-        "screenshot" => ExecuteScreenshot(),
         "signals" => ExecuteListSignals(),
         "minimize" => ExecuteWindowState(static w => w.Minimize()),
         "maximize" => ExecuteWindowState(static w => w.Maximize()),
@@ -319,9 +318,11 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// <summary>
     /// The frame-spanning verbs. <c>batch</c> is absent because the core owns it now: stepping one command
     /// per iteration is pure scheduling with no SDL in it, and it only ever lived here because the core
-    /// could not express it.
+    /// could not express it. <c>screenshot</c> spans frames because the capture is recorded into the next
+    /// presented frame and its readback rides that frame's fence -- the one legal way to read a swapchain
+    /// image (see VulkanContext.SwapchainReadback.cs).
     /// </summary>
-    private static readonly string[] FrameSpanningVerbs = ["pressHold"];
+    private static readonly string[] FrameSpanningVerbs = ["pressHold", "screenshot"];
 
     /// <inheritdoc />
     public IReadOnlyCollection<string> SteppedMethods => FrameSpanningVerbs;
@@ -329,6 +330,16 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// <inheritdoc />
     public IDebugInspectorOperation Begin(string method, JsonElement p)
     {
+        if (method == "screenshot")
+        {
+            // Begin runs on the render thread, so asking the context directly is safe. The request marks
+            // the NEXT presented frame to capture itself pre-present; the redraw makes that frame happen
+            // even when the app is idle.
+            _view.Renderer.Context.RequestPresentCapture();
+            _view.RequestRedraw();
+            return new ScreenshotOperation(_view);
+        }
+
         var x = Coord(p, "x");
         var y = Coord(p, "y");
         var mods = Mods(p);
@@ -368,6 +379,47 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
             view.DispatchPointerUp(1, x, y);
             view.RequestRedraw();
             return $"\"held {durationMs}ms\"";
+        }
+    }
+
+    /// <summary>
+    /// A screenshot spans frames: the capture rides the next presented frame's command buffer and its
+    /// readback that frame's fence, so this steps until the snapshot lands (normally two frames).
+    /// This replaced a post-present readback of an image the process no longer owned -- the validation
+    /// layer flagged every such screenshot, and an illegal barrier on a presented image can park the
+    /// GPU queue, so the observer verb itself was a wedge candidate.
+    /// </summary>
+    private sealed class ScreenshotOperation(SdlWindowView view) : IDebugInspectorOperation
+    {
+        /// <summary>Not exclusive: the window must keep rendering, because a frame IS the capture vehicle.</summary>
+        public bool Exclusive => false;
+
+        /// <summary>Generous: the capture normally lands within two frames; a busy GPU only has to
+        /// finish the capture frame, not be quick about it.</summary>
+        public TimeSpan Timeout => TimeSpan.FromSeconds(15);
+
+        public string? Advance()
+        {
+            var ctx = view.Renderer.Context;
+            if (ctx.TryTakePresentCapture(out var rgba, out var w, out var h))
+            {
+                return EncodeScreenshot(rgba, (int)w, (int)h);
+            }
+
+            if (ctx.GpuFenceStuck)
+            {
+                // Structured error rather than more waiting: never queue work behind a fence that is
+                // not signalling. The caller can retry once the GPU recovers.
+                return ToJson(static jw =>
+                {
+                    jw.WriteStartObject();
+                    jw.WriteString("error", "screenshot unavailable: GPU stalled");
+                    jw.WriteEndObject();
+                });
+            }
+
+            view.RequestRedraw(); // keep frames coming until the capture frame's fence is waited
+            return null;
         }
     }
 
@@ -503,24 +555,8 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         _ => node.GetType().Name,
     };
 
-    private string ExecuteScreenshot()
+    private static string EncodeScreenshot(byte[] rgba, int width, int height)
     {
-        var ctx = _view.Renderer.Context;
-        var rgba = ctx.ReadbackSwapchainRgba();
-        if (rgba is null)
-        {
-            // Readback was skipped/aborted (GPU wedged or the bounded readback wait timed out).
-            // Surface a structured error instead of crashing or blocking — the inspector caller
-            // can retry once the GPU recovers.
-            return ToJson(w =>
-            {
-                w.WriteStartObject();
-                w.WriteString("error", "screenshot unavailable: GPU stalled or readback timed out");
-                w.WriteEndObject();
-            });
-        }
-        var width = (int)ctx.SwapchainWidth;
-        var height = (int)ctx.SwapchainHeight;
         // RGBA of a UI is mostly flat color, so gzip shrinks the wire payload ~10-50x before base64.
         var gz = Gzip(rgba);
         var b64 = Convert.ToBase64String(gz);

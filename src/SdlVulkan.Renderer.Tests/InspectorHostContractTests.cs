@@ -34,16 +34,18 @@ public class InspectorHostContractTests
         => ((IDebugInspectorHost)FormatterServicesStandIn()).SurfaceKind.ShouldBe("sdl");
 
     /// <summary>
-    /// <c>pressHold</c> is the ONLY frame-spanning verb left. <c>batch</c> and <c>wait</c> moved into the core
-    /// — they are pure scheduling with no SDL in them — so listing either here would route a request to a
-    /// <c>Begin</c> that no longer builds one.
+    /// The frame-spanning verbs are <c>pressHold</c> and <c>screenshot</c> — the latter because a capture
+    /// rides the NEXT presented frame's command buffer and fence (the one legal way to read a swapchain
+    /// image; an instantaneous screenshot could only read an image the process no longer owns). <c>batch</c>
+    /// and <c>wait</c> moved into the core — they are pure scheduling with no SDL in them — so listing
+    /// either here would route a request to a <c>Begin</c> that no longer builds one.
     /// </summary>
     [Fact]
-    public void PressHoldIsTheOnlyFrameSpanningVerb()
+    public void TheFrameSpanningVerbsArePressHoldAndScreenshot()
     {
         var stepped = (IDebugInspectorSteppedHost)FormatterServicesStandIn();
 
-        stepped.SteppedMethods.ShouldBe(["pressHold"]);
+        stepped.SteppedMethods.ShouldBe(["pressHold", "screenshot"]);
         stepped.SteppedMethods.ShouldNotContain("batch", "the core schedules batches now");
         stepped.SteppedMethods.ShouldNotContain("wait", "wait only means anything as a batch step");
     }

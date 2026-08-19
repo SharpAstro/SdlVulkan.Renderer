@@ -590,6 +590,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // capture's copy rode this fence index, its GPU work is complete — snapshot it now without
         // any extra GPU wait. Done before the reset below so the fence is still in its signaled state.
         ConsumeThumbnailReadback();
+        // Same contract for the DEBUG-only inspector screenshot capture (a partial method, so the
+        // call compiles away in Release along with its implementation file).
+        ConsumePresentCaptureReadback();
 
         var result = DeviceApi.vkAcquireNextImageKHR(Swapchain, ulong.MaxValue,
             _imageAvailableSemaphores[_currentFrame], VkFence.Null, out _currentImageIndex);
@@ -668,6 +671,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
         {
             DeviceApi.vkCmdEndRenderPass(cmd);
             _renderPassBegun = false;
+            // A requested inspector screenshot is recorded HERE — after the render pass left the image
+            // in PresentSrcKHR, before the present below releases it — the only window in which this
+            // process owns the acquired image. It used to run post-present against an image the
+            // presentation engine already owned, which the validation layer flags on every screenshot
+            // and which entitles a driver to park the queue (the stuck-fence wedge shape).
+            RecordPresentCapture(cmd);
         }
         DeviceApi.vkEndCommandBuffer(cmd);
 
@@ -761,6 +770,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             // for — would snapshot a readback buffer the GPU never wrote.
             if (_thumbPending && _thumbPendingIndex == _currentFrame)
                 _thumbPending = false;
+            CancelPresentCaptureOnRejectedSubmit();
             _frameBegun = false;
             _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
             return;
@@ -807,6 +817,14 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // semaphore and fence.
         SubmitFrame(_commandBuffers[_currentFrame], endRenderPass: _renderPassBegun);
     }
+
+    // DEBUG-only inspector screenshot capture, implemented in VulkanContext.SwapchainReadback.cs
+    // (a file wrapped in #if DEBUG). Partial methods with no implementation have their calls removed
+    // by the compiler, so a Release build carries neither the code nor the call sites.
+    partial void RecordPresentCapture(VkCommandBuffer cmd);
+    partial void CancelPresentCaptureOnRejectedSubmit();
+    partial void ConsumePresentCaptureReadback();
+    partial void CleanupPresentCapture();
 
     [Conditional("DEBUG")]
     private static void DebugLogBufferFull(int vertexOffset, int requestLength)
@@ -861,6 +879,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         CleanupSwapchain();
         if (_isOffscreen) CleanupOffscreenTarget();
         CleanupThumbnailTarget();
+        CleanupPresentCapture();
 
         for (var i = 0; i < MaxFramesInFlight; i++)
         {

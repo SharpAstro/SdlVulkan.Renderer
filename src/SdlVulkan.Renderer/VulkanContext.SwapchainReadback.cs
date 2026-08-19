@@ -1,71 +1,101 @@
-using Microsoft.Extensions.Logging;
 #if DEBUG
 using Vortice.Vulkan;
 
 namespace SdlVulkan.Renderer;
 
-// DEBUG-only swapchain readback for the live UI debug inspector (see DebugInspector.cs).
-// Mirrors VulkanContext.Offscreen.cs ReadbackOffscreenRgba almost verbatim; the only differences
-// are (a) it copies a swapchain image instead of the offscreen target, and (b) the layout
-// transitions are PresentSrcKHR <-> TransferSrcOptimal because the image was just presented by
-// vkQueuePresentKHR (the offscreen path uses ColorAttachmentOptimal).
+// DEBUG-only swapchain capture for the live UI debug inspector (see DebugInspector.cs).
 //
-// Must be called on the RENDER THREAD after EndFrame (after present). The one-shot command buffer
-// + vkQueueWaitIdle stalls the queue, which is fine for a debug tool. Requires the swapchain to
-// have been created with VkImageUsageFlags.TransferSrc (added under #if DEBUG in CreateSwapchain).
+// The capture is recorded INTO THE FRAME'S OWN command buffer, after vkCmdEndRenderPass (the image
+// is in PresentSrcKHR, the render pass's finalLayout) and before vkEndCommandBuffer -- while this
+// process still owns the acquired image. The readback is then consumed at the top of the BeginFrame
+// that waits the same fence index, exactly the ThumbnailCapture pattern (VulkanContext.ThumbnailCapture.cs):
+// no extra submit, no extra fence, no GPU wait beyond the one BeginFrame already performs.
+//
+// This REPLACED a post-present one-shot readback that transitioned the just-presented image without
+// re-acquiring it. That violated the swapchain ownership contract twice over -- the validation layer
+// reported a WRITE_AFTER_PRESENT hazard plus "layout transition on a presentable image that has not
+// been acquired" on every single screenshot -- and a barrier against an image the presentation
+// engine still owns is a license for the driver to park the whole queue behind it. On the Adreno
+// X1-85 a parked queue is indistinguishable from the stuck-fence wedge PR #80's abandon work made
+// survivable, and the readback ran at exactly the wedge-shaped moment: between frames, right after
+// a present. A screenshot must never be able to wedge the app it is observing.
 public sealed unsafe partial class VulkanContext
 {
+    // Pending-capture state. Render thread ONLY, like the frame state machine it rides on.
+    private bool _presentCaptureRequested;    // a capture should be recorded into the next presented frame
+    private bool _presentCapturePending;      // a copy is recorded, awaiting its frame fence
+    private int _presentCapturePendingIndex;  // frame-fence index the recorded copy rides
+    private uint _presentCaptureW;            // extent of the recorded copy (swapchain size at record time)
+    private uint _presentCaptureH;
+    private VkBuffer _presentCaptureBuffer;   // host-visible readback buffer, persistent, grown on demand
+    private VkDeviceMemory _presentCaptureMemory;
+    private ulong _presentCaptureCapacity;
+    private byte[]? _presentCaptureReadyRgba; // finished RGBA snapshot awaiting TryTakePresentCapture
+    private uint _presentCaptureReadyW;
+    private uint _presentCaptureReadyH;
+
+    /// <summary>True while the in-flight fence wait is timing out (the GPU is late or stuck). The
+    /// inspector reads this to fail a screenshot with a structured error instead of queueing more
+    /// work behind a fence that is not signalling.</summary>
+    internal bool GpuFenceStuck => _fenceWaitStuck;
+
     /// <summary>
-    /// Copies the most recently presented swapchain image into a freshly-allocated RGBA byte array
-    /// (R,G,B,A per pixel, top-to-bottom). Blocks until the GPU finishes the copy. DEBUG-only.
+    /// Asks the NEXT presented frame to capture itself. Render thread only. The result arrives via
+    /// <see cref="TryTakePresentCapture"/> once that frame's fence has been waited (typically two
+    /// frames later); the caller keeps the window redrawing until then. Any stale unconsumed snapshot
+    /// is dropped so a new request can never answer with an older frame.
     /// </summary>
-    internal byte[]? ReadbackSwapchainRgba()
+    internal void RequestPresentCapture()
     {
-        if (_isOffscreen) throw new InvalidOperationException("ReadbackSwapchainRgba requires a swapchain context");
+        AssertFrameThread(nameof(RequestPresentCapture));
+        _presentCaptureReadyRgba = null;
+        _presentCaptureRequested = true;
+    }
 
-        // Never pile a queue submit + GPU wait onto a GPU that is already known wedged: that is
-        // exactly how an inspector screenshot turned a recoverable stall into a render-thread hang.
-        // Returns null; the caller surfaces a "readback unavailable" result instead of crashing.
-        if (_fenceWaitStuck)
+    /// <summary>
+    /// Hands over the finished capture (RGBA, top-to-bottom rows) and clears the ready state.
+    /// Returns false while no capture has completed.
+    /// </summary>
+    internal bool TryTakePresentCapture(out byte[] rgba, out uint width, out uint height)
+    {
+        if (_presentCaptureReadyRgba is not { } ready)
         {
-            SdlVulkanLog.Logger.ReadbackSkippedGpuStuck();
-            return null;
+            rgba = [];
+            width = 0;
+            height = 0;
+            return false;
         }
+        rgba = ready;
+        width = _presentCaptureReadyW;
+        height = _presentCaptureReadyH;
+        _presentCaptureReadyRgba = null;
+        return true;
+    }
 
-        var imageIndex = _currentImageIndex;
-        var image = _swapchainImages[imageIndex];
+    // Called from SubmitFrame after vkCmdEndRenderPass, before vkEndCommandBuffer, so the copy is
+    // ordered after all rendering and before the present that releases the image -- the only window
+    // in which touching a swapchain image is legal. An aborted frame that closed its render pass
+    // captures too (a partially-drawn debug screenshot beats a stepped operation that never
+    // completes); a frame that died before BeginRenderPass skips, and the request carries over.
+    partial void RecordPresentCapture(VkCommandBuffer cmd)
+    {
+        if (!_presentCaptureRequested || _presentCapturePending || _isOffscreen)
+            return;
+
         var width = SwapchainWidth;
         var height = SwapchainHeight;
-        var pixelCount = (int)(width * height);
-        var size = (ulong)(pixelCount * 4);
+        var size = (ulong)width * height * 4;
+        if (size == 0)
+            return;
 
-        // Host-visible staging buffer to receive the image copy.
-        VkBufferCreateInfo bufCI = new()
-        {
-            size = size,
-            usage = VkBufferUsageFlags.TransferDst,
-            sharingMode = VkSharingMode.Exclusive
-        };
-        DeviceApi.vkCreateBuffer(&bufCI, null, out var stagingBuffer).CheckResult();
-        DeviceApi.vkGetBufferMemoryRequirements(stagingBuffer, out var memReqs);
-        VkMemoryAllocateInfo allocInfo = new()
-        {
-            allocationSize = memReqs.size,
-            memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits,
-                VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent)
-        };
-        DeviceApi.vkAllocateMemory(&allocInfo, null, out var stagingMemory).CheckResult();
-        DeviceApi.vkBindBufferMemory(stagingBuffer, stagingMemory, 0);
+        EnsurePresentCaptureBuffer(size);
 
-        // One-shot command buffer: transition image PresentSrc->TransferSrc, copy, transition back.
-        DeviceApi.vkAllocateCommandBuffer(CommandPool, out var cmd).CheckResult();
-        VkCommandBufferBeginInfo bi = new() { flags = VkCommandBufferUsageFlags.OneTimeSubmit };
-        DeviceApi.vkBeginCommandBuffer(cmd, &bi);
+        var image = _swapchainImages[_currentImageIndex];
 
         TransitionImageLayout(cmd, image,
             VkImageLayout.PresentSrcKHR, VkImageLayout.TransferSrcOptimal,
-            VkAccessFlags.MemoryRead, VkAccessFlags.TransferRead,
-            VkPipelineStageFlags.BottomOfPipe, VkPipelineStageFlags.Transfer);
+            VkAccessFlags.ColorAttachmentWrite, VkAccessFlags.TransferRead,
+            VkPipelineStageFlags.ColorAttachmentOutput, VkPipelineStageFlags.Transfer);
 
         VkBufferImageCopy region = new()
         {
@@ -77,52 +107,108 @@ public sealed unsafe partial class VulkanContext
             imageExtent = new VkExtent3D(width, height, 1)
         };
         DeviceApi.vkCmdCopyImageToBuffer(cmd, image, VkImageLayout.TransferSrcOptimal,
-            stagingBuffer, 1, &region);
+            _presentCaptureBuffer, 1, &region);
 
         TransitionImageLayout(cmd, image,
             VkImageLayout.TransferSrcOptimal, VkImageLayout.PresentSrcKHR,
             VkAccessFlags.TransferRead, VkAccessFlags.MemoryRead,
             VkPipelineStageFlags.Transfer, VkPipelineStageFlags.BottomOfPipe);
 
-        DeviceApi.vkEndCommandBuffer(cmd);
+        _presentCaptureW = width;
+        _presentCaptureH = height;
+        _presentCapturePending = true;
+        _presentCapturePendingIndex = _currentFrame; // SubmitFrame submits under _inFlightFences[_currentFrame]
+        _presentCaptureRequested = false;
+    }
 
-        // Bounded wait (was an unbounded vkQueueWaitIdle): submit with a fence and cap the wait so a
-        // saturated/wedged GPU cannot hang the render thread here. On timeout, abort the readback and
-        // intentionally leak the in-flight command buffer + fence + staging buffer rather than free
-        // resources the GPU may still be reading -- this path is DEBUG-only and we are already in a
-        // degraded state where a one-off leak is far cheaper than a freeze.
-        VkSubmitInfo si = new() { commandBufferCount = 1, pCommandBuffers = &cmd };
-        DeviceApi.vkCreateFence(VkFenceCreateFlags.None, out var readbackFence).CheckResult();
-        // DEBUG-only, and on a window's device — so it must run on the render thread like every other
-        // submit to it. The assertion catches an inspector/MCP thread calling in, which would be
-        // concurrent queue access (see VulkanDevice.AssertQueueThread).
-        _dev.AssertQueueThread("swapchain readback");
-        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &si, readbackFence).CheckResult();
-        if (DeviceApi.vkWaitForFences(1, &readbackFence, true, DrainTimeoutNs) == VkResult.Timeout)
+    // Mirror of the thumbnail cancellation in SubmitFrame's rejected-submit branch: the copy recorded
+    // into this frame died with it, so nothing will ever write the buffer. Re-arm the request rather
+    // than just clearing it -- the next frame that does submit records a fresh capture, and the
+    // inspector's stepped screenshot completes instead of waiting on a capture that no longer exists.
+    partial void CancelPresentCaptureOnRejectedSubmit()
+    {
+        if (_presentCapturePending && _presentCapturePendingIndex == _currentFrame)
         {
-            SdlVulkanLog.Logger.ReadbackTimedOut(DrainTimeoutNs / 1_000_000);
-            return null;
+            _presentCapturePending = false;
+            _presentCaptureRequested = true;
         }
-        DeviceApi.vkDestroyFence(readbackFence);
-        DeviceApi.vkFreeCommandBuffers(CommandPool, 1, &cmd);
+    }
 
-        // Map and copy out. B8G8R8A8 -> convert to R8G8B8A8 for caller convenience.
+    // Called from BeginFrame immediately after the in-flight fence wait (and before the reset), like
+    // ConsumeThumbnailReadback: if the recorded copy rode the fence index that was just waited, its
+    // GPU work is complete and the buffer can be snapshotted with no extra GPU wait.
+    partial void ConsumePresentCaptureReadback()
+    {
+        if (!_presentCapturePending || _presentCapturePendingIndex != _currentFrame)
+            return;
+
+        var pixelCount = (int)(_presentCaptureW * _presentCaptureH);
+        var size = (ulong)(pixelCount * 4);
+
         void* mapped;
-        DeviceApi.vkMapMemory(stagingMemory, 0, size, 0, &mapped);
-        var result = new byte[pixelCount * 4];
+        DeviceApi.vkMapMemory(_presentCaptureMemory, 0, size, 0, &mapped);
+        var rgba = new byte[pixelCount * 4];
         var src = new Span<byte>(mapped, pixelCount * 4);
         for (var i = 0; i < pixelCount; i++)
         {
-            result[i * 4 + 0] = src[i * 4 + 2]; // R <- B
-            result[i * 4 + 1] = src[i * 4 + 1]; // G
-            result[i * 4 + 2] = src[i * 4 + 0]; // B <- R
-            result[i * 4 + 3] = src[i * 4 + 3]; // A
+            rgba[i * 4 + 0] = src[i * 4 + 2]; // R <- B (swapchain is B8G8R8A8)
+            rgba[i * 4 + 1] = src[i * 4 + 1]; // G
+            rgba[i * 4 + 2] = src[i * 4 + 0]; // B <- R
+            rgba[i * 4 + 3] = src[i * 4 + 3]; // A
         }
-        DeviceApi.vkUnmapMemory(stagingMemory);
+        DeviceApi.vkUnmapMemory(_presentCaptureMemory);
 
-        DeviceApi.vkDestroyBuffer(stagingBuffer);
-        DeviceApi.vkFreeMemory(stagingMemory);
-        return result;
+        _presentCaptureReadyRgba = rgba;
+        _presentCaptureReadyW = _presentCaptureW;
+        _presentCaptureReadyH = _presentCaptureH;
+        _presentCapturePending = false;
+    }
+
+    partial void CleanupPresentCapture()
+    {
+        if (_presentCaptureBuffer != VkBuffer.Null)
+        {
+            DeviceApi.vkDestroyBuffer(_presentCaptureBuffer);
+            DeviceApi.vkFreeMemory(_presentCaptureMemory);
+            _presentCaptureBuffer = VkBuffer.Null;
+            _presentCaptureMemory = VkDeviceMemory.Null;
+            _presentCaptureCapacity = 0;
+        }
+        _presentCaptureRequested = false;
+        _presentCapturePending = false;
+        _presentCaptureReadyRgba = null;
+    }
+
+    private void EnsurePresentCaptureBuffer(ulong size)
+    {
+        if (_presentCaptureBuffer != VkBuffer.Null && _presentCaptureCapacity >= size)
+            return;
+
+        if (_presentCaptureBuffer != VkBuffer.Null)
+        {
+            // Safe to destroy: a pending copy into this buffer is refused above (_presentCapturePending
+            // gates RecordPresentCapture), so the buffer can only be idle here.
+            DeviceApi.vkDestroyBuffer(_presentCaptureBuffer);
+            DeviceApi.vkFreeMemory(_presentCaptureMemory);
+        }
+
+        VkBufferCreateInfo bufCI = new()
+        {
+            size = size,
+            usage = VkBufferUsageFlags.TransferDst,
+            sharingMode = VkSharingMode.Exclusive
+        };
+        DeviceApi.vkCreateBuffer(&bufCI, null, out _presentCaptureBuffer).CheckResult();
+        DeviceApi.vkGetBufferMemoryRequirements(_presentCaptureBuffer, out var memReqs);
+        VkMemoryAllocateInfo allocInfo = new()
+        {
+            allocationSize = memReqs.size,
+            memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits,
+                VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent)
+        };
+        DeviceApi.vkAllocateMemory(&allocInfo, null, out _presentCaptureMemory).CheckResult();
+        DeviceApi.vkBindBufferMemory(_presentCaptureBuffer, _presentCaptureMemory, 0);
+        _presentCaptureCapacity = size;
     }
 }
 #endif
