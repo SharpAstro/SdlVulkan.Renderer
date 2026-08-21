@@ -6,6 +6,22 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.23
+
+`SdlVulkanWindow` implements `SharpAstro.AppShell.IActivatableWindow`, so `window.Activate()` brings a
+window forward for a single-instance hand-off with the correct restore behaviour. The three members it
+needs already existed; what was missing was the RULE, and the rule is not obvious. Two applications
+wrote it independently and both got it wrong the same way: restore, then raise. Restoring un-maximises
+(`SW_RESTORE`, which is also what this class's own `Restore` summary says it does), so opening a second
+file knocked a maximised window back to its floating size. Raising without restoring is equally wrong
+in the other direction, leaving a minimised window off-screen at -21333,-21333 while it holds input
+focus. Restore only when actually minimised; a window minimised FROM maximised comes back maximised.
+
+Adds a dependency on SharpAstro.AppShell (one small managed assembly whose own only dependency,
+`Microsoft.Extensions.Logging.Abstractions`, this package already had). Referenced on every TFM
+including android: its Windows-only foreground grant is already guarded at runtime, and activation is
+a real concern on android too, so excluding that leg would assert otherwise.
+
 ## 7.22
 
 The inspector screenshot no longer reads the swapchain image it just presented. The old readback ran

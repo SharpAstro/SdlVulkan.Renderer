@@ -41,6 +41,27 @@
     <PackageReference Include="DIR.Lib" />
   </ItemGroup>
 
+  <!--
+    SharpAstro.AppShell supplies IActivatableWindow, which SdlVulkanWindow implements so that a
+    single-instance hand-off can activate a window without each consuming application writing its
+    own adapter (two of them did, and both got the restore rule wrong). Same conditional-sibling
+    pattern as DIR.Lib above.
+
+    Referenced on EVERY TFM, android included. Its Windows foreground-grant is already guarded by
+    OperatingSystem.IsWindows(), so what ships to android is an unreachable P/Invoke rather than a
+    broken one; activation is a real concern there too (launch modes, moveTaskToFront), so excluding
+    the android leg would be asserting the opposite.
+  -->
+  <PropertyGroup>
+    <UseLocalAppShell Condition="'$(UseLocalAppShell)' == '' AND Exists('..\..\..\AppShell\src\SharpAstro.AppShell\SharpAstro.AppShell.csproj')">true</UseLocalAppShell>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(UseLocalAppShell)' == 'true'">
+    <ProjectReference Include="..\..\..\AppShell\src\SharpAstro.AppShell\SharpAstro.AppShell.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalAppShell)' != 'true'">
+    <PackageReference Include="SharpAstro.AppShell" />
+  </ItemGroup>
+
   <ItemGroup>
     <!-- SDL3-CS publishes preview versions only, so NuGet's stable-package-with-prerelease-dependency
          warning (NU5104) fires on every pack; suppressed for this reference alone. -->

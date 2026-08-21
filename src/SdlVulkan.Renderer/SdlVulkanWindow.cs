@@ -1,4 +1,5 @@
 using DIR.Lib;
+using SharpAstro.AppShell;
 using Vortice.Vulkan;
 using static Vortice.Vulkan.Vulkan;
 using static SDL3.SDL;
@@ -8,7 +9,16 @@ namespace SdlVulkan.Renderer;
 /// <summary>
 /// Owns the SDL window and Vulkan instance/surface lifecycle.
 /// </summary>
-public sealed unsafe class SdlVulkanWindow : IDisposable
+/// <remarks>
+/// <para>Implements <see cref="IActivatableWindow"/> so a single-instance hand-off can bring this
+/// window forward correctly without every consumer re-deriving how. The three members it needs
+/// (<see cref="IsMinimized"/>, <see cref="Restore"/>, <see cref="Raise"/>) already existed; the
+/// value is that <c>window.Activate()</c> now carries the RULE, which is not obvious and which two
+/// separate applications got wrong in the same way: restoring before raising un-maximises the window
+/// it is bringing forward, and raising without restoring leaves a minimised one off-screen while
+/// holding input focus. See <see cref="WindowActivation"/> for the full reasoning.</para>
+/// </remarks>
+public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
 {
     public nint Handle { get; }
     public VkInstance Instance { get; }
