@@ -6,6 +6,41 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.24
+
+A cached layer: `VulkanContext.CachedLayer` renders expensive, rarely-changing content into a
+SAMPLEABLE secondary target on the live device, so a frame that changed nothing but its chrome blits it
+instead of re-shading it. Built for a FITS viewer whose image quad runs a heavy stretch/debayer shader,
+where a mouse move that only updated a status-bar readout was re-rendering the whole image; the same
+shape fits any app with a cheap overlay over an expensive picture.
+
+It is a sibling of `ThumbnailCapture`, not of `CreateOffscreen`: the pass is recorded into the frame's
+OWN command buffer from the `OnPreRenderPass` hook, so there is no extra submit, no extra fence and no
+queue-stalling wait. The attachment finalises as `ShaderReadOnlyOptimal` and carries `Sampled` usage
+plus a descriptor set, so the result is drawn with the existing `DrawTexture` and needs no new shader or
+pipeline in any consumer.
+
+ONE TARGET PER FRAME IN FLIGHT, which is correctness rather than tuning. The frame fence retires frame
+N-2, never N-1, so a single shared target would be rewritten while the previously submitted frame was
+still sampling it -- the hazard `VkFontAtlas.Grow` guards with a drain, and which the Adreno X1-85
+answers by failing the next `vkQueueSubmit`. Draining instead would be worse than the problem: content
+that changes every frame, like a zoom drag, would stall the render thread on each one. Per-slot, a
+change costs `MaxFramesInFlight` re-renders and then nothing. `IsCachedLayerSlotRendered` is part of the
+API because a slot that has never been rendered is still in `Undefined` layout, and sampling it is
+undefined content rather than an error, so nothing would throw and nothing would warn.
+
+The shared subpass-dependency pair now covers a fragment-shader read as well as a transfer read. Every
+render pass here must declare an IDENTICAL dependency list or the pre-baked pipelines they share stop
+being render-pass compatible (VUID-vkCmdDraw-renderPass-02684), so a pass needing different
+synchronisation cannot simply declare its own; widening the existing entry is the only shape available,
+and widening only ever adds ordering.
+
+`TryWaitPriorFramesIdle` is public. A consumer can own GPU images too, and a pipeline destroying a
+sampled texture faces exactly the hazard this bounded drain exists for -- previously its only options
+were an unbounded `vkDeviceWaitIdle` or nothing.
+
+Also fixes an unresolvable `cref` in `SdlInputMapping`'s docs (an extension member cannot be crefed).
+
 ## 7.23
 
 `SdlVulkanWindow` implements `SharpAstro.AppShell.IActivatableWindow`, so `window.Activate()` brings a

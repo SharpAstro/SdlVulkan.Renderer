@@ -69,7 +69,7 @@ public static class SdlInputMapping
     {
         /// <summary>
         /// The SDL cursor for a DIR.Lib cursor kind. The kinds are named by meaning, so this is where
-        /// the meaning meets one platform's set — the same seam <see cref="Scancode.ToInputKey"/> sits
+        /// the meaning meets one platform's set — the same seam <c>Scancode.ToInputKey</c> sits
         /// on, and the only place in the stack that has to know SDL has a cursor called <c>Pointer</c>.
         /// </summary>
         public SystemCursor ToSystemCursor => kind switch

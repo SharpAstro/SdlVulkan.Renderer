@@ -825,6 +825,14 @@ public sealed unsafe class VulkanDevice : IDisposable
     /// dependency costs the present path nothing it can measure.
     /// </para>
     /// <para>
+    /// The trailing subpass-to-external entry covers BOTH ways a pass's output is consumed after it
+    /// ends: a transfer read (ThumbnailCapture's vkCmdCopyImageToBuffer) and a fragment-shader read
+    /// (VulkanContext.CachedLayer, whose result is sampled by a later draw in the same command
+    /// buffer). Widening the existing entry rather than adding a third is deliberate -- the count and
+    /// content have to match across every pass, so a pass needing different synchronisation cannot
+    /// have its own list. Widening only ever adds ordering, so it cannot introduce a hazard.
+    /// </para>
+    /// <para>
     /// The external-to-subpass entry carries <c>srcAccessMask = ColorAttachmentWrite</c> on purpose.
     /// At 0 it orders execution but establishes no memory dependency against the PREVIOUS frame's
     /// storeOp write to the same attachment, so vkCmdBeginRenderPass's layout transition races it and
@@ -846,8 +854,8 @@ public sealed unsafe class VulkanDevice : IDisposable
             srcSubpass = 0, dstSubpass = VK_SUBPASS_EXTERNAL,
             srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
             srcAccessMask = VkAccessFlags.ColorAttachmentWrite,
-            dstStageMask = VkPipelineStageFlags.Transfer,
-            dstAccessMask = VkAccessFlags.TransferRead
+            dstStageMask = VkPipelineStageFlags.Transfer | VkPipelineStageFlags.FragmentShader,
+            dstAccessMask = VkAccessFlags.TransferRead | VkAccessFlags.ShaderRead
         };
     }
 

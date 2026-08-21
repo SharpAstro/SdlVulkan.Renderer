@@ -272,6 +272,75 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     // ---- Live-device thumbnail capture (see VulkanContext.ThumbnailCapture.cs) ----
 
+    // ---- Cached layer (see VulkanContext.CachedLayer.cs) ----
+
+    /// <summary>
+    /// Allocate the cached-layer targets, one per frame in flight, at a fixed capacity. Size it to
+    /// the largest region you will cache; a consumer that wants panning to cost nothing should add a
+    /// margin so a pan inside it is a blit rather than a re-render.
+    /// </summary>
+    public bool EnsureCachedLayerTargets(uint maxW, uint maxH)
+        => Surface.EnsureCachedLayerTargets(maxW, maxH);
+
+    /// <summary>Drop the targets (drains first) so they can be rebuilt at a new capacity on resize.</summary>
+    public void ReleaseCachedLayerTargets() => Surface.ReleaseCachedLayerTargets();
+
+    /// <summary>True once the targets exist.</summary>
+    public bool CachedLayerTargetReady => Surface.CachedLayerTargetReady;
+
+    /// <summary>
+    /// The slot this frame must render into and sample from. It alternates with the frame-in-flight
+    /// index, which is what keeps a frame from writing a target another may still be reading.
+    /// </summary>
+    public int CachedLayerSlot => Surface.CachedLayerSlot;
+
+    /// <summary>How many slots exist; a content change has to dirty them all.</summary>
+    public int CachedLayerSlotCount => Surface.CachedLayerSlotCount;
+
+    /// <summary>Whether this slot has ever been rendered, and so is legal to sample.</summary>
+    public bool IsCachedLayerSlotRendered(int slot) => Surface.IsCachedLayerSlotRendered(slot);
+
+    /// <summary>
+    /// The slot's descriptor set, for <see cref="DrawTexture"/> / <see cref="DrawTextureRegion"/>.
+    /// Pass UVs derived from the sub-rect actually rendered, since that is usually smaller than the
+    /// allocated capacity.
+    /// </summary>
+    public VkDescriptorSet CachedLayerDescriptorSet(int slot) => Surface.CachedLayerDescriptorSet(slot);
+
+    /// <summary>
+    /// Opens the cached-layer render pass on this frame's command buffer and redirects the projection
+    /// so draws land at cached-layer scale. MUST be called from the OnPreRenderPass hook (before the
+    /// main render pass) and bracketed by <see cref="EndCachedLayer"/>.
+    /// </summary>
+    public bool BeginCachedLayer(uint w, uint h, DIR.Lib.RGBAColor32 clearColor)
+    {
+        if (_currentCmd == VkCommandBuffer.Null || _inCachedLayer) return false;
+        if (!Surface.BeginCachedLayerPass(_currentCmd, w, h, clearColor)) return false;
+
+        _savedLayerWidth = _width;
+        _savedLayerHeight = _height;
+        _width = w;
+        _height = h;
+        UpdateProjection();
+        _inCachedLayer = true;
+        return true;
+    }
+
+    /// <summary>Closes the pass opened by <see cref="BeginCachedLayer"/> and restores the projection.</summary>
+    public void EndCachedLayer()
+    {
+        if (!_inCachedLayer) return;
+        Surface.EndCachedLayerPass(_currentCmd);
+        _width = _savedLayerWidth;
+        _height = _savedLayerHeight;
+        UpdateProjection();
+        _inCachedLayer = false;
+    }
+
+    private bool _inCachedLayer;
+    private uint _savedLayerWidth;
+    private uint _savedLayerHeight;
+
     /// <summary>
     /// Allocate the live-device thumbnail capture target once, up front (never mid steady-state).
     /// Size it to the largest thumbnail you will request — per-page captures use a (w,h) sub-rect.

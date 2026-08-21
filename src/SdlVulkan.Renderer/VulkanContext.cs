@@ -524,7 +524,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// render thread the way the old unbounded <c>vkDeviceWaitIdle</c> here could. On a healthy GPU it
     /// is equivalent (the prior frame's fence signals promptly), so the Adreno protection is preserved.
     /// </summary>
-    internal bool TryWaitPriorFramesIdle(string context)
+    /// <remarks>
+    /// Public because a consumer can own GPU images too -- a pipeline that destroys a sampled
+    /// texture faces exactly the hazard this exists for, and without this its only options were an
+    /// unbounded vkDeviceWaitIdle or nothing.
+    /// </remarks>
+    public bool TryWaitPriorFramesIdle(string context)
     {
         if (_fenceWaitStuck)
         {
@@ -879,6 +884,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         CleanupSwapchain();
         if (_isOffscreen) CleanupOffscreenTarget();
         CleanupThumbnailTarget();
+        CleanupCachedLayerTargets();
         CleanupPresentCapture();
 
         for (var i = 0; i < MaxFramesInFlight; i++)
