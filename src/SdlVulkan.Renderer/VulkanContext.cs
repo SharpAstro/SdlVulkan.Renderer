@@ -882,6 +882,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         }
 
         CleanupSwapchain();
+        CleanupLoadRenderPass();
         if (_isOffscreen) CleanupOffscreenTarget();
         CleanupThumbnailTarget();
         CleanupCachedLayerTargets();
@@ -1079,6 +1080,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
                 new VkImageSubresourceRange(VkImageAspectFlags.Color, 0, 1, 0, 1));
             DeviceApi.vkCreateImageView(&msaaViewCI, null, out _msaaImageView).CheckResult();
         }
+
+        // A swapchain image that has just been created holds nothing, and a resized one holds the
+        // wrong size, so no frame may be preserved until each has been painted once.
+        CleanupLoadRenderPass();
+        _loadRenderPass = CreateLoadRenderPass(SwapchainFormat);
+        ResetDamageState((int)imgCount);
 
         // Create framebuffers
         _framebuffers = new VkFramebuffer[imgCount];
