@@ -6,6 +6,43 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.25
+
+Damage-based repaint: a frame can preserve the previous one and paint only the region that changed.
+`BeginFrameRenderPass` picks a `loadOp = Load` variant of the swapchain pass (identical in attachments,
+samples, subpass refs and dependency pair, so the pre-baked pipelines stay compatible) and confines the
+frame to the accumulated damage; render area and scissor are the region while the VIEWPORT stays the
+full surface, because an app submits geometry in surface coordinates and shrinking the viewport would
+squash the frame into the region rather than crop it to it. `AddFrameDamage` / `MarkFullFrameDamage`
+declare it, and every clip is intersected with it -- DIR.Lib has already intersected a clip with its
+parents but knows nothing about damage, so a widget clipping to its own pane would otherwise repaint
+that whole pane on a frame that needed a status bar.
+
+Damage is tracked PER SWAPCHAIN IMAGE, which is the only hard part. With 2-3 images rendered in
+rotation the image acquired this frame holds the frame from 2-3 frames ago, so what must be repainted
+into it is the union of every frame's damage since THAT image was last painted. Using the current
+frame's damage instead leaves stale pixels that appear only at particular frame counts and only in the
+images that missed an update -- an intermittent rendering glitch with no visible connection to
+bookkeeping. `SwapchainDamage` is a separate type for that reason: the Vulkan half is mechanical, this
+half has the algorithm, and nine tests exercise it with no device.
+
+MSAA takes the clearing path unconditionally, since the multisample attachment is transient and cannot
+be reloaded from the resolved image; `CreateLoadRenderPass` returns Null, which is correct rather than
+merely safe.
+
+`SdlWindowView.OnBeforeFrame` runs once a frame is committed to, before the pass opens -- damage has to
+be declared there, because by the time `OnRender` runs the pass is already begun. Deliberately distinct
+from `CheckNeedsRedraw`, which decides WHETHER to draw and is a predicate: giving that side effects
+would mean a declined frame reconfigures the next one.
+
+The inspector gains a `move` verb. Both existing pointer verbs press a button, and a press means
+something -- in a viewer it starts a pan -- so a whole class of hover-driven behaviour was undrivable:
+highlights, tooltips, the cursor shape, and any repaint decided by where the pointer is. That last one
+forced the issue, since a viewer's most frequent redraw is the pointer crossing the image and there was
+no way to synthesize it at all.
+
+Rebuilt against DIR.Lib 8.8 for `LayoutDamage` and its unconditional layout capture.
+
 ## 7.24
 
 A cached layer: `VulkanContext.CachedLayer` renders expensive, rarely-changing content into a
