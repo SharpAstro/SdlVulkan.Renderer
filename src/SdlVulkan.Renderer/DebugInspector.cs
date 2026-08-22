@@ -230,6 +230,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         "text" => ExecuteText(RequiredString(p, "text", "s")),
         "scroll" => ExecuteScroll(Coord(p, "x"), Coord(p, "y"), Coord(p, "scrollY"), Mods(p)),
         "drag" => ExecuteDrag(Coord(p, "x1"), Coord(p, "y1"), Coord(p, "x2"), Coord(p, "y2"), Mods(p), DragSteps(p)),
+        "move" => ExecuteMove(Coord(p, "x1"), Coord(p, "y1"), Coord(p, "x2"), Coord(p, "y2"), DragSteps(p)),
         "postSignal" => ExecutePostSignal(RequiredString(p, "name"), SignalArgs(p)),
         // Reachable only OUTSIDE a batch, where there are no frames to wait for -- inside one the core
         // handles it. A no-op rather than an error, so a driver can send a uniform step list either way.
@@ -647,6 +648,29 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     {
         _view.DispatchPointerMove(x, y); // position the pointer first -- wheel handlers zoom around it
         _view.DispatchPointerWheel(scrollY, x, y, mods);
+        _view.RequestRedraw();
+        return "\"ok\"";
+    }
+
+    /// <summary>
+    /// Moves the pointer with NO button held, which is the one thing neither click nor drag can do.
+    /// </summary>
+    /// <remarks>
+    /// <para>A whole class of behaviour is hover-driven and was therefore undrivable: highlights,
+    /// tooltips, the cursor shape, and any repaint decided by where the pointer is. Both existing
+    /// pointer verbs press a button, and a press means something -- in a viewer it starts a PAN, so
+    /// asking either of them to "just move" produced a drag and measured the wrong thing entirely.</para>
+    /// <para>Interpolated like a drag, because a handler that integrates per motion event (or counts
+    /// them) sees a single jump as one event rather than as travel.</para>
+    /// </remarks>
+    private string ExecuteMove(float x1, float y1, float x2, float y2, int steps)
+    {
+        _view.DispatchPointerMove(x1, y1);
+        for (var i = 1; i <= steps; i++)
+        {
+            var t = (float)i / steps;
+            _view.DispatchPointerMove(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
+        }
         _view.RequestRedraw();
         return "\"ok\"";
     }
