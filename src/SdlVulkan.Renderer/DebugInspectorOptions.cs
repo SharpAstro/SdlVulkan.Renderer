@@ -38,10 +38,10 @@ public sealed class DebugInspectorOptions
     /// <see cref="Layout.ArrangedNode{T}"/> tree (every painted node with its depth, rect, kind,
     /// content, background, and any click binding), not just the clickable subset
     /// <see cref="GetRegions"/> surfaces. Aggregate the chrome's + active tab's
-    /// <c>PixelWidgetBase.GetCapturedLayout()</c> here. Supplying this callback flips on
-    /// <see cref="LayoutInspection"/> in <see cref="DebugInspector.Attach(SdlEventLoop, SdlWindowView, DebugInspectorOptions)"/>
-    /// so widgets retain their arranged tree. Invoked on the render thread inside the command pump,
-    /// so reading the per-frame capture is race-free.
+    /// <c>PixelWidgetBase.GetCapturedLayout()</c> here. Widgets retain their arranged tree
+    /// unconditionally (DIR.Lib 8.8 made capture load-bearing for damage-based repaint), so this
+    /// callback no longer has to opt anything in. Invoked on the render thread inside the command
+    /// pump, so reading the per-frame capture is race-free.
     /// </summary>
     public Func<IReadOnlyList<Layout.ArrangedNode<float>>>? GetLayout { get; init; }
 

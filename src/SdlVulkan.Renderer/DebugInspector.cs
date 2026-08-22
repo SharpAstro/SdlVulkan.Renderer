@@ -85,13 +85,6 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     {
         var inspector = new DebugInspector(loop, view, opts);
 
-        // Supplying a layout callback opts this process into PixelWidgetBase layout capture, so widgets
-        // retain their arranged tree for describeLayout. Off by default (zero paint overhead otherwise).
-        if (opts.GetLayout is not null)
-        {
-            LayoutInspection.Enabled = true;
-        }
-
         inspector._core = DebugInspectorCore.Start(inspector, opts.EnableDiscovery);
 
         // The pump goes on the loop's per-iteration hook (OnLoopIteration), NOT OnPostFrame: it must run
