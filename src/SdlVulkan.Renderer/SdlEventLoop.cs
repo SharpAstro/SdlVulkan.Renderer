@@ -142,6 +142,9 @@ public sealed class SdlEventLoop
     /// <summary>Background color for the primary window's frame clear.</summary>
     public RGBAColor32 BackgroundColor { get => Primary.BackgroundColor; set => Primary.BackgroundColor = value; }
     public Action? OnRender { get => Primary.OnRender; set => Primary.OnRender = value; }
+
+    /// <inheritdoc cref="SdlWindowView.OnBeforeFrame"/>
+    public Action? OnBeforeFrame { get => Primary.OnBeforeFrame; set => Primary.OnBeforeFrame = value; }
     public Action<uint, uint>? OnResize { get => Primary.OnResize; set => Primary.OnResize = value; }
     public Func<InputKey, InputModifier, bool>? OnKeyDown { get => Primary.OnKeyDown; set => Primary.OnKeyDown = value; }
     public Func<byte, float, float, byte, InputModifier, bool>? OnMouseDown { get => Primary.OnMouseDown; set => Primary.OnMouseDown = value; }
@@ -247,6 +250,8 @@ public sealed class SdlEventLoop
                 // events were already dispatched above, so the window stays responsive while waiting.
                 if (Environment.TickCount64 < v.NextRenderAttemptTick) continue;
                 v.NeedsRedraw = false;
+                // Committed to a frame: let the app configure it before the pass opens.
+                v.OnBeforeFrame?.Invoke();
                 if (RenderView(v))
                     renderedAny = true;
             }

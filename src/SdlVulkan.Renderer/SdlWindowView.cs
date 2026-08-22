@@ -160,6 +160,18 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     public Func<bool>? CheckNeedsRedraw { get; set; }
 
     /// <summary>
+    /// Runs immediately before a frame begins, after it has been decided that one will be drawn.
+    /// </summary>
+    /// <remarks>
+    /// For anything the frame must be CONFIGURED with rather than drawn by -- damage rects being the
+    /// case it exists for, since the render pass is chosen from them and by the time OnRender runs the
+    /// pass is already open. Distinct from CheckNeedsRedraw, which decides WHETHER to draw and is a
+    /// predicate: giving it side effects would mean a frame that is declined still reconfigures the
+    /// next one.
+    /// </remarks>
+    public Action? OnBeforeFrame { get; set; }
+
+    /// <summary>
     /// Called (on the render thread, once per recovery storm) when this window's GPU work has had to
     /// recover from a fence stall / mid-frame error repeatedly in quick succession — i.e. the swapchain
     /// recovery isn't sticking because the workload keeps re-wedging the GPU. The consumer should SHED
