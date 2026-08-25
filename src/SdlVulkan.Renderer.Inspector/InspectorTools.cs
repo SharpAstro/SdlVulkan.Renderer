@@ -104,11 +104,14 @@ public sealed class InspectorTools
 
     [McpServerTool, Description("Click the button whose label (ButtonHit action, e.g. 'Tab:Planner') matches. Use describe_ui to see labels.")]
     public static async Task<string> click_label(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
-        [Description("The button label / action string to click.")] string label,
+        [Description("The button label / action string to click. This parameter is named 'label'.")] string label = "",
         [Description("Clicks in the run: 1 a single click, 2 a double, 3 a triple. The whole run is delivered the way SDL delivers it -- a double click arrives as a press counted 1 then a press counted 2 -- so a control that does one thing on the single click and another on the double sees both.")] int clicks = 1,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(label)) return MissingArg("click_label", "label",
+            "A ButtonHit action string as describe_ui reports it, e.g. 'Tab:Planner'.");
+
         var target = await ResolveAsync(discovery, instance, ct);
         var result = await socket.SendAsync(target, "clickLabel", Json.Obj(("label", label), ("clicks", clicks)), ct);
         return result.GetString() ?? "ok";
@@ -116,11 +119,14 @@ public sealed class InspectorTools
 
     [McpServerTool, Description("Inject a key press through the SAME path as a real SDL keypress, so it reaches a focused text field / search box (e.g. Enter commits an open search). Key is a DIR.Lib InputKey name (see the key param). Mods is None/Ctrl/Shift/Alt or a combo like CtrlShift / 'Ctrl+Alt'.")]
     public static async Task<string> press_key(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
-        [Description("InputKey name: Enter, Escape, Tab, Space, Backspace, Delete, Up/Down/Left/Right, Home/End, F1-F12, A-Z, D0-D9, Plus/Minus/Period/Comma/etc. Aliases accepted: Return=Enter, Esc=Escape, ArrowUp/Down/Left/Right, Spacebar=Space, 0-9=D0-D9.")] string key,
+        [Description("InputKey name: Enter, Escape, Tab, Space, Backspace, Delete, Up/Down/Left/Right, Home/End, F1-F12, A-Z, D0-D9, Plus/Minus/Period/Comma/etc. Aliases accepted: Return=Enter, Esc=Escape, ArrowUp/Down/Left/Right, Spacebar=Space, 0-9=D0-D9. This parameter is named 'key'.")] string key = "",
         [Description("Modifier(s) held: None, Ctrl, Shift, Alt, or a combo like CtrlShift / 'Ctrl+Alt'. Default None. Unrecognised text (Cmd, Super, a typo) is REFUSED rather than treated as None, because a dropped modifier delivers a bare key or click - often a different binding rather than a no-op.")] string mods = "None",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(key)) return MissingArg("press_key", "key",
+            "A DIR.Lib InputKey name such as Enter, Escape, Tab, Up, F9 or A. Modifiers belong in 'mods'.");
+
         var target = await ResolveAsync(discovery, instance, ct);
         var result = await socket.SendAsync(target, "key", Json.Obj(("key", key), ("mods", mods)), ct);
         return result.GetString() ?? "ok";
@@ -128,10 +134,13 @@ public sealed class InspectorTools
 
     [McpServerTool, Description("Inject a text-input string (as if typed). Goes to the focused text field, if any.")]
     public static async Task<string> type_text(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
-        [Description("Text to inject.")] string text,
+        [Description("Text to inject. This parameter is named 'text'.")] string text = "",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
+        if (text.Length == 0) return MissingArg("type_text", "text",
+            "The string to inject, as if typed. A key that is not a character (Enter, Escape, an arrow) goes through press_key.");
+
         var target = await ResolveAsync(discovery, instance, ct);
         var result = await socket.SendAsync(target, "text", Json.Obj(("s", text)), ct);
         return result.GetString() ?? "ok";
@@ -295,16 +304,40 @@ public sealed class InspectorTools
         + "frames (e.g. to let async work settle). Nested batch is not allowed. NOTE: a 'screenshot' step returns raw "
         + "rgba+gzip JSON, not an image -- use the standalone screenshot tool when you want the picture.")]
     public static async Task<string> batch(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
-        [Description("JSON array of steps. Example: [{\"method\":\"key\",\"params\":{\"key\":\"Minus\"}},{\"method\":\"wait\",\"params\":{\"frames\":3}},{\"method\":\"describe\"}]")] string stepsJson,
+        [Description("JSON array of steps. Example: [{\"method\":\"key\",\"params\":{\"key\":\"Minus\"}},{\"method\":\"wait\",\"params\":{\"frames\":3}},{\"method\":\"describe\"}] -- this parameter is named 'stepsJson', and it takes that array as a STRING.")] string stepsJson = "",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
-        var target = await ResolveAsync(discovery, instance, ct);
-        using var doc = JsonDocument.Parse(stepsJson);
-        if (doc.RootElement.ValueKind != JsonValueKind.Array)
-            throw new ArgumentException("stepsJson must be a JSON array of {method, params} steps");
-        var result = await socket.SendAsync(target, "batch", Json.Obj(("steps", doc.RootElement)), ct);
-        return result.GetRawText();
+        if (string.IsNullOrWhiteSpace(stepsJson)) return MissingArg("batch", "stepsJson",
+            "The step array as a JSON STRING, each element {\"method\":\"...\",\"params\":{...}}. It is not called "
+            + "'steps', and a step is keyed 'method', not 'op'. Example: "
+            + "[{\"method\":\"click\",\"params\":{\"x\":10,\"y\":20}},{\"method\":\"describe\"}].");
+
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(stepsJson);
+        }
+        catch (JsonException ex)
+        {
+            return $"error: 'stepsJson' is not valid JSON ({ex.Message}). Pass the step array as a JSON string.";
+        }
+
+        // Returned rather than thrown, for the reason MissingArg gives: a throw from here reaches the caller
+        // as the same detail-free invocation error a binder failure does, so a malformed array and an absent
+        // one would be indistinguishable from the tool simply not working.
+        using (doc)
+        {
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return "error: 'stepsJson' must be a JSON ARRAY of {method, params} steps, not a "
+                    + $"{doc.RootElement.ValueKind}. A single step still goes in an array.";
+            }
+
+            var target = await ResolveAsync(discovery, instance, ct);
+            var result = await socket.SendAsync(target, "batch", Json.Obj(("steps", doc.RootElement)), ct);
+            return result.GetRawText();
+        }
     }
 
     [McpServerTool, Description("List the named signals this instance accepts via post_signal.")]
@@ -324,15 +357,9 @@ public sealed class InspectorTools
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
-        // Validate here rather than via a required parameter: a required param that isn't supplied (or is
-        // supplied under the wrong key) fails inside the MCP SDK's argument binder BEFORE this method runs,
-        // which surfaces only a generic "An error occurred invoking 'post_signal'" with no actionable detail.
-        // A defaulted param + this explicit check turns that into a message the caller can self-correct from.
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return "error: post_signal requires a 'name' argument (a signal from list_signals). "
-                + "The parameters are 'name' and optional 'argsJson' -- not 'signal'/'json'.";
-        }
+        if (string.IsNullOrWhiteSpace(name)) return MissingArg("post_signal", "name",
+            "One of the signals list_signals reports. The only other parameter is the optional 'argsJson' -- "
+            + "neither of them is called 'signal' or 'json'.");
 
         JsonDocument argsDoc;
         try
@@ -353,6 +380,27 @@ public sealed class InspectorTools
     }
 
     // ---------------- helpers ----------------
+
+    /// <summary>
+    /// The reply for an argument a tool cannot work without.
+    /// <para>
+    /// <b>Why these are checked here rather than declared as required parameters.</b> A required MCP
+    /// parameter that is not supplied -- or, far more often, is supplied under a NEIGHBOURING key -- fails
+    /// inside the SDK argument binder before any of this file runs. All that comes back is
+    /// "An error occurred invoking &lt;tool&gt;", which carries no detail because by then there is nothing
+    /// left that could supply any. It reads exactly like a broken tool, and it has been taken for one: a
+    /// batch call that spelled the parameter `steps` instead of `stepsJson` was written off as the tool
+    /// being unavailable, and the app behaviour it would have driven was reported as unreachable.
+    /// </para>
+    /// <para>
+    /// So every such parameter is DEFAULTED and checked here instead. That gives up a schema-level
+    /// guarantee in exchange for an error the caller can act on, which is the better trade for tools driven
+    /// by an agent that never sees a stack trace. The message names the expected key, because guessing the
+    /// key wrong -- not omitting it -- is the failure that actually happens.
+    /// </para>
+    /// </summary>
+    private static string MissingArg(string tool, string parameter, string expected)
+        => $"error: {tool} requires a '{parameter}' argument. {expected}";
 
     private static async Task<InspectorInstance> ResolveAsync(InspectorDiscoveryClient discovery, int pid, CancellationToken ct)
     {
