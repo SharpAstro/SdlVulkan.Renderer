@@ -160,7 +160,20 @@ public sealed unsafe partial class VulkanContext
         if (!_isOffscreen) throw new InvalidOperationException("ResizeOffscreen requires CreateOffscreen");
         if (width == _offscreenWidth && height == _offscreenHeight) return;
 
-        DeviceApi.vkDeviceWaitIdle(); // no in-flight frame may reference the target we're about to destroy
+        // No in-flight frame may reference the target we are about to destroy. Bounded, and skipped on a
+        // known-stuck GPU, for the reason every other drain in this class is: an unbounded
+        // vkDeviceWaitIdle here blocks the calling thread forever on a wedged device, and the offscreen
+        // path is reached from export — so the export would never return and never say why. Same call
+        // the swapchain recreate and surface-loss paths make, and the same trade on timeout: we are
+        // about to destroy and recreate this target regardless, so a drain that times out degrades to
+        // the rebuild it was already doing instead of a hang.
+        //
+        // TryDrainDevice, NOT TryWaitPriorFramesIdle: that one deliberately excludes the CURRENT
+        // frame's fence, because it exists for a mid-record atlas grow where that fence is reset and
+        // unsubmitted. ResizeOffscreen runs BETWEEN frames, where the current index can still hold a
+        // pending submit from MaxFramesInFlight frames ago — the frame most likely to be reading the
+        // old target. Excluding it would trade this hang for a destroy-while-referenced.
+        TryDrainDevice(DrainTimeoutNs, "offscreen resize");
         CleanupOffscreenTarget();
         _offscreenWidth = width;
         _offscreenHeight = height;
