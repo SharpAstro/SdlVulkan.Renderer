@@ -528,6 +528,11 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// Public because a consumer can own GPU images too -- a pipeline that destroys a sampled
     /// texture faces exactly the hazard this exists for, and without this its only options were an
     /// unbounded vkDeviceWaitIdle or nothing.
+    /// <para><b>But check which one you want first:</b> the current-frame exclusion above makes this
+    /// the MID-RECORD form. A consumer destroying a resource BETWEEN frames wants
+    /// <see cref="TryWaitAllFramesIdle"/> instead — the current index can hold a pending submit there,
+    /// and it is the likeliest reader of what is about to be destroyed. This is the wrong default for
+    /// that case despite being the one a consumer finds first.</para>
     /// </remarks>
     public bool TryWaitPriorFramesIdle(string context)
     {
@@ -559,6 +564,38 @@ public sealed unsafe partial class VulkanContext : IDisposable
         }
         return true;
     }
+
+    /// <summary>
+    /// Bounded "wait for every in-flight frame" for a consumer about to destroy a GPU resource a
+    /// submitted frame may still be reading. Companion to <see cref="TryWaitPriorFramesIdle"/>, and the
+    /// difference between them is the whole reason this exists separately.
+    ///
+    /// <para><b>Which one to call.</b> <see cref="TryWaitPriorFramesIdle"/> deliberately skips the
+    /// CURRENT frame's fence, because it was written for an atlas grow that runs MID-RECORD — between
+    /// BeginFrame and EndFrame — where that fence has been reset and has nothing submitted behind it, so
+    /// waiting on it could only ever burn the cap. This one includes it, for a destroy that runs BETWEEN
+    /// frames: there the current index is what the next BeginFrame will wait on, and it can still hold a
+    /// pending submit from <c>MaxFramesInFlight</c> frames ago — the frame most likely to still be
+    /// reading the resource. Calling the prior-frames form from a between-frames destroy skips exactly
+    /// the fence that mattered, which trades a hang for a destroy-while-referenced; on an Adreno X1-85
+    /// that presents as a rejected <c>vkQueueSubmit</c> rather than as anything resembling a
+    /// use-after-free, so it is not a mistake the symptom leads you back from.</para>
+    ///
+    /// <para>Capped and skipped on a known-stuck GPU, like its companion, so a destroy coinciding with a
+    /// wedged device cannot hard-freeze the caller the way an unbounded <c>vkDeviceWaitIdle</c> would.
+    /// Fences with no submission behind them are not waited on at all.</para>
+    ///
+    /// <para><b>Returning <c>false</c> is a decision, not just a status.</b> It means the drain timed
+    /// out and nothing has been waited for. A caller that is about to destroy AND RECREATE the resource
+    /// can proceed regardless — that is what the internal resize and surface-loss paths do, since the
+    /// worst case degrades to the rebuild they were already doing. A caller with no rebuild behind it is
+    /// choosing to destroy something the GPU may still be reading, which is usually still better than
+    /// hanging, but should be an explicit choice with a comment on it rather than an inherited default.
+    /// </para>
+    /// </summary>
+    /// <param name="context">Short label for the diagnostic logged if the drain is skipped or times out.</param>
+    /// <returns><c>true</c> when nothing is in flight or every pending fence signalled inside the cap.</returns>
+    public bool TryWaitAllFramesIdle(string context) => TryDrainDevice(DrainTimeoutNs, context);
 
     public VkCommandBuffer BeginFrame(out bool resized)
     {
