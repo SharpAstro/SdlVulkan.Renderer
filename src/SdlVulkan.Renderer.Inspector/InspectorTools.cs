@@ -176,6 +176,22 @@ public sealed class InspectorTools
         return result.GetString() ?? "ok";
     }
 
+    [McpServerTool, Description("Move the pointer from (x1,y1) to (x2,y2) with NO button held -- HOVER, not a drag. Emits interpolated motion events between the endpoints. This is the only verb that can reach hover-driven behaviour: a hover highlight, a tooltip, a cursor change, a readout that tracks the pointer. click / drag / press_hold all arrive with a button DOWN, so none of them can drive it.")]
+    public static async Task<string> move(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Start X pixel.")] float x1,
+        [Description("Start Y pixel.")] float y1,
+        [Description("End X pixel.")] float x2,
+        [Description("End Y pixel.")] float y2,
+        [Description("Interpolated motion events between start and end (1-64). Default 8. More steps matter for anything that integrates per event rather than reading the latest position.")] int steps = 8,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "move",
+            Json.Obj(("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2), ("steps", steps)), ct);
+        return result.GetString() ?? "ok";
+    }
+
     [McpServerTool, Description("Synthesize a left-button PRESS-AND-HOLD at (x, y): mouse-down, hold the button for `seconds` while the app KEEPS RENDERING (so hold-duration logic -- long-press, hold-to-repeat, charge-up -- ticks through the hold), then mouse-up. The hold runs on the app's per-frame command pump; it does NOT block the render thread. Returns after the hold completes. Use this instead of drag for a stationary timed press; use drag for movement.")]
     public static async Task<string> press_hold(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("X pixel.")] float x,
