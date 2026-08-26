@@ -44,6 +44,9 @@ builder.Services
               - screenshot       PNG of the instance's current window frame.
               - click / click_label   Synthesize a mouse click by pixel or by button label.
               - press_key / type_text  Inject keyboard input.
+              - move             Pointer motion with NO button held -- hover. The only verb that
+                                 reaches a hover highlight, tooltip or cursor change; click, drag and
+                                 press_hold all arrive with a button down.
               - list_signals / post_signal   Inspect + post named app signals.
             When multiple instances are running, pass instance=<pid> (see list_instances).
             """;

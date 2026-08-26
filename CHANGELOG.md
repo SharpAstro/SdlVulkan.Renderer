@@ -6,6 +6,21 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.27
+
+The inspector's MCP surface exposes `move`. The verb has existed on the wire since 7.25 -- added
+precisely because press-based verbs could not drive hover -- but it was never declared as a tool, so
+every MCP-driven session had a hole exactly where hover behaviour lives and the only way through was to
+open the loopback socket by hand.
+
+Hover is the one gesture no other verb can synthesize: `click`, `drag` and `press_hold` all arrive with
+a button DOWN, so a hover highlight, a tooltip, a cursor change or a pointer-tracking readout is
+unreachable through any of them. That is a real gap on a GPU host, where hover genuinely exists -- unlike
+a terminal, whose mode 1002 reports motion only while a button is held, which is why Console.Lib's
+inspector deliberately has no bare `move` at all.
+
+Nothing changes on the wire; this is the tool declaration the verb was always missing.
+
 ## 7.26
 
 Follows DIR.Lib 8.13, whose `DrawText` now seats the baseline on the FACE's metrics instead of on the
