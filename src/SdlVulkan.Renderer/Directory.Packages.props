@@ -8,7 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageVersion Include="DIR.Lib" Version="8.8.*" />
+    <PackageVersion Include="DIR.Lib" Version="8.13.*" />
 
     <PackageVersion Include="SharpAstro.AppShell" Version="1.1.*" />
 
