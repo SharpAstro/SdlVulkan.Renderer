@@ -2022,7 +2022,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var lineCount = text.Count('\n') + 1;
 
         var glyphScale = _sdfFontAtlas!.GetGlyphScale(fontSize);
-        var lineHeight = fontSize * 1.3f;
+        var lineHeight = DIR.Lib.TextBaseline.LineHeight(fontSize);
         var totalHeight = lineCount * lineHeight;
 
         var layoutX = (float)layout.UpperLeft.X;
@@ -2111,7 +2111,14 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             };
             var penY = startY + lineIdx * lineHeight;
 
-            var baseline = penY + (lineHeight + maxAscent - maxDescent) / 2f;
+            // The FACE's metrics, not this run's ink: measuring the ink makes the baseline depend on
+            // which letters are present, so independently drawn labels of one size cannot share one.
+            // Falls back to the ink for a face that declares no hhea.
+            var faceMetrics = _sdfFontAtlas.Rasterizer.GetVerticalMetrics(fontFamily, fontSize);
+            var (baseAscent, baseDescent) = faceMetrics is { } fm
+                ? (fm.Ascent, fm.Descent)
+                : (maxAscent, maxDescent);
+            var baseline = penY + DIR.Lib.TextBaseline.WithinLine(lineHeight, baseAscent, baseDescent);
 
             foreach (ref readonly var sg in CollectionsMarshal.AsSpan(_shapedLine))
             {

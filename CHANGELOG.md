@@ -6,6 +6,25 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.26
+
+Follows DIR.Lib 8.13, whose `DrawText` now seats the baseline on the FACE's metrics instead of on the
+run's own ink, and takes the same fix here.
+
+Centring the measured bounds made the baseline a function of the text: "a" landed at one height, "b"
+lower because its ascender inflated the box, "g" higher because its descender did. A single label never
+looks wrong; a ROW of independently centred labels cannot agree, which is where it shows -- a board's
+file letters step at b, d and g, a toolbar steps wherever one caption carries a descender.
+
+The formula itself is no longer restated here. It now lives in `DIR.Lib.TextBaseline`
+(`LineHeightFactor`, `LineHeight`, `WithinLine`), because it previously existed in four copies -- this
+renderer, RgbaImageRenderer, WebGlRenderer, and a fourth INVERTED copy in MathLayout.GlyphBox that was
+reconstructed from a comment describing the others. That fourth copy is what broke when the original
+changed.
+
+Face metrics come from `SdfFontAtlas.Rasterizer.GetVerticalMetrics`, already reachable; a face declaring
+no hhea falls back to the run's ink exactly as before.
+
 ## 7.25
 
 Damage-based repaint: a frame can preserve the previous one and paint only the region that changed.
