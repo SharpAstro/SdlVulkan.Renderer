@@ -1,15 +1,11 @@
 using System;
-using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using DIR.Lib;
 using SdlVulkan.Renderer;
-using Vortice.Vulkan;
 using Xunit;
-using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer.Tests;
 
@@ -57,23 +53,19 @@ public sealed class SyncValidationGlyphFloodTests
     // the CI job to its own (coarser) timeout-minutes ceiling.
     private static readonly TimeSpan Deadman = TimeSpan.FromSeconds(60);
 
-    // The debug-utils callback is a plain unmanaged function pointer (no managed user-data), so its
-    // sink is static. This class holds a single test and no parallel siblings touch this queue.
-    private static readonly ConcurrentQueue<string> s_messages = new();
-
     private static string FontPath =>
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "DejaVuSans.ttf");
 
     [Fact]
     public async Task GlyphFlood_offscreen_emits_no_synchronization_hazards()
     {
-        if (!TryCreateValidatedOffscreenContext(out var ctx, out var messenger, out var api, out var skip))
+        if (!ValidatedOffscreen.TryCreate(Width, Height, out var ctx, out var messenger, out var api, out var skip))
         {
             Assert.Skip(skip);
             return;
         }
 
-        s_messages.Clear();
+        ValidatedOffscreen.Messages.Clear();
         var wedged = false;
         try
         {
@@ -83,11 +75,11 @@ public sealed class SyncValidationGlyphFloodTests
             {
                 wedged = true;
                 Assert.Fail($"deadman: SDF glyph flood did not finish within {Deadman.TotalSeconds:0}s — " +
-                            $"possible GPU wedge. Validation messages so far:\n{DumpMessages()}");
+                            $"possible GPU wedge. Validation messages so far:\n{ValidatedOffscreen.DumpMessages()}");
             }
             await flood; // surface any exception thrown inside the flood
 
-            var hazards = s_messages.Where(IsSyncHazard).ToArray();
+            var hazards = ValidatedOffscreen.Messages.Where(ValidatedOffscreen.IsSyncHazard).ToArray();
             Assert.True(hazards.Length == 0,
                 $"Vulkan synchronization validation reported {hazards.Length} hazard(s) during the SDF glyph " +
                 $"flood — the atlas upload/sample path has a read-after-write hazard (see 6.17 resilience):\n" +
@@ -99,9 +91,7 @@ public sealed class SyncValidationGlyphFloodTests
             // would block on the same hung device — the exact trap the 6.17 host fast-exit avoids.
             if (!wedged)
             {
-                if (messenger != VkDebugUtilsMessengerEXT.Null && api is not null)
-                    api.vkDestroyDebugUtilsMessengerEXT(messenger);
-                ctx?.Dispose(); // owns + destroys the instance
+                ValidatedOffscreen.Destroy(ctx, messenger, api);
             }
         }
     }
@@ -154,126 +144,6 @@ public sealed class SyncValidationGlyphFloodTests
         }
     };
 
-    // Sync-validation messages are reported with a "SYNC-HAZARD-*" message-id name (e.g.
-    // SYNC-HAZARD-READ-AFTER-WRITE / -WRITE-AFTER-WRITE). Match on that so an unrelated validation
-    // warning on a quirky runner does not fail the lane — this test guards the synchronization class
-    // specifically.
-    private static bool IsSyncHazard(string msg) =>
-        msg.Contains("SYNC-HAZARD", StringComparison.OrdinalIgnoreCase);
-
-    private static string DumpMessages() =>
-        s_messages.IsEmpty ? "(none)" : string.Join("\n", s_messages);
-
-    // Builds an offscreen context with VK_LAYER_KHRONOS_validation + the synchronization-validation
-    // feature + a debug-utils messenger sinking into s_messages. Returns false (with a skip reason)
-    // when the validation stack is unavailable, rather than failing.
-    private static unsafe bool TryCreateValidatedOffscreenContext(
-        out VulkanContext? ctx, out VkDebugUtilsMessengerEXT messenger, out VkInstanceApi? api, out string skip)
-    {
-        ctx = null;
-        messenger = VkDebugUtilsMessengerEXT.Null;
-        api = null;
-        skip = string.Empty;
-
-        try
-        {
-            vkInitialize().CheckResult();
-
-            const string validationLayer = "VK_LAYER_KHRONOS_validation";
-            if (!InstanceLayerAvailable(validationLayer))
-            {
-                skip = $"{validationLayer} not available on this host (install vulkan-validationlayers)";
-                return false;
-            }
-
-            var syncFeature = stackalloc VkValidationFeatureEnableEXT[1]
-            {
-                VkValidationFeatureEnableEXT.SynchronizationValidation
-            };
-            VkValidationFeaturesEXT validationFeatures = new()
-            {
-                enabledValidationFeatureCount = 1,
-                pEnabledValidationFeatures = syncFeature
-            };
-
-            VkDebugUtilsMessengerCreateInfoEXT debugCI = new()
-            {
-                messageSeverity = VkDebugUtilsMessageSeverityFlagsEXT.Warning | VkDebugUtilsMessageSeverityFlagsEXT.Error,
-                messageType = VkDebugUtilsMessageTypeFlagsEXT.Validation | VkDebugUtilsMessageTypeFlagsEXT.General,
-                pfnUserCallback = &DebugCallback
-            };
-            // Chain: instance -> validation features (turns on sync validation) -> messenger CI (also
-            // captures messages emitted during vkCreateInstance / vkDestroyInstance).
-            validationFeatures.pNext = &debugCI;
-
-            using var layers = new VkStringArray([validationLayer]);
-            using var extensions = new VkStringArray([
-                VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
-                VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME
-            ]);
-
-            VkInstanceCreateInfo instanceCI = new()
-            {
-                pNext = &validationFeatures,
-                enabledLayerCount = layers.Length,
-                ppEnabledLayerNames = layers,
-                enabledExtensionCount = extensions.Length,
-                ppEnabledExtensionNames = extensions
-            };
-
-            vkCreateInstance(&instanceCI, null, out var instance).CheckResult();
-            api = GetApi(instance);
-            api.vkCreateDebugUtilsMessengerEXT(&debugCI, out messenger).CheckResult();
-
-            ctx = VulkanContext.CreateOffscreen(instance, Width, Height);
-            return true;
-        }
-        catch (Exception e)
-        {
-            // No ICD, or the layer/extensions are advertised but fail at create time → inconclusive,
-            // skip rather than fail (mirrors the other offscreen tests' ICD-absent behaviour). If the
-            // instance came up (api set) tear it down; a null api means vkCreateInstance itself failed.
-            skip = $"Vulkan validation stack not usable on this host: {e.Message}";
-            if (api is not null)
-            {
-                if (messenger != VkDebugUtilsMessengerEXT.Null)
-                    api.vkDestroyDebugUtilsMessengerEXT(messenger);
-                api.vkDestroyInstance();
-            }
-            ctx = null;
-            messenger = VkDebugUtilsMessengerEXT.Null;
-            api = null;
-            return false;
-        }
-    }
-
-    private static unsafe bool InstanceLayerAvailable(string layerName)
-    {
-        uint count = 0;
-        vkEnumerateInstanceLayerProperties(&count, null);
-        if (count == 0)
-            return false;
-        var props = new VkLayerProperties[count];
-        fixed (VkLayerProperties* p = props)
-            vkEnumerateInstanceLayerProperties(&count, p);
-        foreach (var layer in props)
-            if (VkStringInterop.ConvertToManaged(layer.layerName) == layerName)
-                return true;
-        return false;
-    }
-
-    [UnmanagedCallersOnly]
-    private static unsafe uint DebugCallback(
-        VkDebugUtilsMessageSeverityFlagsEXT severity,
-        VkDebugUtilsMessageTypeFlagsEXT types,
-        VkDebugUtilsMessengerCallbackDataEXT* data,
-        void* userData)
-    {
-        if (data != null && data->pMessage != null)
-        {
-            var msg = Marshal.PtrToStringUTF8((nint)data->pMessage) ?? string.Empty;
-            s_messages.Enqueue($"[{severity}] {msg}");
-        }
-        return 0; // VK_FALSE — the app must not abort the call that triggered the message
-    }
+    // The validated instance, the messenger and the message sink live in ValidatedOffscreen, shared
+    // with DeferredDestroyTests; this class states only the sequence it guards.
 }

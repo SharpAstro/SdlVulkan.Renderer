@@ -198,12 +198,14 @@ public sealed unsafe class VkTexture : IDisposable
 
         IsUploaded = false; // prevent use-after-free via stale references
         CleanupStaging();
-        var api = _ctx.DeviceApi;
-        _ctx.FreeDescriptorSet(DescriptorSet);
+        // Deferred, not destroyed: a texture is routinely disposed in the same frame that drew it (a
+        // consumer swaps an image and drops the old one), and the frame's command buffer already holds
+        // its descriptor set. Destroying now would submit that frame against freed objects -- the GPU
+        // fault behind the TianWen viewer's watchdog crashes. The context destroys these once every frame
+        // that could reference them has retired (see VulkanContext.DeferredDestroy).
         // _sampler is the device's shared sampler — outlives every texture, never destroyed here.
-        api.vkDestroyImageView(_imageView);
-        api.vkDestroyImage(_image);
-        api.vkFreeMemory(_imageMemory);
-        _ctx.GraphicsDevice.NoteImageDestroyed();
+        var device = _ctx.GraphicsDevice;
+        _ctx.DeferDestroy(view: _imageView, image: _image, memory: _imageMemory, descriptorSet: DescriptorSet);
+        _ctx.DeferDestroy(device.NoteImageDestroyed);
     }
 }

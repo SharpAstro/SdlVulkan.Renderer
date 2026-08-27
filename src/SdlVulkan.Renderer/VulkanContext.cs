@@ -434,6 +434,10 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // objects the host is now entitled to free.
         if (_abandoned) return;
 
+        // The drain retired (or gave up on) every frame that could reference a deferred object, and the
+        // fences the schedule is measured in are about to be destroyed: flush the queue now.
+        FlushAllDeferredDestroys();
+
         // Present-wait semaphores are deliberately absent here: they belong to the swapchain, and the
         // CleanupSwapchain/CreateSwapchain pair at the end of this method replaces them. Destroying
         // them here as well would double-free them.
@@ -627,6 +631,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
         waitResult.CheckResult();
         _fenceWaitStuck = false;
         _frameOrdinal++;
+        // The wait above is the proof that frame (ordinal - MaxFramesInFlight) and everything before it
+        // has retired, so this is where deferred destroys scheduled against those frames become legal.
+        FlushRetiredDeferredDestroys();
 
         // The fence for _currentFrame is now signaled (just waited, not yet reset). If a thumbnail
         // capture's copy rode this fence index, its GPU work is complete — snapshot it now without
@@ -917,6 +924,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
         {
             DeviceApi.vkDeviceWaitIdle();
         }
+
+        // Everything a consumer deferred is destroyed here, before the objects it may depend on go.
+        FlushAllDeferredDestroys();
 
         CleanupSwapchain();
         CleanupLoadRenderPass();

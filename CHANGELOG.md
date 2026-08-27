@@ -6,6 +6,34 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.28
+
+**Deferred destruction** (`VulkanContext.DeferDestroy` / `VkRenderer.DeferDestroy`,
+`PendingDeferredDestroys`). A consumer hands an image view, image, memory, buffer or shared-pool
+descriptor set to the context instead of destroying it, and the context destroys it once every frame
+that could reference it has retired: the frame being recorded and every frame in flight. The
+retirement is read off the same fence waits the frame loop already performs, so it costs no drain.
+`VkTexture.Dispose` goes through it, so disposing a texture in the frame that drew it is now legal.
+
+Why: the drains this library offered (`TryWaitAllFramesIdle`, `TryWaitPriorFramesIdle`) retire
+PREVIOUS frames and cannot retire the one being recorded, so a consumer destroying a resource
+mid-frame was correct only if nothing earlier in the same frame had bound it, a property of call
+order across hooks the consumer usually does not own. The TianWen FITS viewer got that wrong while
+reasoning correctly about fences: a pre-render-pass hook bound a document's channel views, the
+render callback replaced the document and destroyed them, and the frame reached the GPU with dangling
+views. The validation layer reads it as "vkCmdBindDescriptorSets(): ... invalid state ... VkImageView
+was destroyed"; the driver as `nvlddmkm 153`; Windows as a `LiveKernelEvent 141` watchdog with the
+process gone (2026-08-27, twice in a day). Adoption notes, including the per-frame descriptor-set
+pattern that goes with it: `docs/deferred-destroy-adoption.md`.
+
+**The damage pass's `loadOp LOAD` is now ordered after its own layout transition.** The shared
+external dependency admitted `COLOR_ATTACHMENT_WRITE` alone; a LOAD reads, and synchronization
+validation reported a READ_AFTER_WRITE hazard once per swapchain image on every partial frame. The
+read is admitted in `FillSubpassDependencies` for every pass, because dependencies are not among the
+things render-pass compatibility exempts: widening the LOAD pass alone made it incompatible with the
+framebuffers and pipelines built against the clearing pass (VUID 00904 / 02684). Only consumers of
+`AddFrameDamage` ever ran that pass.
+
 ## 7.27
 
 The inspector's MCP surface exposes `move`. The verb has existed on the wire since 7.25 -- added

@@ -277,6 +277,27 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     // ---- Live-device thumbnail capture (see VulkanContext.ThumbnailCapture.cs) ----
 
+    // ---- Deferred destruction (see VulkanContext.DeferredDestroy.cs) ----
+
+    /// <summary>
+    /// Destroys the given handles once every frame that could reference them has retired: the frame
+    /// being recorded and every frame in flight. The ONLY correct way for a consumer to release a GPU
+    /// object a frame may have bound; a fence drain at the call site retires previous frames but never
+    /// the one being recorded, which is how a mid-frame destroy submits a frame against freed objects
+    /// and the GPU faults. Null handles are ignored. Render thread only.
+    /// </summary>
+    public void DeferDestroy(
+        VkImageView view = default, VkImage image = default, VkDeviceMemory memory = default,
+        VkBuffer buffer = default, VkDescriptorSet descriptorSet = default)
+        => Surface.DeferDestroy(view, image, memory, buffer, descriptorSet);
+
+    /// <summary>Runs <paramref name="destroy"/> once every frame that could reference what it frees has
+    /// retired. For objects the typed overload does not cover.</summary>
+    public void DeferDestroy(System.Action destroy) => Surface.DeferDestroy(destroy);
+
+    /// <summary>How many deferred destroys are still waiting for their frames to retire.</summary>
+    public int PendingDeferredDestroys => Surface.PendingDeferredDestroys;
+
     // ---- Cached layer (see VulkanContext.CachedLayer.cs) ----
 
     /// <summary>

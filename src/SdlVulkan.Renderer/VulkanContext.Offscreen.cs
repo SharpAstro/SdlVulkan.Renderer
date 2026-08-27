@@ -205,6 +205,9 @@ public sealed unsafe partial class VulkanContext
             NoteDeviceLost(waitResult, "vkWaitForFences(offscreen)");
         }
         _frameOrdinal++;
+        // Same contract as the swapchain BeginFrame: the wait proves frame (ordinal - MaxFramesInFlight)
+        // retired, so deferred destroys scheduled against it run here.
+        FlushRetiredDeferredDestroys();
 
         // Not reset here — EndOffscreenFrame resets it immediately before the submit that signals it,
         // for the same reason as the swapchain path (see the note in BeginFrame). It matters MORE here:
