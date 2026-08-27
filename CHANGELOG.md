@@ -6,6 +6,27 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.29
+
+**Swapchain teardown flushes the present queue.** `RecreateSwapchain` / `PrepareForSurfaceLoss` /
+`RecoverFromGpuError` now follow their bounded fence drain with a `vkQueueWaitIdle` on the
+graphics+present queue before `CleanupSwapchain` destroys the swapchain and its per-image
+render-finished semaphores, but only when the drain SUCCEEDED. `TryDrainDevice` waits on the
+graphics-submit fences; present is a separate queue operation gated by no fence, so a fence-only
+drain leaves the swapchain images and present semaphores still in use by `vkQueuePresentKHR` when
+they are destroyed. A validation run flags it on every window resize as
+`vkDestroySwapchainKHR ... currently in use by VkQueue` (VUID-vkDestroySwapchainKHR-swapchain-01282)
+and `vkDestroySemaphore ...` (VUID-vkDestroySemaphore-semaphore-05149): benign on desktop NVIDIA
+(it serialised), but the destroy-while-in-use pattern that surfaces on Adreno as a rejected
+`vkQueueSubmit`. The `CleanupSwapchain` comment that claimed a fence drain was enough is corrected.
+
+Gated on drain success so the no-hang property is preserved: a successful drain proves the GPU is
+healthy, so the queue-wait returns within a frame; on a drain timeout (wedged GPU) the teardown is
+forced regardless, exactly as before. A device lost during the flush is routed through
+`NoteDeviceLost` like every other queue op, never thrown. This is a windowed path (it needs a real
+surface), so it is verified under the validation layer on a live resize rather than in headless CI;
+the offscreen validation tests are unchanged and still pass.
+
 ## 7.28
 
 **Deferred destruction** (`VulkanContext.DeferDestroy` / `VkRenderer.DeferDestroy`,
