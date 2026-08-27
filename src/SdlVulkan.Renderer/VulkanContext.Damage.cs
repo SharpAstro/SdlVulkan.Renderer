@@ -134,6 +134,12 @@ public sealed unsafe partial class VulkanContext
 
         Span<VkSubpassDependency> deps =
             stackalloc VkSubpassDependency[(int)VulkanDevice.SubpassDependencyCount];
+        // The dependencies are the SHARED set, and must stay byte-identical to the clearing pass's: a
+        // render pass is compatible with the framebuffers and pipelines created against another only if
+        // everything but load/store ops and layouts matches, and dependencies are not in that exemption.
+        // The loadOp read this pass needs ordered after its own layout transition is therefore admitted
+        // in VulkanDevice.FillSubpassDependencies for every pass, not widened here (tried, and validation
+        // answered with VUID-VkRenderPassBeginInfo-renderPass-00904 on every partial frame).
         VulkanDevice.FillSubpassDependencies(deps);
 
         VkAttachmentDescription colorAttachment = new()

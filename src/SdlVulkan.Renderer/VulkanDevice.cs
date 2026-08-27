@@ -838,6 +838,18 @@ public sealed unsafe class VulkanDevice : IDisposable
     /// storeOp write to the same attachment, so vkCmdBeginRenderPass's layout transition races it and
     /// synchronization validation reports a WRITE_AFTER_WRITE hazard on every alternating frame pair.
     /// </para>
+    /// <para>
+    /// Its <c>dstAccessMask</c> admits COLOR_ATTACHMENT_READ as well as WRITE, for the damage pass
+    /// (<c>VulkanContext.Damage</c>): a <c>loadOp LOAD</c> READS the attachment, and with WRITE alone
+    /// that read is not ordered after the pass's own PresentSrc -> ColorAttachmentOptimal transition.
+    /// Synchronization validation reports it once per swapchain image on every partial frame:
+    /// "vkCmdBeginRenderPass(): READ_AFTER_WRITE hazard ... loadOp access is not synchronized with the
+    /// attachment layout transition ... must allow VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT" (GTX 1070,
+    /// SDK 1.4.357). It lives HERE and not on the damage pass alone because dependencies are not among
+    /// the things render-pass compatibility exempts: widening only that pass made it incompatible with
+    /// every framebuffer and pipeline built against the clearing pass (VUID 00904 / 02684 on each
+    /// partial frame). A clearing pass admitting a read it never performs costs nothing.
+    /// </para>
     /// </summary>
     internal static void FillSubpassDependencies(Span<VkSubpassDependency> deps)
     {
@@ -847,7 +859,7 @@ public sealed unsafe class VulkanDevice : IDisposable
             srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
             srcAccessMask = VkAccessFlags.ColorAttachmentWrite,
             dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-            dstAccessMask = VkAccessFlags.ColorAttachmentWrite
+            dstAccessMask = VkAccessFlags.ColorAttachmentWrite | VkAccessFlags.ColorAttachmentRead
         };
         deps[1] = new()
         {
