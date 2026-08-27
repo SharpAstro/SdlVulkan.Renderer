@@ -32,8 +32,8 @@ jobs:
     outputs:
       version-prefix: ${{ steps.version.outputs.prefix }}
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-dotnet@v4
+    - uses: actions/checkout@v5
+    - uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 10.0.x
     - name: Resolve version prefix
@@ -63,7 +63,7 @@ jobs:
     - name: Build
       run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
     - name: Upload NuGet package
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nuget-packages
         path: '**/*.nupkg'
@@ -92,7 +92,7 @@ jobs:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - uses: SharpAstro/cache-apt-pkgs-action@v1
       with:
         packages: mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
@@ -106,7 +106,7 @@ jobs:
         vulkaninfo --summary || true
         echo "--- instance layers ---"
         vulkaninfo 2>/dev/null | grep -iA1 "VK_LAYER_KHRONOS_validation" || echo "validation layer NOT visible to loader"
-    - uses: actions/setup-dotnet@v4
+    - uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 10.0.x
     - name: Install Android workload
@@ -141,7 +141,7 @@ jobs:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     # Plain apt-get (not cache-apt-pkgs-action): the cache action installs only the named packages
     # without their dependencies, so mesa-vulkan-drivers landed without the driver libs its ICD needs
     # -> "vkCreateInstance: Found no drivers" (-9). apt-get resolves dependencies and installs the ICD.
@@ -161,7 +161,7 @@ jobs:
       with:
         cache-name: webview
         packages: mesa-vulkan-drivers libvulkan1 libgtk-3-0 libwebkit2gtk-4.1-0 xvfb
-    - uses: actions/setup-dotnet@v4
+    - uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 10.0.x
     - name: Install Android workload
@@ -188,7 +188,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
     - name: Download NuGet packages
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nuget-packages
     - name: Push NuGet package
