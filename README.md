@@ -219,7 +219,7 @@ Backend notes:
 
 ## Dependencies
 
-- [DIR.Lib](https://www.nuget.org/packages/DIR.Lib) — Rendering primitives + FreeType glyph rasterization
+- [DIR.Lib](https://www.nuget.org/packages/DIR.Lib) — Rendering primitives + pure-managed glyph rasterization (no native dependency)
 - [SDL3-CS](https://www.nuget.org/packages/SDL3-CS) — SDL3 bindings
 - [SDL3-CS.Android](https://www.nuget.org/packages/SDL3-CS.Android) — android TFM only: SDL Java bridge + per-ABI `libSDL3.so` (see [Android](#android) for the version pin)
 - [Vortice.Vulkan](https://www.nuget.org/packages/Vortice.Vulkan) — Vulkan bindings

@@ -73,7 +73,7 @@ A context tears down the device only when it created it; shared-device windows l
 - **Per-frame vertex ring buffer** — two host-visible/coherent buffers (one per in-flight frame), written linearly and reset each `BeginFrame`
 - **Deferred texture upload** — `VkTexture.CreateDeferred` + `RecordUpload` records GPU uploads into the frame command buffer before `BeginRenderPass`, avoiding `vkQueueWaitIdle` stalls
 - **Font atlas lifecycle** — `VkFontAtlas` manages a growable bitmap glyph atlas (512→4096) with dirty-region staging upload; eviction is deferred one frame to prevent stale UV sampling; `skipUnflushed` guards draw loops from sampling unuploaded glyphs
-- **Multi-page MTSDF atlas** — `VkSdfFontAtlas` is a list of fixed-size page textures (default 2048², R8G8B8A8Unorm: RGB carry pseudo-distance, which the shader medians to keep corners sharp, and A the true distance); a full page appends a new page instead of reallocating (no `vkDeviceWaitIdle` + realloc + re-upload stall), with per-page LRU eviction. Optional `SdfGlyphDiskCache` persists rasterized SDF glyphs across runs (bounded per-frame load drain)
+- **Multi-page MTSDF atlas** — `VkSdfFontAtlas` is a list of fixed-size page textures (default 2048², R8G8B8A8Unorm: RGB carry pseudo-distance, which the shader medians to keep corners sharp, and A the true distance); a full page appends a new page instead of reallocating (no `vkDeviceWaitIdle` + realloc + re-upload stall), with per-page LRU eviction. DIR.Lib's optional `SdfGlyphDiskCache` persists rasterized SDF glyphs across runs (bounded per-frame load drain)
 - **Idle-suppressing event loop** — `SdlEventLoop` uses `WaitEventTimeout` when idle, throttles mouse-motion redraws to ~30 fps; supports multi-window
 - **Live-device thumbnail capture** — `VkRenderer.BeginThumbnailCapture`/`EndThumbnailCapture`/`TryGetThumbnailCapture` re-issue already-tessellated geometry into an offscreen target at thumbnail scale with non-blocking readback (`VulkanContext.ThumbnailCapture`)
 
@@ -100,8 +100,7 @@ Side-car pipelines with their own `VkPipelineLayout` can define any push constan
 - `VkRenderer.cs` — high-level draw API, extends `Renderer<VulkanContext>` from DIR.Lib
 - `VulkanContext.cs` — per-window swapchain/sync/vertex-ring lifecycle (references a `VulkanDevice`); partials: `VulkanContext.Offscreen.cs` (headless render-to-image), `VulkanContext.SwapchainReadback.cs`, `VulkanContext.ThumbnailCapture.cs`
 - `VkFontAtlas.cs` — bitmap glyph rasterization cache + GPU texture management
-- `VkSdfFontAtlas.cs` — multi-page MTSDF glyph atlas (R8G8B8A8Unorm pages) for resolution-independent text
-- `SdfGlyphDiskCache.cs` — opt-in on-disk cache of rasterized SDF glyphs
+- `VkSdfFontAtlas.cs` — multi-page MTSDF glyph atlas (R8G8B8A8Unorm pages) for resolution-independent text. This is the thin Vulkan backend of DIR.Lib's `SdfFontAtlas`; the glyph disk cache behind it lives there too, not here
 - `VkPipelineSet.cs` — pipeline creation from the pre-baked SPIR-V embedded in the assembly (Flat, Textured, Ellipse, Page, Stroke, SDF, RoundRect, blend variants). Shaders are authored as GLSL 450 in `Shaders/*.vert|*.frag` and baked to `Shaders/spirv/*.spv` by `tools/BakeShaders`; re-run it after editing one and commit the `.spv`
 - `VkTexture.cs` — per-image Vulkan texture with blocking and deferred upload modes
 - `SdlEventLoop.cs` — event-driven (multi-window) render loop with resize handling
