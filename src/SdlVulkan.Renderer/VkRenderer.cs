@@ -781,10 +781,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// Draws stroke segments from a persistent GPU buffer with a custom origin and scale.
     /// No frame-allocator usage — the buffer is pre-uploaded and reused across frames.
     /// </summary>
-    public void DrawPersistentStrokes(Vortice.Vulkan.VkBuffer buffer, uint byteOffset, uint vertexCount,
+    // segmentCount is the number of INSTANCES: one per line segment, each 4 floats (P0.xy, P1.xy)
+    // at byteOffset. The six quad vertices are expanded from gl_VertexIndex in the shader.
+    public void DrawPersistentStrokes(Vortice.Vulkan.VkBuffer buffer, uint byteOffset, uint segmentCount,
         DIR.Lib.RGBAColor32 color, float originX, float originY, float scale, float halfWidth)
     {
-        if (_pipelines is null || vertexCount < 6) return;
+        if (_pipelines is null || segmentCount < 1) return;
 
         var api = Surface.DeviceApi;
 
@@ -810,22 +812,23 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         var vkOffset = (ulong)byteOffset;
         api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
-        api.vkCmdDraw(_currentCmd, vertexCount, 1, 0, 0);
+        // 6 vertices (the quad) per instance, one instance per segment.
+        api.vkCmdDraw(_currentCmd, 6, segmentCount, 0, 0);
     }
 
     /// <summary>
     /// Draws stroke segments via the StrokePipeline with a custom origin and scale.
-    /// Vertices are 6 floats each (P0, P1, side/end params), 6 vertices per line segment.
+    /// Segment data is 4 floats each (P0.xy, P1.xy); each segment is one instance of the 6-vertex quad.
     /// </summary>
-    public void DrawStrokeSegments(ReadOnlySpan<float> segmentVertices, DIR.Lib.RGBAColor32 color,
+    public void DrawStrokeSegments(ReadOnlySpan<float> segmentData, DIR.Lib.RGBAColor32 color,
         float originX, float originY, float scale, float halfWidth)
     {
-        if (_pipelines is null || segmentVertices.Length < 36) return;
+        if (_pipelines is null || segmentData.Length < 4) return;
 
         var api = Surface.DeviceApi;
-        var vertexCount = (uint)(segmentVertices.Length / 6);
+        var segmentCount = (uint)(segmentData.Length / 4);
 
-        var offset = Surface.WriteVertices(segmentVertices);
+        var offset = Surface.WriteVertices(segmentData);
         if (offset == uint.MaxValue) return;
 
         Span<float> pc = stackalloc float[21];
@@ -851,7 +854,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var buffer = Surface.VertexBuffer;
         var vkOffset = (ulong)offset;
         api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
-        api.vkCmdDraw(_currentCmd, vertexCount, 1, 0, 0);
+        // 6 vertices (the quad) per instance, one instance per segment.
+        api.vkCmdDraw(_currentCmd, 6, segmentCount, 0, 0);
     }
 
     /// <summary>

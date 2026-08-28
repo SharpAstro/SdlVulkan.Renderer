@@ -6,6 +6,20 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.30
+
+**The stroke pipeline is instanced: 16 bytes a segment, not 144.** A stroked line segment is a quad
+— two triangles, six vertices — and the vertex buffer held all six, each carrying the segment's two
+endpoints plus a per-vertex `(side, end)` selector: 6 floats × 6 vertices = 144 bytes to describe one
+line, the endpoints identical across all six. Now one instance per segment carries just the endpoints
+(`vec2` + `vec2` = 16 bytes), and `stroke.vert` expands the quad's six vertices from `gl_VertexIndex`
+against a constant corner table that reproduces the old six in the same winding — so the rasterised
+result is unchanged, a memory and bandwidth change with no visual one. `DrawPersistentStrokes` and
+`DrawStrokeSegments` now take a segment count and issue `vkCmdDraw(6, segmentCount, …)`; the stroke
+binding is per-instance at a 4-float stride. On a dense drawing of millions of hatch segments the ~9×
+cut in stroke vertex data is the dominant cost in three places at once — GPU vertex memory, upload
+bandwidth, and the persistent buffer's resident footprint. The stroke SPIR-V is re-baked to match.
+
 ## 7.29
 
 **Swapchain teardown flushes the present queue.** `RecreateSwapchain` / `PrepareForSurfaceLoss` /

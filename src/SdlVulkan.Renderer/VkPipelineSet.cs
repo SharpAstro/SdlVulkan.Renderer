@@ -101,14 +101,15 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var ellipse = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, ellipseVert, ellipseFrag,
                 &ellipseBinding, 1, ellipseAttrs, 2, msaaSamples: msaa);
 
-            // Stroke pipeline: vec2 P0 + vec2 P1 + vec2 params (side, end)
-            VkVertexInputBindingDescription strokeBinding = new(6 * sizeof(float));
-            var strokeAttrs = stackalloc VkVertexInputAttributeDescription[3];
+            // Stroke pipeline: ONE INSTANCE per segment = vec2 P0 + vec2 P1 (16B). The quad's six
+            // vertices come from gl_VertexIndex in stroke.vert, so the segment's side/end selectors
+            // are constants in the shader rather than a third attribute repeated across six vertices.
+            VkVertexInputBindingDescription strokeBinding = new(4 * sizeof(float), VkVertexInputRate.Instance);
+            var strokeAttrs = stackalloc VkVertexInputAttributeDescription[2];
             strokeAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                  // aP0
             strokeAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));  // aP1
-            strokeAttrs[2] = new(2, VkFormat.R32G32Sfloat, 4 * sizeof(float));  // aParams
             var stroke = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, strokeVert, strokeFrag,
-                &strokeBinding, 1, strokeAttrs, 3, msaaSamples: msaa);
+                &strokeBinding, 1, strokeAttrs, 2, msaaSamples: msaa);
 
             // SDF pipeline: same vertex layout as textured, SDF fragment shader
             var sdf = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, texVert, sdfFrag,
