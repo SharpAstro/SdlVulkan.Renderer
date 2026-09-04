@@ -367,6 +367,115 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     private uint _savedLayerWidth;
     private uint _savedLayerHeight;
 
+    // ---- Scene target: depth-tested 3D (see VulkanContext.SceneTarget.cs) ----
+
+    /// <summary>
+    /// Allocate the depth-capable scene targets, one per frame in flight, at a fixed capacity, and
+    /// build the mesh pipeline against the pass. False if the device offers no usable depth format,
+    /// in which case the caller must fall back rather than draw.
+    /// </summary>
+    /// <remarks>
+    /// Size it generously and render a sub-rect: the target is sampled rather than presented, so
+    /// allocating larger than the on-screen rect and letting the sampler downscale is how this path
+    /// antialiases — it has no MSAA.
+    /// </remarks>
+    public bool EnsureSceneTargets(uint maxW, uint maxH)
+    {
+        if (!Surface.EnsureSceneTargets(maxW, maxH)) return false;
+        // Lazily, and only here: the pipeline is baked against SceneRenderPass, which does not exist
+        // until the targets have chosen a depth format the device supports.
+        _meshPipeline ??= VkMeshPipeline.Create(Surface, Surface.SceneRenderPass);
+        return true;
+    }
+
+    /// <summary>Drop the scene targets and the mesh pipeline (drains first) so they can be rebuilt.</summary>
+    public void ReleaseSceneTargets()
+    {
+        _meshPipeline?.Dispose();
+        _meshPipeline = null;
+        Surface.ReleaseSceneTargets();
+    }
+
+    /// <summary>True once the scene targets exist.</summary>
+    public bool SceneTargetReady => Surface.SceneTargetReady;
+
+    /// <summary>The slot this frame must render into and sample from.</summary>
+    public int SceneTargetSlot => Surface.SceneTargetSlot;
+
+    /// <summary>How many slots exist; a camera change has to dirty them all.</summary>
+    public int SceneTargetSlotCount => Surface.SceneTargetSlotCount;
+
+    /// <summary>Whether this slot has ever been rendered, and so is legal to sample.</summary>
+    public bool IsSceneTargetSlotRendered(int slot) => Surface.IsSceneTargetSlotRendered(slot);
+
+    /// <summary>The slot's descriptor set, for <see cref="DrawTexture"/> / <see cref="DrawTextureRegion"/>.</summary>
+    public VkDescriptorSet SceneTargetDescriptorSet(int slot) => Surface.SceneTargetDescriptorSet(slot);
+
+    /// <summary>
+    /// Opens the depth-tested scene pass on this frame's command buffer. MUST be called from the
+    /// OnPreRenderPass hook (before the main render pass) and bracketed by <see cref="EndScene"/>.
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="BeginCachedLayer"/> this does NOT redirect the 2D projection, because none
+    /// of the 2D draw calls can be used inside it: the pass has a depth attachment and the shared
+    /// pre-baked pipelines are not compatible with it. <see cref="DrawMesh"/> is the only draw that
+    /// belongs here, and it carries its own transform.
+    /// </remarks>
+    public bool BeginScene(uint w, uint h, DIR.Lib.RGBAColor32 clearColor)
+    {
+        if (_currentCmd == VkCommandBuffer.Null || _inScene || _inCachedLayer) return false;
+        if (_meshPipeline is null) return false;
+        if (!Surface.BeginScenePass(_currentCmd, w, h, clearColor)) return false;
+        _inScene = true;
+        return true;
+    }
+
+    /// <summary>Closes the pass opened by <see cref="BeginScene"/>.</summary>
+    public void EndScene()
+    {
+        if (!_inScene) return;
+        Surface.EndScenePass(_currentCmd);
+        _inScene = false;
+    }
+
+    /// <summary>
+    /// Draw one depth-tested mesh inside an open scene pass. <paramref name="vertices"/> is
+    /// interleaved position(3) + normal(3) per vertex, in triangle-list order;
+    /// <paramref name="mvp"/> is 16 floats, column-major.
+    /// </summary>
+    /// <remarks>
+    /// Draw order is deliberately irrelevant here — that is the entire point of the pass — so
+    /// batching by material is a performance choice and never a correctness one.
+    /// </remarks>
+    public void DrawMesh(ReadOnlySpan<float> vertices, ReadOnlySpan<float> mvp,
+        DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection)
+    {
+        if (!_inScene || _meshPipeline is null) return;
+        if (mvp.Length < 16) return;
+        var floatsPerVertex = (int)(VkMeshPipeline.VertexStride / sizeof(float));
+        if (vertices.Length < floatsPerVertex * 3) return;
+
+        var offset = Surface.WriteVertices(vertices);
+        if (offset == uint.MaxValue) return;
+
+        Span<float> pc = stackalloc float[VkMeshPipeline.PushConstantFloats];
+        mvp[..16].CopyTo(pc);
+        pc[16] = color.Red / 255f;
+        pc[17] = color.Green / 255f;
+        pc[18] = color.Blue / 255f;
+        pc[19] = color.Alpha / 255f;
+        pc[20] = lightDirection.X;
+        pc[21] = lightDirection.Y;
+        pc[22] = lightDirection.Z;
+        pc[23] = 0f;
+
+        _meshPipeline.Draw(_currentCmd, pc, Surface.VertexBuffer, offset,
+            (uint)(vertices.Length / floatsPerVertex));
+    }
+
+    private bool _inScene;
+    private VkMeshPipeline? _meshPipeline;
+
     /// <summary>
     /// Allocate the live-device thumbnail capture target once, up front (never mid steady-state).
     /// Size it to the largest thumbnail you will request — per-page captures use a (w,h) sub-rect.
@@ -2211,6 +2320,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _sdfFontAtlasLarge = null;
         _fontAtlas?.Dispose();
         _fontAtlas = null;
+        _meshPipeline?.Dispose();
+        _meshPipeline = null;
         _pipelines?.Dispose();
         _pipelines = null;
     }

@@ -270,7 +270,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
         return pipeline;
     }
 
-    private static VkShaderModule LoadEmbeddedModule(VkDeviceApi deviceApi, string shaderName)
+    // Internal rather than private so pipelines built outside this set -- VkMeshPipeline, which is
+    // created lazily against a render pass that does not exist at Create time -- share the process-wide
+    // SpirvCache instead of re-reading the embedded stream per device.
+    internal static VkShaderModule LoadEmbeddedModule(VkDeviceApi deviceApi, string shaderName)
     {
         // Read the pre-baked SPIR-V once per process (cache hit on every renderer after the first),
         // then create the per-device shader module from the cached bytecode. shaderName is the stable
