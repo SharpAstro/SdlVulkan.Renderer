@@ -850,22 +850,38 @@ public sealed unsafe class VulkanDevice : IDisposable
     /// every framebuffer and pipeline built against the clearing pass (VUID 00904 / 02684 on each
     /// partial frame). A clearing pass admitting a read it never performs costs nothing.
     /// </para>
+    /// <para>
+    /// The depth-stencil stages and accesses are here for the same reason and by the same argument.
+    /// <c>VulkanContext.SceneTarget</c> is the only pass with a depth attachment, and its depth
+    /// loadOp CLEAR write needs ordering against the previous frame's storeOp write to the same
+    /// image — the identical WRITE_AFTER_WRITE the colour entry above documents, one attachment
+    /// over. Since the count and content must match across every pass, it cannot carry its own list,
+    /// so the pair is widened instead. On a pass with no depth attachment these bits order nothing
+    /// and cost nothing: an empty ordering guarantee is free, which is what makes widening always
+    /// safe where narrowing never is.
+    /// </para>
     /// </summary>
     internal static void FillSubpassDependencies(Span<VkSubpassDependency> deps)
     {
         deps[0] = new()
         {
             srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0,
-            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-            srcAccessMask = VkAccessFlags.ColorAttachmentWrite,
-            dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
+            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput
+                | VkPipelineStageFlags.LateFragmentTests,
+            srcAccessMask = VkAccessFlags.ColorAttachmentWrite
+                | VkAccessFlags.DepthStencilAttachmentWrite,
+            dstStageMask = VkPipelineStageFlags.ColorAttachmentOutput
+                | VkPipelineStageFlags.EarlyFragmentTests,
             dstAccessMask = VkAccessFlags.ColorAttachmentWrite | VkAccessFlags.ColorAttachmentRead
+                | VkAccessFlags.DepthStencilAttachmentWrite | VkAccessFlags.DepthStencilAttachmentRead
         };
         deps[1] = new()
         {
             srcSubpass = 0, dstSubpass = VK_SUBPASS_EXTERNAL,
-            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput,
-            srcAccessMask = VkAccessFlags.ColorAttachmentWrite,
+            srcStageMask = VkPipelineStageFlags.ColorAttachmentOutput
+                | VkPipelineStageFlags.LateFragmentTests,
+            srcAccessMask = VkAccessFlags.ColorAttachmentWrite
+                | VkAccessFlags.DepthStencilAttachmentWrite,
             dstStageMask = VkPipelineStageFlags.Transfer | VkPipelineStageFlags.FragmentShader,
             dstAccessMask = VkAccessFlags.TransferRead | VkAccessFlags.ShaderRead
         };
