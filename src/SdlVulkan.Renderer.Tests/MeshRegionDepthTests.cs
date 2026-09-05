@@ -273,6 +273,11 @@ public sealed class MeshRegionDepthTests(OffscreenGpuFixture gpu)
         var rgba = ctx.ReadbackOffscreenRgba();
         ChannelsAt(rgba, Centre, Centre).ShouldBe((255, 0, 0),
             "the cached layer's pass carries its own depth attachment, so the near quad wins there too");
+
+        // The layer targets belong to the shared fixture context and outlive this renderer, and a slot
+        // rendered here stays marked rendered: CachedLayerTests asserts on a slot it has NOT rendered,
+        // and read this test's leftovers as its own on the lane that happened to run this one first.
+        renderer.ReleaseCachedLayerTargets();
     }
 
     /// <summary>
