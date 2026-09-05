@@ -141,6 +141,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private VkDeviceMemory _msaaMemory;
     private VkImageView _msaaImageView;
 
+    // Depth attachment shared by every swapchain framebuffer (and by the offscreen target, which
+    // reuses these fields as it does the MSAA ones). One image suffices: see VulkanContext.Depth.cs.
+    private VkImage _depthImage;
+    private VkDeviceMemory _depthMemory;
+    private VkImageView _depthImageView;
+
     // Per-frame sync
     private readonly VkSemaphore[] _imageAvailableSemaphores = new VkSemaphore[MaxFramesInFlight];
     // One per SWAPCHAIN IMAGE, not per frame in flight, and therefore owned by the swapchain rather
@@ -720,19 +726,21 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     public void BeginRenderPass(VkCommandBuffer cmd, float clearR, float clearG, float clearB, float clearA)
     {
-        VkClearValue clear = new();
-        clear.color = new VkClearColorValue(clearR, clearG, clearB, clearA);
+        Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
+        FillClearValues(clears, clearR, clearG, clearB, clearA);
 
-        VkRenderPassBeginInfo rpBI = new()
+        fixed (VkClearValue* pClears = clears)
         {
-            renderPass = RenderPass,
-            framebuffer = _framebuffers[_currentImageIndex],
-            renderArea = new VkRect2D(0, 0, SwapchainWidth, SwapchainHeight),
-            clearValueCount = 1,
-            pClearValues = &clear
-        };
-
-        DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+            VkRenderPassBeginInfo rpBI = new()
+            {
+                renderPass = RenderPass,
+                framebuffer = _framebuffers[_currentImageIndex],
+                renderArea = new VkRect2D(0, 0, SwapchainWidth, SwapchainHeight),
+                clearValueCount = ClearValueCount,
+                pClearValues = pClears
+            };
+            DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+        }
         _renderPassBegun = true;
 
         // Set dynamic viewport and scissor
@@ -1159,51 +1167,27 @@ public sealed unsafe partial class VulkanContext : IDisposable
             DeviceApi.vkCreateImageView(&msaaViewCI, null, out _msaaImageView).CheckResult();
         }
 
+        // One depth image for every framebuffer: frames execute in order and the depth is never
+        // stored, so image N's pass and image N+1's cannot see each other's values.
+        CreateDepthAttachment(extent.width, extent.height, out _depthImage, out _depthMemory, out _depthImageView);
+
         // A swapchain image that has just been created holds nothing, and a resized one holds the
         // wrong size, so no frame may be preserved until each has been painted once.
         CleanupLoadRenderPass();
         _loadRenderPass = CreateLoadRenderPass(SwapchainFormat);
         ResetDamageState((int)imgCount);
 
-        // Create framebuffers
+        // Create framebuffers. Under MSAA the multisample image is the colour attachment and the
+        // swapchain image its resolve target; without it the swapchain image is the colour attachment.
         _framebuffers = new VkFramebuffer[imgCount];
-        Span<VkImageView> msaaAttachments = stackalloc VkImageView[2];
+        var msaa = MsaaSamples != VkSampleCountFlags.Count1;
         for (var i = 0; i < imgCount; i++)
         {
-            VkFramebufferCreateInfo fbCI;
-            if (MsaaSamples != VkSampleCountFlags.Count1)
-            {
-                // MSAA: attachment 0 = multisample, attachment 1 = resolve (swapchain)
-                msaaAttachments[0] = _msaaImageView;
-                msaaAttachments[1] = _swapchainImageViews[i];
-                fixed (VkImageView* pAtt = msaaAttachments)
-                {
-                    fbCI = new()
-                    {
-                        renderPass = RenderPass,
-                        attachmentCount = 2,
-                        pAttachments = pAtt,
-                        width = extent.width,
-                        height = extent.height,
-                        layers = 1
-                    };
-                    DeviceApi.vkCreateFramebuffer(&fbCI, null, out _framebuffers[i]).CheckResult();
-                }
-            }
-            else
-            {
-                var attachment = _swapchainImageViews[i];
-                fbCI = new()
-                {
-                    renderPass = RenderPass,
-                    attachmentCount = 1,
-                    pAttachments = &attachment,
-                    width = extent.width,
-                    height = extent.height,
-                    layers = 1
-                };
-                DeviceApi.vkCreateFramebuffer(&fbCI, null, out _framebuffers[i]).CheckResult();
-            }
+            _framebuffers[i] = CreateCompatibleFramebuffer(RenderPass,
+                colorView: msaa ? _msaaImageView : _swapchainImageViews[i],
+                depthView: _depthImageView,
+                resolveView: _swapchainImageViews[i],
+                extent.width, extent.height);
         }
     }
 
@@ -1213,6 +1197,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
             DeviceApi.vkDestroyFramebuffer(fb);
         foreach (var iv in _swapchainImageViews)
             DeviceApi.vkDestroyImageView(iv);
+
+        DestroyDepthAttachment(ref _depthImage, ref _depthMemory, ref _depthImageView);
 
         // Cleanup MSAA resources
         if (_msaaImageView != VkImageView.Null)

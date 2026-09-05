@@ -348,6 +348,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _width = w;
         _height = h;
         UpdateProjection();
+        // The layer's render area is the paintable region while its pass is open: every clip pushed
+        // inside it, and every depth clear (BeginMeshRegion), is bounded by it. This pass is recorded
+        // before the frame's own BeginRenderPass sets the field, so without this it held the PREVIOUS
+        // frame's region — the whole surface on a full frame, a stale strip after a partial one.
+        _savedLayerRegion = _damageRegion;
+        _damageRegion = (0, 0, (int)w, (int)h);
         _inCachedLayer = true;
         return true;
     }
@@ -360,97 +366,110 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _width = _savedLayerWidth;
         _height = _savedLayerHeight;
         UpdateProjection();
+        _damageRegion = _savedLayerRegion;
         _inCachedLayer = false;
     }
 
     private bool _inCachedLayer;
     private uint _savedLayerWidth;
     private uint _savedLayerHeight;
+    private (int X, int Y, int W, int H) _savedLayerRegion;
 
-    // ---- Scene target: depth-tested 3D (see VulkanContext.SceneTarget.cs) ----
+    // ---- Depth-tested meshes, inline in the current pass ----
+    //
+    // A mesh is just more draws in the frame: it goes into whatever pass is being recorded (the
+    // swapchain, the cached layer, a thumbnail capture, the offscreen target), after what is under it
+    // and before what goes over it, antialiased by the pass's MSAA and clipped by the caller's clip,
+    // with no intermediate target. What makes it different from the 2D draws is that its triangles
+    // sort themselves through the pass's depth attachment -- which is why every pass here carries one
+    // (see VulkanContext.Depth.cs), and why a region has to be opened first: the depth under the model
+    // is cleared so its triangles are tested only against each other, never against a model drawn
+    // earlier in the same frame.
 
     /// <summary>
-    /// Allocate the depth-capable scene targets, one per frame in flight, at a fixed capacity, and
-    /// build the mesh pipeline against the pass. False if the device offers no usable depth format,
-    /// in which case the caller must fall back rather than draw.
+    /// Opens a region of the current pass in which visibility is decided by depth rather than draw
+    /// order: clears the depth attachment over the rect, clips to it, and maps the clip space of the
+    /// <see cref="DrawMesh"/> calls that follow onto it. The rect is in the same coordinates as every
+    /// 2D draw (content space, through <see cref="ContentTransform"/>). Pair with
+    /// <see cref="EndMeshRegion"/>. Returns false and opens nothing when no pass is being recorded, a
+    /// region is already open, or the rect misses the area this pass may paint — the caller then draws
+    /// no meshes, and whatever was under them stays.
     /// </summary>
     /// <remarks>
-    /// Size it generously and render a sub-rect: the target is sampled rather than presented, so
-    /// allocating larger than the on-screen rect and letting the sampler downscale is how this path
-    /// antialiases — it has no MSAA.
+    /// The clear is why this is a bracket rather than a flag on <see cref="DrawMesh"/>. Depth is
+    /// cleared once at pass start, so a single model needs nothing more; a second model on the same
+    /// frame would otherwise be tested against the first's depth and lose wherever the first was
+    /// nearer, even where their rects only meet on screen. Clearing per region makes each model's
+    /// depth its own.
     /// </remarks>
-    public bool EnsureSceneTargets(uint maxW, uint maxH)
+    public bool BeginMeshRegion(float x, float y, float w, float h)
     {
-        if (!Surface.EnsureSceneTargets(maxW, maxH)) return false;
-        // Lazily, and only here: the pipeline is baked against SceneRenderPass, which does not exist
-        // until the targets have chosen a depth format the device supports.
-        _meshPipeline ??= VkMeshPipeline.Create(Surface, Surface.SceneRenderPass);
+        if (_currentCmd == VkCommandBuffer.Null || _pipelines is null || _inMeshRegion) return false;
+        if (!(w > 0f) || !(h > 0f)) return false;
+
+        // Device pixels, whole and outward — a scissor and a clear rect are integer, and a model must
+        // not lose its edge pixel to rounding — then intersected with what this pass may paint, because
+        // a clear rect outside the render area is illegal rather than merely wasted. The transform is a
+        // quarter-turn rotation, a uniform scale and a translation, so a rect maps to a rect and the
+        // bounding box of two opposite corners is exact.
+        var ct = _contentTransform.ToMatrix3x2();
+        var c0 = Vector2.Transform(new Vector2(x, y), ct);
+        var c1 = Vector2.Transform(new Vector2(x + w, y + h), ct);
+        var x0 = Math.Max((int)MathF.Floor(MathF.Min(c0.X, c1.X)), _damageRegion.X);
+        var y0 = Math.Max((int)MathF.Floor(MathF.Min(c0.Y, c1.Y)), _damageRegion.Y);
+        var x1 = Math.Min((int)MathF.Ceiling(MathF.Max(c0.X, c1.X)), _damageRegion.X + _damageRegion.W);
+        var y1 = Math.Min((int)MathF.Ceiling(MathF.Max(c0.Y, c1.Y)), _damageRegion.Y + _damageRegion.H);
+        if (x1 <= x0 || y1 <= y0) return false;
+
+        VkClearAttachment clear = new()
+        {
+            aspectMask = VkImageAspectFlags.Depth,
+            clearValue = new VkClearValue
+            {
+                depthStencil = new VkClearDepthStencilValue(VulkanContext.DepthClearValue, 0)
+            }
+        };
+        VkClearRect rect = new()
+        {
+            rect = new VkRect2D(x0, y0, (uint)(x1 - x0), (uint)(y1 - y0)),
+            baseArrayLayer = 0,
+            layerCount = 1
+        };
+        Surface.DeviceApi.vkCmdClearAttachments(_currentCmd, 1, &clear, 1, &rect);
+
+        // The clip confines the meshes to the rect — a loosely fitted model may project outside its own
+        // clip space — and going through the stack intersects it with the caller's clips as well.
+        PushClip(new DIR.Lib.RectInt(new DIR.Lib.PointInt(x1, y1), new DIR.Lib.PointInt(x0, y0)));
+
+        _meshRegion = (x, y, w, h);
+        _inMeshRegion = true;
         return true;
     }
 
-    /// <summary>Drop the scene targets and the mesh pipeline (drains first) so they can be rebuilt.</summary>
-    public void ReleaseSceneTargets()
+    /// <summary>Closes the region opened by <see cref="BeginMeshRegion"/>.</summary>
+    public void EndMeshRegion()
     {
-        _meshPipeline?.Dispose();
-        _meshPipeline = null;
-        Surface.ReleaseSceneTargets();
-    }
-
-    /// <summary>True once the scene targets exist.</summary>
-    public bool SceneTargetReady => Surface.SceneTargetReady;
-
-    /// <summary>The slot this frame must render into and sample from.</summary>
-    public int SceneTargetSlot => Surface.SceneTargetSlot;
-
-    /// <summary>How many slots exist; a camera change has to dirty them all.</summary>
-    public int SceneTargetSlotCount => Surface.SceneTargetSlotCount;
-
-    /// <summary>Whether this slot has ever been rendered, and so is legal to sample.</summary>
-    public bool IsSceneTargetSlotRendered(int slot) => Surface.IsSceneTargetSlotRendered(slot);
-
-    /// <summary>The slot's descriptor set, for <see cref="DrawTexture"/> / <see cref="DrawTextureRegion"/>.</summary>
-    public VkDescriptorSet SceneTargetDescriptorSet(int slot) => Surface.SceneTargetDescriptorSet(slot);
-
-    /// <summary>
-    /// Opens the depth-tested scene pass on this frame's command buffer. MUST be called from the
-    /// OnPreRenderPass hook (before the main render pass) and bracketed by <see cref="EndScene"/>.
-    /// </summary>
-    /// <remarks>
-    /// Unlike <see cref="BeginCachedLayer"/> this does NOT redirect the 2D projection, because none
-    /// of the 2D draw calls can be used inside it: the pass has a depth attachment and the shared
-    /// pre-baked pipelines are not compatible with it. <see cref="DrawMesh"/> is the only draw that
-    /// belongs here, and it carries its own transform.
-    /// </remarks>
-    public bool BeginScene(uint w, uint h, DIR.Lib.RGBAColor32 clearColor)
-    {
-        if (_currentCmd == VkCommandBuffer.Null || _inScene || _inCachedLayer) return false;
-        if (_meshPipeline is null) return false;
-        if (!Surface.BeginScenePass(_currentCmd, w, h, clearColor)) return false;
-        _inScene = true;
-        return true;
-    }
-
-    /// <summary>Closes the pass opened by <see cref="BeginScene"/>.</summary>
-    public void EndScene()
-    {
-        if (!_inScene) return;
-        Surface.EndScenePass(_currentCmd);
-        _inScene = false;
+        if (!_inMeshRegion) return;
+        PopClip();
+        _inMeshRegion = false;
     }
 
     /// <summary>
-    /// Draw one depth-tested mesh inside an open scene pass. <paramref name="vertices"/> is
-    /// interleaved position(3) + normal(3) per vertex, in triangle-list order;
-    /// <paramref name="mvp"/> is 16 floats, column-major.
+    /// Draw one depth-tested mesh into the open region. <paramref name="vertices"/> is interleaved
+    /// position(3) + normal(3) per vertex, in triangle-list order; <paramref name="mvp"/> is 16 floats,
+    /// column-major, taking the mesh to clip space, where [-1,1]² is the region's rect and depth runs
+    /// [0,1] near to far. <paramref name="lightDirection"/> is in the mesh's own space, the direction TO
+    /// the light.
     /// </summary>
     /// <remarks>
-    /// Draw order is deliberately irrelevant here — that is the entire point of the pass — so
-    /// batching by material is a performance choice and never a correctness one.
+    /// Draw order among the meshes of one region is irrelevant — that is the point of the depth test —
+    /// so batching by material is a performance choice and never a correctness one. Order against the
+    /// 2D draws is painter's: a fill drawn after the region paints over the model.
     /// </remarks>
     public void DrawMesh(ReadOnlySpan<float> vertices, ReadOnlySpan<float> mvp,
         DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection)
     {
-        if (!_inScene || _meshPipeline is null) return;
+        if (!_inMeshRegion || _pipelines is null) return;
         if (mvp.Length < 16) return;
         var floatsPerVertex = (int)(VkMeshPipeline.VertexStride / sizeof(float));
         if (vertices.Length < floatsPerVertex * 3) return;
@@ -458,8 +477,29 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
+        // Clip space → the region's rect → device → NDC, folded into the matrix AFTER the caller's mvp.
+        // Into the matrix rather than a viewport so the viewport never changes: Vulkan 1.0 requires it
+        // to lie inside the framebuffer, and a region half off screen is an ordinary case here, not one
+        // to clamp around. The three steps are 2D affines, so they compose as a Matrix3x2 exactly as
+        // UpdateProjection composes the 2D projection, and are then applied to the mvp's x and y rows:
+        // column c, row r is mvp[c*4 + r]; rows 0 and 1 take the affine's linear part over rows 0 and 1
+        // plus its translation times the w-row (3); z (row 2) and w pass through untouched.
+        var (rx, ry, rw, rh) = _meshRegion;
+        var toRegion = new Matrix3x2(rw / 2f, 0f, 0f, rh / 2f, rx + rw / 2f, ry + rh / 2f);
+        var proj = new Matrix3x2(2f / _width, 0f, 0f, 2f / _height, -1f, -1f);
+        var a = toRegion * _contentTransform.ToMatrix3x2() * proj;
+
         Span<float> pc = stackalloc float[VkMeshPipeline.PushConstantFloats];
-        mvp[..16].CopyTo(pc);
+        for (var c = 0; c < 4; c++)
+        {
+            var m0 = mvp[c * 4 + 0];
+            var m1 = mvp[c * 4 + 1];
+            var m3 = mvp[c * 4 + 3];
+            pc[c * 4 + 0] = a.M11 * m0 + a.M21 * m1 + a.M31 * m3;
+            pc[c * 4 + 1] = a.M12 * m0 + a.M22 * m1 + a.M32 * m3;
+            pc[c * 4 + 2] = mvp[c * 4 + 2];
+            pc[c * 4 + 3] = m3;
+        }
         pc[16] = color.Red / 255f;
         pc[17] = color.Green / 255f;
         pc[18] = color.Blue / 255f;
@@ -469,12 +509,15 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         pc[22] = lightDirection.Z;
         pc[23] = 0f;
 
-        _meshPipeline.Draw(_currentCmd, pc, Surface.VertexBuffer, offset,
-            (uint)(vertices.Length / floatsPerVertex));
+        // Through the bind cache, so a model of many parts binds the pipeline once; the 2D draw that
+        // follows the region rebinds its own through the same cache.
+        var mesh = _pipelines.Mesh;
+        BindPipeline(mesh.Pipeline);
+        mesh.Draw(_currentCmd, pc, Surface.VertexBuffer, offset, (uint)(vertices.Length / floatsPerVertex));
     }
 
-    private bool _inScene;
-    private VkMeshPipeline? _meshPipeline;
+    private bool _inMeshRegion;
+    private (float X, float Y, float W, float H) _meshRegion;
 
     /// <summary>
     /// Allocate the live-device thumbnail capture target once, up front (never mid steady-state).
@@ -510,6 +553,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // read _pushConstants, not _width/_height inline (only DrawPersistent* recompute inline), so
         // without this text and images would be projected at the swapchain scale into the thumbnail.
         UpdateProjection();
+        // The capture's render area bounds its clips and depth clears, as BeginCachedLayer's does.
+        _savedThumbnailRegion = _damageRegion;
+        _damageRegion = (0, 0, (int)w, (int)h);
         // The command buffer is fresh this frame (reset in BeginFrame) but _lastBoundPipeline still
         // holds the previous frame's pipeline and isn't cleared until after the main BeginRenderPass.
         // Force a real bind on the first capture draw so we don't skip binding into an empty cmd.
@@ -530,9 +576,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _width = _savedWidth;
         _height = _savedHeight;
         UpdateProjection(); // restore the swapchain-scale projection for the main render pass
+        _damageRegion = _savedThumbnailRegion;
         _lastBoundPipeline = VkPipeline.Null; // main render pass will rebind from scratch
         _inThumbnailCapture = false;
     }
+
+    private (int X, int Y, int W, int H) _savedThumbnailRegion;
 
     /// <summary>
     /// Fetches the most recent finished capture (RGBA, top-to-bottom rows). Call once per frame (e.g.
@@ -566,6 +615,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         Surface.BeginOffscreenRenderPass(_currentCmd,
             clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f);
+        // The whole target is the paintable area of an offscreen frame. It used to go unset here, so a
+        // clip popped to empty mid-frame reset the scissor to whatever the field held — nothing, on a
+        // context that had never begun a swapchain frame.
+        _damageRegion = (0, 0, (int)_width, (int)_height);
         _lastBoundPipeline = VkPipeline.Null; // fresh command buffer — nothing is bound
         return true;
     }
@@ -2320,8 +2373,6 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _sdfFontAtlasLarge = null;
         _fontAtlas?.Dispose();
         _fontAtlas = null;
-        _meshPipeline?.Dispose();
-        _meshPipeline = null;
         _pipelines?.Dispose();
         _pipelines = null;
     }

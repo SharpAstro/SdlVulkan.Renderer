@@ -57,9 +57,9 @@ The `.csproj` uses a conditional ProjectReference: when `../DIR.Lib/` exists loc
 ## Architecture
 
 **Rendering pipeline flow:**
-`SdlVulkanApp` (process-wide SDL lifecycle + shared `VkInstance` + shared `VulkanDevice` for a multi-window app) → `SdlVulkanWindow` (per-window SDL3 window + Vulkan surface) → `VulkanContext` (per-window swapchain, command buffers, per-frame sync with `MaxFramesInFlight = 2`, vertex ring; references a `VulkanDevice`) → `VkRenderer` (2D draw API: rectangles, ellipses, text, textures) → `VkPipelineSet` (11 pipelines built from pre-baked SPIR-V)
+`SdlVulkanApp` (process-wide SDL lifecycle + shared `VkInstance` + shared `VulkanDevice` for a multi-window app) → `SdlVulkanWindow` (per-window SDL3 window + Vulkan surface) → `VulkanContext` (per-window swapchain, command buffers, per-frame sync with `MaxFramesInFlight = 2`, vertex ring; references a `VulkanDevice`) → `VkRenderer` (2D draw API: rectangles, ellipses, text, textures, plus depth-tested meshes) → `VkPipelineSet` (12 pipelines built from pre-baked SPIR-V)
 
-**Device vs. context split (6.0+):** device-level state (logical device, queue, command pool, render pass, descriptor pool/layout, pipeline layout, MSAA) lives in `VulkanDevice`; per-window state (swapchain, framebuffers, sync, vertex ring, command buffers) lives in `VulkanContext`. `VulkanContext` forwards the device-level members (`ctx.RenderPass`, `ctx.PipelineLayout`, etc.) so existing consumers keep working. Three construction paths:
+**Device vs. context split (6.0+):** device-level state (logical device, queue, command pool, render pass, descriptor pool/layout, pipeline layout, MSAA, depth format) lives in `VulkanDevice`; per-window state (swapchain, framebuffers, sync, vertex ring, command buffers) lives in `VulkanContext`. `VulkanContext` forwards the device-level members (`ctx.RenderPass`, `ctx.PipelineLayout`, etc.) so existing consumers keep working. Three construction paths:
 - `SdlVulkanApp.CreateWindow` + `VulkanContext.CreateForSharedDevice` — multi-window; one `VulkanDevice` shared across windows (GPU resources stay valid in all of them, so a document tab can move between windows without re-uploading geometry).
 - `VulkanContext.Create(instance, surface, …)` — single-window; the context creates and owns its own device.
 - `VulkanContext.CreateOffscreen(instance, …)` — headless render-to-`VkImage`; no surface/swapchain/SDL window. Used by tests, thumbnail/raster workers, and CI without a display.
@@ -76,6 +76,7 @@ A context tears down the device only when it created it; shared-device windows l
 - **Multi-page MTSDF atlas** — `VkSdfFontAtlas` is a list of fixed-size page textures (default 2048², R8G8B8A8Unorm: RGB carry pseudo-distance, which the shader medians to keep corners sharp, and A the true distance); a full page appends a new page instead of reallocating (no `vkDeviceWaitIdle` + realloc + re-upload stall), with per-page LRU eviction. DIR.Lib's optional `SdfGlyphDiskCache` persists rasterized SDF glyphs across runs (bounded per-frame load drain)
 - **Idle-suppressing event loop** — `SdlEventLoop` uses `WaitEventTimeout` when idle, throttles mouse-motion redraws to ~30 fps; supports multi-window
 - **Live-device thumbnail capture** — `VkRenderer.BeginThumbnailCapture`/`EndThumbnailCapture`/`TryGetThumbnailCapture` re-issue already-tessellated geometry into an offscreen target at thumbnail scale with non-blocking readback (`VulkanContext.ThumbnailCapture`)
+- **One render-pass shape, with a depth attachment, everywhere** — `VulkanDevice.CreateCompatibleRenderPass` builds every pass (swapchain, damage load pass, offscreen, cached layer, thumbnail) as colour (0), depth (1), resolve (2, MSAA only) with the shared dependency pair, so the pre-baked pipelines bind into all of them. The depth attachment is for `VkRenderer.BeginMeshRegion`/`DrawMesh`/`EndMeshRegion`: a mesh is drawn inline in whatever pass is open, antialiased by the pass's MSAA and clipped by the caller's clip, and its triangles sort through depth; the 2D pipelines carry a depth-stencil state that tests nothing, so painter's order still rules among them and a fill after a mesh covers it. Depth is cleared at pass start and again over each region (so two models never test against each other), never stored, never sampled — `TransientAttachment`, so a tiler need not allocate it. `VulkanContext.Depth.cs` owns the per-target depth images and the framebuffer/clear-value helpers
 
 **Side-car (custom) pipeline pattern:**
 Consumer projects (e.g., TianWen) can create their own Vulkan pipelines that render within
@@ -84,7 +85,7 @@ and `VkSkyMapPipeline` (3D star/constellation rendering with stereographic proje
 
 To create a side-car pipeline:
 1. Create your own `VkDescriptorSetLayout` + `VkPipelineLayout` (with your UBO/push constants)
-2. Create `VkPipeline` using `ctx.RenderPass` and `ctx.MsaaSamples` (must match)
+2. Create `VkPipeline` using `ctx.RenderPass` and `ctx.MsaaSamples` (must match), and supply a `VkPipelineDepthStencilStateCreateInfo` — the pass has a depth attachment (`ctx.DepthFormat`), and a pipeline created against such a pass must state one; `depthTestEnable = false` for ordinary 2D drawing, or test against it (cleared to 1.0, so `Less`) if the side-car wants depth. `VkMeshPipeline` is the in-tree example of the latter
 3. Bring your own SPIR-V — this package bakes its shaders at build time and no longer references `Vortice.ShaderCompiler`, so a side-car wanting runtime GLSL 450 → SPIR-V has to take that package itself
 4. Record draw commands via `renderer.CurrentCommandBuffer` between `BeginFrame`/`EndFrame`
 5. Use `ctx.WriteVertices()` for per-frame geometry or `ctx.CreatePersistentVertexBuffer()`
@@ -96,12 +97,13 @@ Side-car pipelines with their own `VkPipelineLayout` can define any push constan
 **Key files:**
 - `SdlVulkanApp.cs` — process-wide SDL + shared `VkInstance`/`VulkanDevice` for multi-window apps
 - `SdlVulkanWindow.cs` — per-window SDL3 window + Vulkan surface
-- `VulkanDevice.cs` — shared device-level state: queue, command pool, render pass, the descriptor pool chain + layout, the shared sampler, pipeline layout, MSAA
+- `VulkanDevice.cs` — shared device-level state: queue, command pool, render pass (`CreateCompatibleRenderPass`, the one shape every pass takes), the descriptor pool chain + layout, the shared sampler, pipeline layout, MSAA, depth format
 - `VkRenderer.cs` — high-level draw API, extends `Renderer<VulkanContext>` from DIR.Lib
-- `VulkanContext.cs` — per-window swapchain/sync/vertex-ring lifecycle (references a `VulkanDevice`); partials: `VulkanContext.Offscreen.cs` (headless render-to-image), `VulkanContext.SwapchainReadback.cs`, `VulkanContext.ThumbnailCapture.cs`
+- `VkMeshPipeline.cs` — the depth-testing lit-mesh pipeline behind `VkRenderer.DrawMesh`; its own 96-byte push-constant layout, held by `VkPipelineSet`
+- `VulkanContext.cs` — per-window swapchain/sync/vertex-ring lifecycle (references a `VulkanDevice`); partials: `VulkanContext.Offscreen.cs` (headless render-to-image), `VulkanContext.SwapchainReadback.cs`, `VulkanContext.ThumbnailCapture.cs`, `VulkanContext.CachedLayer.cs`, `VulkanContext.Damage.cs` (repaint only what changed), `VulkanContext.Depth.cs` (per-target depth images + the framebuffer and clear-value helpers), `VulkanContext.DeferredDestroy.cs`
 - `VkFontAtlas.cs` — bitmap glyph rasterization cache + GPU texture management
 - `VkSdfFontAtlas.cs` — multi-page MTSDF glyph atlas (R8G8B8A8Unorm pages) for resolution-independent text. This is the thin Vulkan backend of DIR.Lib's `SdfFontAtlas`; the glyph disk cache behind it lives there too, not here
-- `VkPipelineSet.cs` — pipeline creation from the pre-baked SPIR-V embedded in the assembly (Flat, Textured, Ellipse, Page, Stroke, SDF, RoundRect, blend variants). Shaders are authored as GLSL 450 in `Shaders/*.vert|*.frag` and baked to `Shaders/spirv/*.spv` by `tools/BakeShaders`; re-run it after editing one and commit the `.spv`
+- `VkPipelineSet.cs` — pipeline creation from the pre-baked SPIR-V embedded in the assembly (Flat, Textured, Ellipse, Page, Stroke, SDF, RoundRect, blend variants, Mesh). Shaders are authored as GLSL 450 in `Shaders/*.vert|*.frag` and baked to `Shaders/spirv/*.spv` by `tools/BakeShaders`; re-run it after editing one and commit the `.spv`
 - `VkTexture.cs` — per-image Vulkan texture with blocking and deferred upload modes
 - `SdlEventLoop.cs` — event-driven (multi-window) render loop with resize handling
 - `SdlInputMapping.cs` — SDL3 scancode/keymod → DIR.Lib `InputKey`/`InputModifier` mapping

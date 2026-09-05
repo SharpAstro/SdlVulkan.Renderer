@@ -29,6 +29,9 @@ public sealed unsafe partial class VulkanContext
     private VkImage _thumbMsaaImage;             // multisample color (MSAA only) — MUST be its own image;
     private VkDeviceMemory _thumbMsaaMemory;     // the swapchain's _msaaImage is in active use here.
     private VkImageView _thumbMsaaView;
+    private VkImage _thumbDepthImage;            // depth, its own for the same reason (see VulkanContext.Depth.cs)
+    private VkDeviceMemory _thumbDepthMemory;
+    private VkImageView _thumbDepthView;
     private VkFramebuffer _thumbFramebuffer;
     private VkBuffer _thumbReadbackBuffer;       // host-visible, persistent, sized to capacity
     private VkDeviceMemory _thumbReadbackMemory;
@@ -145,36 +148,15 @@ public sealed unsafe partial class VulkanContext
             DeviceApi.vkCreateImageView(&msaaViewCI, null, out _thumbMsaaView).CheckResult();
         }
 
+        CreateDepthAttachment(width, height, out _thumbDepthImage, out _thumbDepthMemory, out _thumbDepthView);
+
         // Framebuffer wired to the capture render pass.
-        Span<VkImageView> attachments = stackalloc VkImageView[2];
-        if (MsaaSamples != VkSampleCountFlags.Count1)
-        {
-            attachments[0] = _thumbMsaaView;
-            attachments[1] = _thumbResolveView;
-            fixed (VkImageView* pAtt = attachments)
-            {
-                VkFramebufferCreateInfo fbCI = new()
-                {
-                    renderPass = _thumbRenderPass,
-                    attachmentCount = 2,
-                    pAttachments = pAtt,
-                    width = width, height = height, layers = 1
-                };
-                DeviceApi.vkCreateFramebuffer(&fbCI, null, out _thumbFramebuffer).CheckResult();
-            }
-        }
-        else
-        {
-            var view = _thumbResolveView;
-            VkFramebufferCreateInfo fbCI = new()
-            {
-                renderPass = _thumbRenderPass,
-                attachmentCount = 1,
-                pAttachments = &view,
-                width = width, height = height, layers = 1
-            };
-            DeviceApi.vkCreateFramebuffer(&fbCI, null, out _thumbFramebuffer).CheckResult();
-        }
+        var msaa = MsaaSamples != VkSampleCountFlags.Count1;
+        _thumbFramebuffer = CreateCompatibleFramebuffer(_thumbRenderPass,
+            colorView: msaa ? _thumbMsaaView : _thumbResolveView,
+            depthView: _thumbDepthView,
+            resolveView: _thumbResolveView,
+            width, height);
     }
 
     private void CreateThumbnailReadbackBuffer(ulong size)
@@ -197,100 +179,16 @@ public sealed unsafe partial class VulkanContext
         DeviceApi.vkBindBufferMemory(_thumbReadbackBuffer, _thumbReadbackMemory, 0);
     }
 
-    // Capture render pass — same attachment refs as the swapchain render pass (so pre-baked pipelines
-    // are compatible), but the resolve/color attachment finalizes as TransferSrcOptimal and an extra
-    // subpass→EXTERNAL transfer dependency makes the resolve write visible to vkCmdCopyImageToBuffer.
+    // Capture render pass — the shared shape (VulkanDevice.CreateCompatibleRenderPass), so the pre-baked
+    // pipelines are compatible, with the stored colour finalizing as TransferSrcOptimal so the
+    // vkCmdCopyImageToBuffer that follows needs no manual layout barrier. The shared dependency pair's
+    // second entry is the one this pass actually needs (it makes the colour write visible to that copy),
+    // but the pair must be declared IDENTICALLY everywhere or the pre-baked pipelines this pass borrows
+    // are not render-pass compatible with it. See VulkanDevice.FillSubpassDependencies; this pass having
+    // two dependencies while the swapchain pass had one is precisely what the validation layer flagged.
     private VkRenderPass CreateThumbnailRenderPass(VkFormat format, VkSampleCountFlags msaaSamples)
-    {
-        // The shared pair every render pass here declares. Its second entry is the one this pass
-        // actually needs (it makes the colour write visible to the vkCmdCopyImageToBuffer that follows
-        // EndRenderPass), but the pair must be declared IDENTICALLY everywhere or the pre-baked
-        // pipelines this pass borrows are not render-pass compatible with it. See
-        // VulkanDevice.FillSubpassDependencies; this pass having two dependencies while the swapchain
-        // pass had one is precisely what the validation layer flagged.
-        Span<VkSubpassDependency> sharedDeps =
-            stackalloc VkSubpassDependency[(int)VulkanDevice.SubpassDependencyCount];
-        VulkanDevice.FillSubpassDependencies(sharedDeps);
-
-        if (msaaSamples == VkSampleCountFlags.Count1)
-        {
-            VkAttachmentDescription colorAttachment = new()
-            {
-                format = format,
-                samples = VkSampleCountFlags.Count1,
-                loadOp = VkAttachmentLoadOp.Clear,
-                storeOp = VkAttachmentStoreOp.Store,
-                stencilLoadOp = VkAttachmentLoadOp.DontCare,
-                stencilStoreOp = VkAttachmentStoreOp.DontCare,
-                initialLayout = VkImageLayout.Undefined,
-                finalLayout = VkImageLayout.TransferSrcOptimal
-            };
-            VkAttachmentReference colorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-            VkSubpassDescription subpass = new()
-            {
-                pipelineBindPoint = VkPipelineBindPoint.Graphics,
-                colorAttachmentCount = 1,
-                pColorAttachments = &colorRef
-            };
-            fixed (VkSubpassDependency* pDeps = sharedDeps)
-            {
-                VkRenderPassCreateInfo rpCI = new()
-                {
-                    attachmentCount = 1, pAttachments = &colorAttachment,
-                    subpassCount = 1, pSubpasses = &subpass,
-                    dependencyCount = VulkanDevice.SubpassDependencyCount, pDependencies = pDeps
-                };
-                DeviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
-                return rp;
-            }
-        }
-
-        // MSAA: multisample color (0) resolves to the single-sample copy-source image (1).
-        Span<VkAttachmentDescription> attachments = stackalloc VkAttachmentDescription[2];
-        attachments[0] = new() // multisample color (transient, not stored)
-        {
-            format = format,
-            samples = msaaSamples,
-            loadOp = VkAttachmentLoadOp.Clear,
-            storeOp = VkAttachmentStoreOp.DontCare,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare,
-            stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined,
-            finalLayout = VkImageLayout.ColorAttachmentOptimal
-        };
-        attachments[1] = new() // resolve target = copy source
-        {
-            format = format,
-            samples = VkSampleCountFlags.Count1,
-            loadOp = VkAttachmentLoadOp.DontCare,
-            storeOp = VkAttachmentStoreOp.Store,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare,
-            stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined,
-            finalLayout = VkImageLayout.TransferSrcOptimal
-        };
-        VkAttachmentReference msaaColorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-        VkAttachmentReference resolveRef = new() { attachment = 1, layout = VkImageLayout.ColorAttachmentOptimal };
-        VkSubpassDescription msaaSubpass = new()
-        {
-            pipelineBindPoint = VkPipelineBindPoint.Graphics,
-            colorAttachmentCount = 1,
-            pColorAttachments = &msaaColorRef,
-            pResolveAttachments = &resolveRef
-        };
-        fixed (VkAttachmentDescription* pAttachments = attachments)
-        fixed (VkSubpassDependency* pDeps = sharedDeps)
-        {
-            VkRenderPassCreateInfo msaaRpCI = new()
-            {
-                attachmentCount = 2, pAttachments = pAttachments,
-                subpassCount = 1, pSubpasses = &msaaSubpass,
-                dependencyCount = VulkanDevice.SubpassDependencyCount, pDependencies = pDeps
-            };
-            DeviceApi.vkCreateRenderPass(&msaaRpCI, null, out var renderPass).CheckResult();
-            return renderPass;
-        }
-    }
+        => VulkanDevice.CreateCompatibleRenderPass(DeviceApi, format, DepthFormat, msaaSamples,
+            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.TransferSrcOptimal);
 
     /// <summary>
     /// Begins the thumbnail capture render pass into the (w,h) top-left sub-rect of the capture
@@ -307,18 +205,21 @@ public sealed unsafe partial class VulkanContext
         _thumbCapW = w;
         _thumbCapH = h;
 
-        VkClearValue clear = new();
-        clear.color = new VkClearColorValue(clearColor.Red / 255f, clearColor.Green / 255f,
+        Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
+        FillClearValues(clears, clearColor.Red / 255f, clearColor.Green / 255f,
             clearColor.Blue / 255f, clearColor.Alpha / 255f);
-        VkRenderPassBeginInfo rpBI = new()
+        fixed (VkClearValue* pClears = clears)
         {
-            renderPass = _thumbRenderPass,
-            framebuffer = _thumbFramebuffer,
-            renderArea = new VkRect2D(0, 0, w, h),
-            clearValueCount = 1,
-            pClearValues = &clear
-        };
-        DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+            VkRenderPassBeginInfo rpBI = new()
+            {
+                renderPass = _thumbRenderPass,
+                framebuffer = _thumbFramebuffer,
+                renderArea = new VkRect2D(0, 0, w, h),
+                clearValueCount = ClearValueCount,
+                pClearValues = pClears
+            };
+            DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+        }
 
         VkViewport vp = new(0, 0, w, h, 0, 1);
         DeviceApi.vkCmdSetViewport(cmd, 0, vp);
@@ -421,6 +322,7 @@ public sealed unsafe partial class VulkanContext
         if (_thumbMsaaView != VkImageView.Null) DeviceApi.vkDestroyImageView(_thumbMsaaView);
         if (_thumbMsaaImage != VkImage.Null) DeviceApi.vkDestroyImage(_thumbMsaaImage);
         if (_thumbMsaaMemory != VkDeviceMemory.Null) DeviceApi.vkFreeMemory(_thumbMsaaMemory);
+        DestroyDepthAttachment(ref _thumbDepthImage, ref _thumbDepthMemory, ref _thumbDepthView);
         if (_thumbReadbackBuffer != VkBuffer.Null) DeviceApi.vkDestroyBuffer(_thumbReadbackBuffer);
         if (_thumbReadbackMemory != VkDeviceMemory.Null) DeviceApi.vkFreeMemory(_thumbReadbackMemory);
         if (_thumbRenderPass != VkRenderPass.Null) DeviceApi.vkDestroyRenderPass(_thumbRenderPass);

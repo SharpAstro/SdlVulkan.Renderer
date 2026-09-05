@@ -25,8 +25,8 @@ namespace SdlVulkan.Renderer;
 public sealed unsafe partial class VulkanContext
 {
     // Same attachments, samples and subpass refs as the swapchain pass -- so the pre-baked pipelines
-    // stay render-pass compatible -- differing only in loading the previous contents instead of
-    // clearing them.
+    // stay render-pass compatible -- differing only in loading the previous colour instead of clearing
+    // it. Depth is cleared on this pass as on every other: it is never preserved across frames.
     private VkRenderPass _loadRenderPass;
 
     private readonly SwapchainDamage _damage = new SwapchainDamage();
@@ -86,15 +86,23 @@ public sealed unsafe partial class VulkanContext
 
         var region = ClampToSwapchain(dx, dy, dw, dh);
 
-        VkRenderPassBeginInfo rpBI = new()
+        // The colour entry is ignored (loadOp Load), but the depth attachment is cleared on this pass
+        // like every other, and a clear value must be supplied for every attachment index up to it.
+        Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
+        FillClearValues(clears, clearR, clearG, clearB, clearA);
+
+        fixed (VkClearValue* pClears = clears)
         {
-            renderPass = _loadRenderPass,
-            framebuffer = _framebuffers[idx],
-            renderArea = region,
-            clearValueCount = 0,
-            pClearValues = null
-        };
-        DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+            VkRenderPassBeginInfo rpBI = new()
+            {
+                renderPass = _loadRenderPass,
+                framebuffer = _framebuffers[idx],
+                renderArea = region,
+                clearValueCount = ClearValueCount,
+                pClearValues = pClears
+            };
+            DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+        }
         _renderPassBegun = true;
 
         VkViewport viewport = new(0, 0, SwapchainWidth, SwapchainHeight, 0, 1);
@@ -132,46 +140,16 @@ public sealed unsafe partial class VulkanContext
             return VkRenderPass.Null;
         }
 
-        Span<VkSubpassDependency> deps =
-            stackalloc VkSubpassDependency[(int)VulkanDevice.SubpassDependencyCount];
-        // The dependencies are the SHARED set, and must stay byte-identical to the clearing pass's: a
-        // render pass is compatible with the framebuffers and pipelines created against another only if
-        // everything but load/store ops and layouts matches, and dependencies are not in that exemption.
-        // The loadOp read this pass needs ordered after its own layout transition is therefore admitted
-        // in VulkanDevice.FillSubpassDependencies for every pass, not widened here (tried, and validation
+        // The shared shape (attachments, samples, dependencies) with only the colour's load and layouts
+        // stated here: keep what is already there, starting and ending where a presented image sits.
+        // The dependencies in particular must stay byte-identical to the clearing pass's: a render pass
+        // is compatible with the framebuffers and pipelines created against another only if everything
+        // but load/store ops and layouts matches, and dependencies are not in that exemption. The loadOp
+        // read this pass needs ordered after its own layout transition is therefore admitted in
+        // VulkanDevice.FillSubpassDependencies for every pass, not widened here (tried, and validation
         // answered with VUID-VkRenderPassBeginInfo-renderPass-00904 on every partial frame).
-        VulkanDevice.FillSubpassDependencies(deps);
-
-        VkAttachmentDescription colorAttachment = new()
-        {
-            format = format,
-            samples = VkSampleCountFlags.Count1,
-            loadOp = VkAttachmentLoadOp.Load,                     // keep what is already there
-            storeOp = VkAttachmentStoreOp.Store,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare,
-            stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.PresentSrcKHR,           // where a presented image sits
-            finalLayout = VkImageLayout.PresentSrcKHR
-        };
-        VkAttachmentReference colorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-        VkSubpassDescription subpass = new()
-        {
-            pipelineBindPoint = VkPipelineBindPoint.Graphics,
-            colorAttachmentCount = 1,
-            pColorAttachments = &colorRef
-        };
-
-        fixed (VkSubpassDependency* pDeps = deps)
-        {
-            VkRenderPassCreateInfo rpCI = new()
-            {
-                attachmentCount = 1, pAttachments = &colorAttachment,
-                subpassCount = 1, pSubpasses = &subpass,
-                dependencyCount = VulkanDevice.SubpassDependencyCount, pDependencies = pDeps
-            };
-            DeviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
-            return rp;
-        }
+        return VulkanDevice.CreateCompatibleRenderPass(DeviceApi, format, DepthFormat, MsaaSamples,
+            VkAttachmentLoadOp.Load, VkImageLayout.PresentSrcKHR, VkImageLayout.PresentSrcKHR);
     }
 
     private void CleanupLoadRenderPass()

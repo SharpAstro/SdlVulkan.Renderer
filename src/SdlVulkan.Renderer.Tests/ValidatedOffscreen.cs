@@ -47,8 +47,12 @@ internal static class ValidatedOffscreen
         ctx?.Dispose(); // owns + destroys the instance
     }
 
+    /// <param name="msaaSamples">The sample count the context's device bakes into its render pass.
+    /// Count1 unless a test guards the MSAA shape specifically — three attachments where the
+    /// single-sample pass has two, and a resolve that the single-sample pass never performs.</param>
     public static unsafe bool TryCreate(uint width, uint height,
-        out VulkanContext? ctx, out VkDebugUtilsMessengerEXT messenger, out VkInstanceApi? api, out string skip)
+        out VulkanContext? ctx, out VkDebugUtilsMessengerEXT messenger, out VkInstanceApi? api, out string skip,
+        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
     {
         ctx = null;
         messenger = VkDebugUtilsMessengerEXT.Null;
@@ -105,7 +109,7 @@ internal static class ValidatedOffscreen
             api = GetApi(instance);
             api.vkCreateDebugUtilsMessengerEXT(&debugCI, out messenger).CheckResult();
 
-            ctx = VulkanContext.CreateOffscreen(instance, width, height);
+            ctx = VulkanContext.CreateOffscreen(instance, width, height, msaaSamples: msaaSamples);
             return true;
         }
         catch (Exception e)

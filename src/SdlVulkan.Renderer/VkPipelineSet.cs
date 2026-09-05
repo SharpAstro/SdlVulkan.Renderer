@@ -30,6 +30,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
     public VkPipeline FlatDarkenPipeline { get; }
     public VkPipeline FlatLightenPipeline { get; }
 
+    /// <summary>The depth-tested mesh pipeline, with its own layout (see <see cref="VkMeshPipeline"/>).
+    /// Backs <c>VkRenderer.DrawMesh</c>.</summary>
+    public VkMeshPipeline Mesh { get; }
+
     private readonly VkDeviceApi _deviceApi;
 
     // GLSL 450 shader sources live in Shaders/*.vert / Shaders/*.frag (with their rationale comments)
@@ -38,7 +42,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
 
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
         VkPipeline sdf, VkPipeline roundRect,
-        VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten)
+        VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten,
+        VkMeshPipeline mesh)
     {
         _deviceApi = deviceApi;
         FlatPipeline = flat;
@@ -52,6 +57,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         FlatScreenPipeline = flatScreen;
         FlatDarkenPipeline = flatDarken;
         FlatLightenPipeline = flatLighten;
+        Mesh = mesh;
     }
 
     public static VkPipelineSet Create(VulkanContext ctx)
@@ -137,8 +143,12 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var flatLighten = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Max, msaa);
 
+            // The one depth-TESTING pipeline, against the same pass: see VkMeshPipeline for why it has
+            // its own layout and so its own class.
+            var mesh = VkMeshPipeline.Create(deviceApi, ctx.RenderPass, msaa);
+
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, roundRect,
-                flatMultiply, flatScreen, flatDarken, flatLighten);
+                flatMultiply, flatScreen, flatDarken, flatLighten, mesh);
         }
         finally
         {
@@ -170,6 +180,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(PagePipeline);
         _deviceApi.vkDestroyPipeline(StrokePipeline);
         _deviceApi.vkDestroyPipeline(SdfPipeline);
+        Mesh.Dispose();
     }
 
     private static VkPipeline CreatePipeline(
@@ -241,6 +252,19 @@ public sealed unsafe class VkPipelineSet : IDisposable
             pAttachments = blendAttachments
         };
 
+        // Depth OFF, and stated: the render pass has a depth attachment (for VkMeshPipeline, which
+        // draws inline in the same pass), and a pipeline created against such a pass must supply a
+        // depth-stencil state. 2D drawing is painter's-order — the sequence of draws IS the occlusion —
+        // so nothing here tests or writes depth, and a fill drawn after a mesh paints over it.
+        VkPipelineDepthStencilStateCreateInfo depthStencil = new()
+        {
+            depthTestEnable = false,
+            depthWriteEnable = false,
+            depthCompareOp = VkCompareOp.Always,
+            depthBoundsTestEnable = false,
+            stencilTestEnable = false
+        };
+
         var dynamicStates = stackalloc VkDynamicState[2];
         dynamicStates[0] = VkDynamicState.Viewport;
         dynamicStates[1] = VkDynamicState.Scissor;
@@ -259,6 +283,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             pViewportState = &viewportState,
             pRasterizationState = &rasterizer,
             pMultisampleState = &multisample,
+            pDepthStencilState = &depthStencil,
             pColorBlendState = &colorBlend,
             pDynamicState = &dynamicState,
             layout = layout,
@@ -270,9 +295,9 @@ public sealed unsafe class VkPipelineSet : IDisposable
         return pipeline;
     }
 
-    // Internal rather than private so pipelines built outside this set -- VkMeshPipeline, which is
-    // created lazily against a render pass that does not exist at Create time -- share the process-wide
-    // SpirvCache instead of re-reading the embedded stream per device.
+    // Internal rather than private so a pipeline built outside this method -- VkMeshPipeline, which
+    // builds its own layout and so its own create-info -- shares the process-wide SpirvCache instead of
+    // re-reading the embedded stream per device.
     internal static VkShaderModule LoadEmbeddedModule(VkDeviceApi deviceApi, string shaderName)
     {
         // Read the pre-baked SPIR-V once per process (cache hit on every renderer after the first),
