@@ -58,10 +58,12 @@ public sealed unsafe partial class VulkanContext
         };
         DeviceApi.vkCreateImage(&imgCI, null, out image).CheckResult();
         DeviceApi.vkGetImageMemoryRequirements(image, out var memReqs);
+        // Lazily allocated where the device offers it: on a tiler this image is never backed at all,
+        // which at a large export size under MSAA is the difference between a gigabyte and nothing.
         VkMemoryAllocateInfo allocInfo = new()
         {
             allocationSize = memReqs.size,
-            memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits, VkMemoryPropertyFlags.DeviceLocal)
+            memoryTypeIndex = FindTransientMemoryType(memReqs.memoryTypeBits)
         };
         DeviceApi.vkAllocateMemory(&allocInfo, null, out memory).CheckResult();
         DeviceApi.vkBindImageMemory(image, memory, 0).CheckResult();

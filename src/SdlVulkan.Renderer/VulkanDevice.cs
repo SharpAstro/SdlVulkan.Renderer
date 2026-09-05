@@ -453,19 +453,73 @@ public sealed unsafe class VulkanDevice : IDisposable
     private bool _memPropertiesCached;
 
     public uint FindMemoryType(uint typeFilter, VkMemoryPropertyFlags properties)
+        => TryFindMemoryType(typeFilter, properties, out var index)
+            ? index
+            : throw new InvalidOperationException("Failed to find suitable memory type");
+
+    /// <summary>
+    /// The memory type for a <c>TransientAttachment</c> image: lazily allocated where the device
+    /// offers it, plain device-local otherwise.
+    /// </summary>
+    /// <remarks>
+    /// A transient attachment — the multisample colour and the depth, both loaded by clear and never
+    /// stored — is consumed entirely inside its render pass, and a tiled GPU keeps it in tile memory.
+    /// A memory type with <c>LAZILY_ALLOCATED</c> lets the driver back it only if it ever has to,
+    /// which on such a device is never. That is the difference between a large sheet exported at 300
+    /// dpi under 4x MSAA costing 16 bytes a pixel PER transient image and costing nothing: adding the
+    /// depth attachment doubled that bill, and on a shared-memory Adreno the second gigabyte was the one
+    /// <c>vkAllocateMemory</c> refused. Desktop GPUs offer no such type and take device-local, as before.
+    /// </remarks>
+    public uint FindTransientMemoryType(uint typeFilter)
     {
-        if (!_memPropertiesCached)
+        if (TryFindMemoryType(typeFilter,
+                VkMemoryPropertyFlags.DeviceLocal | VkMemoryPropertyFlags.LazilyAllocated, out var lazy))
         {
-            InstanceApi.vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, out _memProperties);
-            _memPropertiesCached = true;
+            TransientMemoryIsLazy = true;
+            return lazy;
         }
+        return FindMemoryType(typeFilter, VkMemoryPropertyFlags.DeviceLocal);
+    }
+
+    /// <summary>Whether the device has any lazily allocated memory type at all — a tiler does, a
+    /// desktop GPU (and lavapipe) does not.</summary>
+    public bool OffersLazilyAllocatedMemory
+    {
+        get
+        {
+            EnsureMemoryProperties();
+            for (var i = 0; i < _memProperties.memoryTypeCount; i++)
+                if ((_memProperties.memoryTypes[i].propertyFlags & VkMemoryPropertyFlags.LazilyAllocated) != 0)
+                    return true;
+            return false;
+        }
+    }
+
+    /// <summary>True once <see cref="FindTransientMemoryType"/> has placed a transient attachment in
+    /// lazily allocated memory — that is, this device is keeping them in tile memory.</summary>
+    public bool TransientMemoryIsLazy { get; private set; }
+
+    private bool TryFindMemoryType(uint typeFilter, VkMemoryPropertyFlags properties, out uint index)
+    {
+        EnsureMemoryProperties();
         for (uint i = 0; i < _memProperties.memoryTypeCount; i++)
         {
             if ((typeFilter & (1u << (int)i)) != 0 &&
                 (_memProperties.memoryTypes[(int)i].propertyFlags & properties) == properties)
-                return i;
+            {
+                index = i;
+                return true;
+            }
         }
-        throw new InvalidOperationException("Failed to find suitable memory type");
+        index = 0;
+        return false;
+    }
+
+    private void EnsureMemoryProperties()
+    {
+        if (_memPropertiesCached) return;
+        InstanceApi.vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, out _memProperties);
+        _memPropertiesCached = true;
     }
 
     // ---- Queue ownership: enforced, not locked ---------------------------------------------------

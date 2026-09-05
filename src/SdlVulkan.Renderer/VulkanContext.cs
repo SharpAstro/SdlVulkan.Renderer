@@ -360,6 +360,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public uint FindMemoryType(uint typeFilter, VkMemoryPropertyFlags properties)
         => _dev.FindMemoryType(typeFilter, properties);
 
+    /// <summary>The memory type for a transient attachment; see <see cref="VulkanDevice.FindTransientMemoryType"/>.</summary>
+    public uint FindTransientMemoryType(uint typeFilter) => _dev.FindTransientMemoryType(typeFilter);
+
     public void ExecuteOneShot(Action<VkCommandBuffer> action) => _dev.ExecuteOneShot(action);
 
     /// <summary>Creates a persistent vertex buffer with the given data (lives until destroyed).</summary>
@@ -1155,7 +1158,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             VkMemoryAllocateInfo allocInfo = new()
             {
                 allocationSize = memReqs.size,
-                memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits, VkMemoryPropertyFlags.DeviceLocal)
+                memoryTypeIndex = FindTransientMemoryType(memReqs.memoryTypeBits)
             };
             DeviceApi.vkAllocateMemory(&allocInfo, null, out _msaaMemory).CheckResult();
             DeviceApi.vkBindImageMemory(_msaaImage, _msaaMemory, 0).CheckResult();
