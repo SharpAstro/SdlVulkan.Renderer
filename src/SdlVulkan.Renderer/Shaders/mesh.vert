@@ -1,6 +1,7 @@
 #version 450
-// Depth-tested lit mesh, for VulkanContext.SceneTarget. Unlike every other pipeline here the
-// position is 3D and the depth buffer decides visibility, so nothing about draw order matters.
+// Depth-tested lit mesh, drawn inline in the same render pass as everything else (VkMeshPipeline,
+// VkRenderer.DrawMesh). Unlike every other pipeline here the position is 3D and the pass's depth
+// attachment decides visibility, so nothing about draw order matters among the mesh's triangles.
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(push_constant) uniform PC {

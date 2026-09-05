@@ -6,6 +6,41 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.31
+
+**Every render pass carries a depth attachment, and a mesh is drawn inline in the frame.** 7.30's
+scene target rendered depth-tested content into a single-sample offscreen image of its own and
+composited it as a textured quad — an intermediate, with its own pass, its own pipelines, and no MSAA.
+Now the shared render pass has a depth attachment, and so does every pass compatible with it (the
+damage load pass, the offscreen target, the cached layer, the thumbnail capture): `VulkanDevice.
+CreateCompatibleRenderPass` builds them all in one shape — colour (0), depth (1), resolve (2 under
+MSAA) with the shared dependency pair — so the pre-baked pipelines bind into all of them, and what
+used to be five hand-kept copies of that shape is one function. `VulkanContext.Depth.cs` owns a depth
+image per render target (transient, never stored, never sampled; on a tiler it need not be allocated
+at all) and the framebuffer and clear-value helpers that follow the attachment order.
+
+`VkRenderer.BeginMeshRegion(x, y, w, h)` / `DrawMesh` / `EndMeshRegion` replace `EnsureSceneTargets`
+/ `BeginScene` / `DrawMesh` / `EndScene` and the whole `SceneTarget*` surface. A region clears the
+depth under its rect (so two models on one frame never test against each other), clips to it, and
+maps the meshes' clip space onto it — folded into the matrix rather than set as a viewport, so a rect
+half off the frame is an ordinary case. Inside the region depth decides; outside it the frame is
+painter's-order as before, because every 2D pipeline now states a depth-stencil state that tests
+nothing — which is what a pass with a depth attachment requires of every pipeline created against it,
+and what a side-car pipeline must now supply too (see CLAUDE.md). The mesh pipeline lives in
+`VkPipelineSet.Mesh`, created against the device pass at the device's sample count, so a model's
+edges are antialiased by the same MSAA as the strokes around it. The mesh SPIR-V is unchanged; the
+bake manifest is refreshed for a comment.
+
+Two render-area corrections fell out of tracking the paintable region per pass: an offscreen frame
+never set it, so a clip popped to empty mid-frame reset the scissor to an empty rect; and a cached
+layer or thumbnail pass inherited the previous swapchain frame's region rather than its own.
+
+`MeshRegionDepthTests` replaces `SceneTargetDepthTests`: geometry beats draw order inside a region,
+painter's order holds against it, each region's depth is its own, the rect places and confines the
+model (including half off the frame), the cached-layer pass depth-tests too, and a viewer-shaped frame
+is silent under the validation layer at 4x MSAA. BREAKING for the scene-target API, which shipped
+only in 7.30.
+
 ## 7.30
 
 **The stroke pipeline is instanced: 16 bytes a segment, not 144.** A stroked line segment is a quad

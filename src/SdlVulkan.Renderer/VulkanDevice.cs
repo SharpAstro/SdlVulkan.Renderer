@@ -71,6 +71,13 @@ public sealed unsafe class VulkanDevice : IDisposable
     /// device renders at the same sample count.</summary>
     public VkSampleCountFlags MsaaSamples { get; }
 
+    /// <summary>
+    /// The depth format every render pass on this device carries as its depth attachment, chosen once
+    /// from what the physical device supports (see <see cref="ChooseDepthFormat"/>). Uniform for the
+    /// same reason <see cref="MsaaSamples"/> is: the pre-baked pipelines are created against it.
+    /// </summary>
+    public VkFormat DepthFormat { get; }
+
     private uint _maxImageDimension2D;
     /// <summary>Device <c>maxImageDimension2D</c> limit (queried lazily, then cached). Consumers cap
     /// atlas/texture sizes against this so they never request an image larger than the GPU allows.</summary>
@@ -114,7 +121,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkCommandPool commandPool, VkRenderPass renderPass,
         VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
         VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout,
-        VkFormat colorFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
+        VkFormat colorFormat, VkFormat depthFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
     {
         _ownsInstance = ownsInstance;
         Instance = instance;
@@ -135,6 +142,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         DescriptorSet = descriptorSet;
         PipelineLayout = pipelineLayout;
         MsaaSamples = msaaSamples;
+        DepthFormat = depthFormat;
 
         // Linear filtering, clamp to edge, no mips — the settings every VkTexture used to ask for
         // individually.
@@ -156,7 +164,8 @@ public sealed unsafe class VulkanDevice : IDisposable
     /// Creates a device for on-screen rendering. <paramref name="surface"/> is a probe used only to
     /// pick a present-capable queue family; the device requests <c>VK_KHR_swapchain</c>. The same
     /// device can then back multiple <see cref="VulkanContext"/> windows (each with its own surface),
-    /// provided they share this instance and the swapchain format/MSAA the render pass bakes in.
+    /// provided they share this instance and the swapchain format, depth format and MSAA the render
+    /// pass bakes in.
     /// </summary>
     public static VulkanDevice Create(VkInstance instance, VkSurfaceKHR surface,
         VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1, bool ownsInstance = true)
@@ -188,12 +197,14 @@ public sealed unsafe class VulkanDevice : IDisposable
         // agree, so choose it once here. Desktop offers BGRA (kept for readback/offscreen byte-order
         // parity); Android/Mali offers only RGBA.
         var colorFormat = PickSurfaceColorFormat(instanceApi, physicalDevice, surface);
+        var depthFormat = ChooseDepthFormat(instanceApi, physicalDevice);
 
-        // Swapchain render pass — final layout PresentSrcKHR.
-        var renderPass = CreateRenderPass(deviceApi, colorFormat, msaaSamples);
+        // Swapchain render pass — clears, and leaves the presented image in PresentSrcKHR.
+        var renderPass = CreateCompatibleRenderPass(deviceApi, colorFormat, depthFormat, msaaSamples,
+            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.PresentSrcKHR);
 
         return CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, renderPass, colorFormat, msaaSamples, ownsInstance);
+            graphicsQueue, queueFamily, renderPass, colorFormat, depthFormat, msaaSamples, ownsInstance);
     }
 
     /// <summary>
@@ -230,10 +241,14 @@ public sealed unsafe class VulkanDevice : IDisposable
         var deviceApi = GetApi(instance, device);
         deviceApi.vkGetDeviceQueue(queueFamily, 0, out var graphicsQueue);
 
-        var renderPass = CreateOffscreenRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm, msaaSamples);
+        var depthFormat = ChooseDepthFormat(instanceApi, physicalDevice);
+        // Offscreen render pass — clears, and leaves the image in ColorAttachmentOptimal so the readback
+        // can transition it for the copy itself.
+        var renderPass = CreateCompatibleRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples,
+            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.ColorAttachmentOptimal);
 
         return CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, renderPass, VkFormat.B8G8R8A8Unorm, msaaSamples, ownsInstance);
+            graphicsQueue, queueFamily, renderPass, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples, ownsInstance);
     }
 
     // Shared tail of both factories: command pool, descriptor pool/layout/set, pipeline layout.
@@ -244,7 +259,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkInstance instance, VkInstanceApi instanceApi,
         VkPhysicalDevice physicalDevice, VkDevice device, VkDeviceApi deviceApi,
         VkQueue graphicsQueue, uint queueFamily, VkRenderPass renderPass,
-        VkFormat colorFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
+        VkFormat colorFormat, VkFormat depthFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
     {
         // Command pool
         VkCommandPoolCreateInfo poolCI = new()
@@ -314,7 +329,8 @@ public sealed unsafe class VulkanDevice : IDisposable
         return new VulkanDevice(
             instance, instanceApi, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, commandPool, renderPass,
-            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout, colorFormat, msaaSamples, ownsInstance);
+            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout, colorFormat, depthFormat,
+            msaaSamples, ownsInstance);
     }
 
     /// <summary>
@@ -852,13 +868,10 @@ public sealed unsafe class VulkanDevice : IDisposable
     /// </para>
     /// <para>
     /// The depth-stencil stages and accesses are here for the same reason and by the same argument.
-    /// <c>VulkanContext.SceneTarget</c> is the only pass with a depth attachment, and its depth
-    /// loadOp CLEAR write needs ordering against the previous frame's storeOp write to the same
+    /// Every pass carries a depth attachment (see <see cref="CreateCompatibleRenderPass"/>), and its
+    /// depth loadOp CLEAR write needs ordering against the previous frame's storeOp write to the same
     /// image — the identical WRITE_AFTER_WRITE the colour entry above documents, one attachment
-    /// over. Since the count and content must match across every pass, it cannot carry its own list,
-    /// so the pair is widened instead. On a pass with no depth attachment these bits order nothing
-    /// and cost nothing: an empty ordering guarantee is free, which is what makes widening always
-    /// safe where narrowing never is.
+    /// over. Widening only ever adds ordering, so it cannot introduce a hazard.
     /// </para>
     /// </summary>
     internal static void FillSubpassDependencies(Span<VkSubpassDependency> deps)
@@ -887,178 +900,173 @@ public sealed unsafe class VulkanDevice : IDisposable
         };
     }
 
-    private static VkRenderPass CreateRenderPass(VkDeviceApi deviceApi, VkFormat format,
-        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
+    /// <summary>
+    /// The first depth format the device supports as an optimal-tiling depth-stencil attachment.
+    /// </summary>
+    /// <remarks>
+    /// <para>D32 first because a 32-bit float depth buffer is the one that does not visibly z-fight on
+    /// content with a wide depth range; the packed 24-bit formats after it because some devices offer
+    /// only those. Vulkan requires depth-stencil attachment support for at least one of D32_SFLOAT and
+    /// X8_D24_UNORM_PACK32, so the list cannot come up empty on a conforming device — which is why a
+    /// miss throws rather than degrading to a renderer without depth: it is a broken driver, not a
+    /// configuration to support.</para>
+    /// <para>The sample count needs no check of its own: <c>framebufferDepthSampleCounts</c> is
+    /// required to include 1 and 4, the same guarantee <c>framebufferColorSampleCounts</c> gives the
+    /// colour attachment this renderer already relies on.</para>
+    /// </remarks>
+    private static VkFormat ChooseDepthFormat(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice)
     {
-        if (msaaSamples == VkSampleCountFlags.Count1)
+        ReadOnlySpan<VkFormat> candidates =
+        [
+            VkFormat.D32Sfloat,
+            VkFormat.X8D24UnormPack32,
+            VkFormat.D32SfloatS8Uint,
+            VkFormat.D24UnormS8Uint,
+        ];
+
+        foreach (var format in candidates)
         {
-            // No MSAA — single color attachment
-            VkAttachmentDescription colorAttachment = new()
+            instanceApi.vkGetPhysicalDeviceFormatProperties(physicalDevice, format, out var props);
+            if ((props.optimalTilingFeatures & VkFormatFeatureFlags.DepthStencilAttachment) != 0)
+                return format;
+        }
+        throw new InvalidOperationException(
+            "The device supports no depth-stencil attachment format, which Vulkan requires of every conforming implementation.");
+    }
+
+    /// <summary>
+    /// Creates a render pass in the ONE shape every pass in this renderer has, so that the pre-baked
+    /// pipelines (<see cref="VkPipelineSet"/>, created against the device's <see cref="RenderPass"/>)
+    /// bind into all of them: the swapchain pass, the damage-preserving load pass, the offscreen
+    /// pass, the cached layer and the thumbnail capture.
+    /// </summary>
+    /// <remarks>
+    /// <para>Render-pass compatibility is per attachment reference — format and sample count — plus
+    /// the dependency list, and is indifferent to load/store ops and layouts. So the callers state
+    /// only what may legitimately differ: how the colour attachment is loaded and where it starts and
+    /// ends. Everything else is fixed here, and building it in one place is what makes the
+    /// compatibility structural rather than a discipline five copies had to keep by hand.</para>
+    /// <para>Attachment order is <b>colour (0), depth (1), resolve (2, MSAA only)</b>. Depth sits at
+    /// index 1 in both modes so the clear values are the same two entries everywhere (see
+    /// <see cref="VulkanContext.FillClearValues"/>), and so a framebuffer's attachment list is built
+    /// by one helper (<see cref="VulkanContext.CreateCompatibleFramebuffer"/>).</para>
+    /// <para><b>The depth attachment is on every pass, and 2D drawing never reads it.</b> It exists
+    /// for depth-tested meshes (<see cref="VkRenderer.DrawMesh"/>), which are drawn inline in the same
+    /// pass as everything else — antialiased by the same MSAA, clipped by the same scissor, with no
+    /// intermediate target. Since compatibility is per attachment, a pass without it could not host
+    /// the shared pipelines once they carry a depth-stencil state, so every pass has one and the 2D
+    /// pipelines simply switch depth testing off. It is cleared at pass start, then again over each
+    /// region a consumer draws meshes into (<see cref="VkRenderer.BeginMeshRegion"/>), never stored,
+    /// and never sampled; with <c>TransientAttachment</c> usage a tiler need not allocate it at
+    /// all.</para>
+    /// <para>The MSAA colour attachment is transient too (cleared, resolved, not stored), which is why
+    /// <paramref name="colorLoadOp"/> can only apply to it when there is no resolve: a multisample
+    /// attachment cannot be re-loaded from its resolved image, and
+    /// <c>VulkanContext.Damage</c> declines to build a load pass under MSAA for exactly that
+    /// reason.</para>
+    /// </remarks>
+    /// <param name="colorLoadOp">How the stored colour is loaded: Clear for a fresh frame, Load for a
+    /// damage repaint that keeps the previous contents.</param>
+    /// <param name="colorInitialLayout">The layout the stored colour image is in when the pass begins:
+    /// Undefined for a clearing pass, PresentSrcKHR for the load pass over a presented image.</param>
+    /// <param name="colorFinalLayout">Where the stored colour image is left: PresentSrcKHR for the
+    /// swapchain, ShaderReadOnlyOptimal for a sampled layer, TransferSrcOptimal for a copy source,
+    /// ColorAttachmentOptimal where the consumer transitions it itself.</param>
+    internal static VkRenderPass CreateCompatibleRenderPass(VkDeviceApi deviceApi, VkFormat colorFormat,
+        VkFormat depthFormat, VkSampleCountFlags msaaSamples,
+        VkAttachmentLoadOp colorLoadOp, VkImageLayout colorInitialLayout, VkImageLayout colorFinalLayout)
+    {
+        var msaa = msaaSamples != VkSampleCountFlags.Count1;
+        var attachmentCount = msaa ? 3 : 2;
+        Span<VkAttachmentDescription> attachments = stackalloc VkAttachmentDescription[attachmentCount];
+
+        if (msaa)
+        {
+            // Multisample colour: cleared, resolved into attachment 2, never stored.
+            attachments[0] = new()
             {
-                format = format,
-                samples = VkSampleCountFlags.Count1,
+                format = colorFormat,
+                samples = msaaSamples,
                 loadOp = VkAttachmentLoadOp.Clear,
+                storeOp = VkAttachmentStoreOp.DontCare,
+                stencilLoadOp = VkAttachmentLoadOp.DontCare,
+                stencilStoreOp = VkAttachmentStoreOp.DontCare,
+                initialLayout = VkImageLayout.Undefined,
+                finalLayout = VkImageLayout.ColorAttachmentOptimal
+            };
+            // The resolve target IS the stored image: its load op is irrelevant (the resolve overwrites
+            // it) and its final layout is the caller's.
+            attachments[2] = new()
+            {
+                format = colorFormat,
+                samples = VkSampleCountFlags.Count1,
+                loadOp = VkAttachmentLoadOp.DontCare,
                 storeOp = VkAttachmentStoreOp.Store,
                 stencilLoadOp = VkAttachmentLoadOp.DontCare,
                 stencilStoreOp = VkAttachmentStoreOp.DontCare,
                 initialLayout = VkImageLayout.Undefined,
-                finalLayout = VkImageLayout.PresentSrcKHR
+                finalLayout = colorFinalLayout
             };
-
-            VkAttachmentReference colorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-
-            VkSubpassDescription subpass = new()
+        }
+        else
+        {
+            attachments[0] = new()
             {
-                pipelineBindPoint = VkPipelineBindPoint.Graphics,
-                colorAttachmentCount = 1,
-                pColorAttachments = &colorRef
+                format = colorFormat,
+                samples = VkSampleCountFlags.Count1,
+                loadOp = colorLoadOp,
+                storeOp = VkAttachmentStoreOp.Store,
+                stencilLoadOp = VkAttachmentLoadOp.DontCare,
+                stencilStoreOp = VkAttachmentStoreOp.DontCare,
+                initialLayout = colorInitialLayout,
+                finalLayout = colorFinalLayout
             };
-
-            Span<VkSubpassDependency> deps = stackalloc VkSubpassDependency[(int)SubpassDependencyCount];
-            FillSubpassDependencies(deps);
-
-            fixed (VkSubpassDependency* pDeps = deps)
-            {
-                VkRenderPassCreateInfo rpCI = new()
-                {
-                    attachmentCount = 1, pAttachments = &colorAttachment,
-                    subpassCount = 1, pSubpasses = &subpass,
-                    dependencyCount = SubpassDependencyCount, pDependencies = pDeps
-                };
-
-                deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
-                return rp;
-            }
         }
 
-        // MSAA — multisample color attachment (0) + resolve to swapchain (1)
-        Span<VkAttachmentDescription> attachments = stackalloc VkAttachmentDescription[2];
-        attachments[0] = new() // multisample color
+        // Depth: cleared to the far plane at pass start, consumed entirely inside the pass, stored
+        // nowhere. storeOp DontCare is what makes the image's TransientAttachment usage meaningful — the
+        // flag alone does not make it transient, the pass has to agree that nothing outlives it. The
+        // stencil aspect is unused whatever the format carries.
+        attachments[1] = new()
         {
-            format = format,
+            format = depthFormat,
             samples = msaaSamples,
             loadOp = VkAttachmentLoadOp.Clear,
-            storeOp = VkAttachmentStoreOp.DontCare, // resolved, no need to store
+            storeOp = VkAttachmentStoreOp.DontCare,
             stencilLoadOp = VkAttachmentLoadOp.DontCare,
             stencilStoreOp = VkAttachmentStoreOp.DontCare,
             initialLayout = VkImageLayout.Undefined,
-            finalLayout = VkImageLayout.ColorAttachmentOptimal
-        };
-        attachments[1] = new() // resolve target (swapchain image)
-        {
-            format = format,
-            samples = VkSampleCountFlags.Count1,
-            loadOp = VkAttachmentLoadOp.DontCare,
-            storeOp = VkAttachmentStoreOp.Store,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare,
-            stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined,
-            finalLayout = VkImageLayout.PresentSrcKHR
+            finalLayout = VkImageLayout.DepthStencilAttachmentOptimal
         };
 
-        VkAttachmentReference msaaColorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-        VkAttachmentReference resolveRef = new() { attachment = 1, layout = VkImageLayout.ColorAttachmentOptimal };
+        VkAttachmentReference colorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
+        VkAttachmentReference depthRef = new() { attachment = 1, layout = VkImageLayout.DepthStencilAttachmentOptimal };
+        VkAttachmentReference resolveRef = new() { attachment = 2, layout = VkImageLayout.ColorAttachmentOptimal };
 
-        VkSubpassDescription msaaSubpass = new()
+        VkSubpassDescription subpass = new()
         {
             pipelineBindPoint = VkPipelineBindPoint.Graphics,
             colorAttachmentCount = 1,
-            pColorAttachments = &msaaColorRef,
-            pResolveAttachments = &resolveRef
+            pColorAttachments = &colorRef,
+            pResolveAttachments = msaa ? &resolveRef : null,
+            pDepthStencilAttachment = &depthRef
         };
 
-        Span<VkSubpassDependency> msaaDeps = stackalloc VkSubpassDependency[(int)SubpassDependencyCount];
-        FillSubpassDependencies(msaaDeps);
+        // The shared pair every pass declares — see FillSubpassDependencies for why it is uniform.
+        Span<VkSubpassDependency> deps = stackalloc VkSubpassDependency[(int)SubpassDependencyCount];
+        FillSubpassDependencies(deps);
 
         fixed (VkAttachmentDescription* pAttachments = attachments)
-        fixed (VkSubpassDependency* pDeps = msaaDeps)
-        {
-            VkRenderPassCreateInfo msaaRpCI = new()
-            {
-                attachmentCount = 2, pAttachments = pAttachments,
-                subpassCount = 1, pSubpasses = &msaaSubpass,
-                dependencyCount = SubpassDependencyCount, pDependencies = pDeps
-            };
-
-            deviceApi.vkCreateRenderPass(&msaaRpCI, null, out var renderPass).CheckResult();
-            return renderPass;
-        }
-    }
-
-    private static VkRenderPass CreateOffscreenRenderPass(VkDeviceApi deviceApi, VkFormat format,
-        VkSampleCountFlags msaaSamples)
-    {
-        if (msaaSamples == VkSampleCountFlags.Count1)
-        {
-            VkAttachmentDescription colorAttachment = new()
-            {
-                format = format,
-                samples = VkSampleCountFlags.Count1,
-                loadOp = VkAttachmentLoadOp.Clear,
-                storeOp = VkAttachmentStoreOp.Store,
-                stencilLoadOp = VkAttachmentLoadOp.DontCare,
-                stencilStoreOp = VkAttachmentStoreOp.DontCare,
-                initialLayout = VkImageLayout.Undefined,
-                finalLayout = VkImageLayout.ColorAttachmentOptimal // readback transitions manually
-            };
-            VkAttachmentReference colorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-            VkSubpassDescription subpass = new()
-            {
-                pipelineBindPoint = VkPipelineBindPoint.Graphics,
-                colorAttachmentCount = 1,
-                pColorAttachments = &colorRef
-            };
-            Span<VkSubpassDependency> deps = stackalloc VkSubpassDependency[(int)SubpassDependencyCount];
-            FillSubpassDependencies(deps);
-            fixed (VkSubpassDependency* pDeps = deps)
-            {
-                VkRenderPassCreateInfo rpCI = new()
-                {
-                    attachmentCount = 1, pAttachments = &colorAttachment,
-                    subpassCount = 1, pSubpasses = &subpass,
-                    dependencyCount = SubpassDependencyCount, pDependencies = pDeps
-                };
-                deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
-                return rp;
-            }
-        }
-
-        // MSAA: multisample color (0) resolves to offscreen image (1)
-        Span<VkAttachmentDescription> attachments = stackalloc VkAttachmentDescription[2];
-        attachments[0] = new()
-        {
-            format = format, samples = msaaSamples,
-            loadOp = VkAttachmentLoadOp.Clear, storeOp = VkAttachmentStoreOp.DontCare,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare, stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined, finalLayout = VkImageLayout.ColorAttachmentOptimal
-        };
-        attachments[1] = new()
-        {
-            format = format, samples = VkSampleCountFlags.Count1,
-            loadOp = VkAttachmentLoadOp.DontCare, storeOp = VkAttachmentStoreOp.Store,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare, stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined, finalLayout = VkImageLayout.ColorAttachmentOptimal
-        };
-        VkAttachmentReference msaaColorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-        VkAttachmentReference resolveRef = new() { attachment = 1, layout = VkImageLayout.ColorAttachmentOptimal };
-        VkSubpassDescription msaaSubpass = new()
-        {
-            pipelineBindPoint = VkPipelineBindPoint.Graphics,
-            colorAttachmentCount = 1, pColorAttachments = &msaaColorRef, pResolveAttachments = &resolveRef
-        };
-        Span<VkSubpassDependency> msaaDeps = stackalloc VkSubpassDependency[(int)SubpassDependencyCount];
-        FillSubpassDependencies(msaaDeps);
-        fixed (VkAttachmentDescription* pAtt = attachments)
-        fixed (VkSubpassDependency* pDeps = msaaDeps)
+        fixed (VkSubpassDependency* pDeps = deps)
         {
             VkRenderPassCreateInfo rpCI = new()
             {
-                attachmentCount = 2, pAttachments = pAtt,
-                subpassCount = 1, pSubpasses = &msaaSubpass,
+                attachmentCount = (uint)attachmentCount, pAttachments = pAttachments,
+                subpassCount = 1, pSubpasses = &subpass,
                 dependencyCount = SubpassDependencyCount, pDependencies = pDeps
             };
-            deviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
-            return rp;
+            deviceApi.vkCreateRenderPass(&rpCI, null, out var renderPass).CheckResult();
+            return renderPass;
         }
     }
 }

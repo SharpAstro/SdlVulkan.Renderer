@@ -116,36 +116,17 @@ public sealed unsafe partial class VulkanContext
             DeviceApi.vkCreateImageView(&msaaViewCI, null, out _msaaImageView).CheckResult();
         }
 
-        // Framebuffer
-        Span<VkImageView> attachments = stackalloc VkImageView[2];
-        if (MsaaSamples != VkSampleCountFlags.Count1)
-        {
-            attachments[0] = _msaaImageView;
-            attachments[1] = _offscreenImageView;
-            fixed (VkImageView* pAtt = attachments)
-            {
-                VkFramebufferCreateInfo fbCI = new()
-                {
-                    renderPass = RenderPass,
-                    attachmentCount = 2,
-                    pAttachments = pAtt,
-                    width = width, height = height, layers = 1
-                };
-                DeviceApi.vkCreateFramebuffer(&fbCI, null, out _offscreenFramebuffer).CheckResult();
-            }
-        }
-        else
-        {
-            var view = _offscreenImageView;
-            VkFramebufferCreateInfo fbCI = new()
-            {
-                renderPass = RenderPass,
-                attachmentCount = 1,
-                pAttachments = &view,
-                width = width, height = height, layers = 1
-            };
-            DeviceApi.vkCreateFramebuffer(&fbCI, null, out _offscreenFramebuffer).CheckResult();
-        }
+        // Depth attachment — the swapchain path's fields, free here for the same reason the MSAA ones are.
+        CreateDepthAttachment(width, height, out _depthImage, out _depthMemory, out _depthImageView);
+
+        // Framebuffer: colour (multisample under MSAA, else the readback image), depth, and under MSAA
+        // the readback image as the resolve target.
+        var msaa = MsaaSamples != VkSampleCountFlags.Count1;
+        _offscreenFramebuffer = CreateCompatibleFramebuffer(RenderPass,
+            colorView: msaa ? _msaaImageView : _offscreenImageView,
+            depthView: _depthImageView,
+            resolveView: _offscreenImageView,
+            width, height);
     }
 
     /// <summary>
@@ -231,18 +212,21 @@ public sealed unsafe partial class VulkanContext
     {
         if (!_isOffscreen) throw new InvalidOperationException("BeginOffscreenRenderPass requires CreateOffscreen");
 
-        VkClearValue clear = new();
-        clear.color = new VkClearColorValue(clearR, clearG, clearB, clearA);
+        Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
+        FillClearValues(clears, clearR, clearG, clearB, clearA);
 
-        VkRenderPassBeginInfo rpBI = new()
+        fixed (VkClearValue* pClears = clears)
         {
-            renderPass = RenderPass,
-            framebuffer = _offscreenFramebuffer,
-            renderArea = new VkRect2D(0, 0, _offscreenWidth, _offscreenHeight),
-            clearValueCount = 1,
-            pClearValues = &clear
-        };
-        DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+            VkRenderPassBeginInfo rpBI = new()
+            {
+                renderPass = RenderPass,
+                framebuffer = _offscreenFramebuffer,
+                renderArea = new VkRect2D(0, 0, _offscreenWidth, _offscreenHeight),
+                clearValueCount = ClearValueCount,
+                pClearValues = pClears
+            };
+            DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+        }
 
         VkViewport vp = new(0, 0, _offscreenWidth, _offscreenHeight, 0, 1);
         DeviceApi.vkCmdSetViewport(cmd, 0, vp);
@@ -460,6 +444,8 @@ public sealed unsafe partial class VulkanContext
             DeviceApi.vkDestroyImage(_offscreenImage);
         if (_offscreenMemory != VkDeviceMemory.Null)
             DeviceApi.vkFreeMemory(_offscreenMemory);
+
+        DestroyDepthAttachment(ref _depthImage, ref _depthMemory, ref _depthImageView);
 
         // The MSAA attachment CreateOffscreenTarget allocates alongside the readback image. Freeing it
         // here is what lets ResizeOffscreen recreate an MSAA target instead of leaking one per resize

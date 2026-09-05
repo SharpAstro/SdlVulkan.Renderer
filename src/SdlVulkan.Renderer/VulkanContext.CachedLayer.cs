@@ -35,7 +35,8 @@ namespace SdlVulkan.Renderer;
 //
 // Memory note: under MSAA each slot needs its own multisample image as well (it cannot borrow the
 // swapchain's, which is in active use, nor a sibling slot's, which would reintroduce exactly the
-// cross-frame hazard above). At 4x that is four times the resolve size per slot, so capacity is worth
+// cross-frame hazard above), and every slot carries a depth attachment at the same sample count (see
+// VulkanContext.Depth.cs). At 4x that is eight times the resolve size per slot, so capacity is worth
 // choosing deliberately rather than defaulting to something generous.
 public sealed unsafe partial class VulkanContext
 {
@@ -52,6 +53,12 @@ public sealed unsafe partial class VulkanContext
     private readonly VkImage[] _layerMsaaImages = new VkImage[MaxFramesInFlight];
     private readonly VkDeviceMemory[] _layerMsaaMemories = new VkDeviceMemory[MaxFramesInFlight];
     private readonly VkImageView[] _layerMsaaViews = new VkImageView[MaxFramesInFlight];
+
+    // Per-slot depth. Per slot rather than one for the class only because each slot's framebuffer is
+    // built once and the depth image must outlive it; nothing in the depth is ever read across slots.
+    private readonly VkImage[] _layerDepthImages = new VkImage[MaxFramesInFlight];
+    private readonly VkDeviceMemory[] _layerDepthMemories = new VkDeviceMemory[MaxFramesInFlight];
+    private readonly VkImageView[] _layerDepthViews = new VkImageView[MaxFramesInFlight];
 
     private readonly VkFramebuffer[] _layerFramebuffers = new VkFramebuffer[MaxFramesInFlight];
 
@@ -211,132 +218,30 @@ public sealed unsafe partial class VulkanContext
             DeviceApi.vkCreateImageView(&msaaViewCI, null, out _layerMsaaViews[slot]).CheckResult();
         }
 
-        Span<VkImageView> attachments = stackalloc VkImageView[2];
-        if (MsaaSamples != VkSampleCountFlags.Count1)
-        {
-            attachments[0] = _layerMsaaViews[slot];
-            attachments[1] = _layerViews[slot];
-            fixed (VkImageView* pAtt = attachments)
-            {
-                VkFramebufferCreateInfo fbCI = new()
-                {
-                    renderPass = _layerRenderPass,
-                    attachmentCount = 2,
-                    pAttachments = pAtt,
-                    width = width, height = height, layers = 1
-                };
-                DeviceApi.vkCreateFramebuffer(&fbCI, null, out _layerFramebuffers[slot]).CheckResult();
-            }
-        }
-        else
-        {
-            var view = _layerViews[slot];
-            VkFramebufferCreateInfo fbCI = new()
-            {
-                renderPass = _layerRenderPass,
-                attachmentCount = 1,
-                pAttachments = &view,
-                width = width, height = height, layers = 1
-            };
-            DeviceApi.vkCreateFramebuffer(&fbCI, null, out _layerFramebuffers[slot]).CheckResult();
-        }
+        CreateDepthAttachment(width, height,
+            out _layerDepthImages[slot], out _layerDepthMemories[slot], out _layerDepthViews[slot]);
+
+        var msaa = MsaaSamples != VkSampleCountFlags.Count1;
+        _layerFramebuffers[slot] = CreateCompatibleFramebuffer(_layerRenderPass,
+            colorView: msaa ? _layerMsaaViews[slot] : _layerViews[slot],
+            depthView: _layerDepthViews[slot],
+            resolveView: _layerViews[slot],
+            width, height);
     }
 
     /// <remarks>
-    /// Identical in structure to the swapchain and thumbnail passes -- same attachment formats, sample
-    /// count and subpass attachment references -- so VkPipelineSet's pre-baked pipelines are render-pass
-    /// compatible and bind into it unchanged. Only loadOp/storeOp/finalLayout differ, and those do not
-    /// affect compatibility. The dependency pair comes from VulkanDevice.FillSubpassDependencies for the
-    /// reason stated there: a pass declaring a different count is reported as
-    /// VUID-vkCmdDraw-renderPass-02684, and it is that pair's trailing entry (widened to cover a
-    /// fragment-shader read for this class) which makes the colour write visible to the blit that
-    /// samples it later in the same command buffer.
+    /// The shared shape (VulkanDevice.CreateCompatibleRenderPass) -- same attachment formats, sample
+    /// count, subpass attachment references and dependency pair as the swapchain and thumbnail passes --
+    /// so VkPipelineSet's pre-baked pipelines are render-pass compatible and bind into it unchanged. Only
+    /// the colour's final layout differs, and that does not affect compatibility: the sampled image is
+    /// left in ShaderReadOnlyOptimal, where the blit that samples it later in the same command buffer
+    /// finds it. That blit is ordered by the dependency pair's trailing entry, widened to cover a
+    /// fragment-shader read for this class; a pass declaring a different count is reported as
+    /// VUID-vkCmdDraw-renderPass-02684, which is why the pair is shared rather than per pass.
     /// </remarks>
     private VkRenderPass CreateCachedLayerRenderPass(VkFormat format, VkSampleCountFlags msaaSamples)
-    {
-        Span<VkSubpassDependency> sharedDeps =
-            stackalloc VkSubpassDependency[(int)VulkanDevice.SubpassDependencyCount];
-        VulkanDevice.FillSubpassDependencies(sharedDeps);
-
-        if (msaaSamples == VkSampleCountFlags.Count1)
-        {
-            VkAttachmentDescription colorAttachment = new()
-            {
-                format = format,
-                samples = VkSampleCountFlags.Count1,
-                loadOp = VkAttachmentLoadOp.Clear,
-                storeOp = VkAttachmentStoreOp.Store,
-                stencilLoadOp = VkAttachmentLoadOp.DontCare,
-                stencilStoreOp = VkAttachmentStoreOp.DontCare,
-                initialLayout = VkImageLayout.Undefined,
-                finalLayout = VkImageLayout.ShaderReadOnlyOptimal
-            };
-            VkAttachmentReference colorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-            VkSubpassDescription subpass = new()
-            {
-                pipelineBindPoint = VkPipelineBindPoint.Graphics,
-                colorAttachmentCount = 1,
-                pColorAttachments = &colorRef
-            };
-            fixed (VkSubpassDependency* pDeps = sharedDeps)
-            {
-                VkRenderPassCreateInfo rpCI = new()
-                {
-                    attachmentCount = 1, pAttachments = &colorAttachment,
-                    subpassCount = 1, pSubpasses = &subpass,
-                    dependencyCount = VulkanDevice.SubpassDependencyCount, pDependencies = pDeps
-                };
-                DeviceApi.vkCreateRenderPass(&rpCI, null, out var rp).CheckResult();
-                return rp;
-            }
-        }
-
-        // MSAA: multisample colour (0) resolves to the single-sample sampled image (1).
-        Span<VkAttachmentDescription> attachments = stackalloc VkAttachmentDescription[2];
-        attachments[0] = new()
-        {
-            format = format,
-            samples = msaaSamples,
-            loadOp = VkAttachmentLoadOp.Clear,
-            storeOp = VkAttachmentStoreOp.DontCare,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare,
-            stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined,
-            finalLayout = VkImageLayout.ColorAttachmentOptimal
-        };
-        attachments[1] = new()
-        {
-            format = format,
-            samples = VkSampleCountFlags.Count1,
-            loadOp = VkAttachmentLoadOp.DontCare,
-            storeOp = VkAttachmentStoreOp.Store,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare,
-            stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined,
-            finalLayout = VkImageLayout.ShaderReadOnlyOptimal
-        };
-        VkAttachmentReference msaaColorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
-        VkAttachmentReference resolveRef = new() { attachment = 1, layout = VkImageLayout.ColorAttachmentOptimal };
-        VkSubpassDescription msaaSubpass = new()
-        {
-            pipelineBindPoint = VkPipelineBindPoint.Graphics,
-            colorAttachmentCount = 1,
-            pColorAttachments = &msaaColorRef,
-            pResolveAttachments = &resolveRef
-        };
-        fixed (VkAttachmentDescription* pAttachments = attachments)
-        fixed (VkSubpassDependency* pDeps = sharedDeps)
-        {
-            VkRenderPassCreateInfo msaaRpCI = new()
-            {
-                attachmentCount = 2, pAttachments = pAttachments,
-                subpassCount = 1, pSubpasses = &msaaSubpass,
-                dependencyCount = VulkanDevice.SubpassDependencyCount, pDependencies = pDeps
-            };
-            DeviceApi.vkCreateRenderPass(&msaaRpCI, null, out var renderPass).CheckResult();
-            return renderPass;
-        }
-    }
+        => VulkanDevice.CreateCompatibleRenderPass(DeviceApi, format, DepthFormat, msaaSamples,
+            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.ShaderReadOnlyOptimal);
 
     /// <summary>
     /// Begins the cached-layer render pass into the (w,h) top-left sub-rect of this frame's slot,
@@ -351,18 +256,21 @@ public sealed unsafe partial class VulkanContext
         if (!_layerTargetReady || _inLayerPass) return false;
         if (w == 0 || h == 0 || w > _layerTargetW || h > _layerTargetH) return false;
 
-        VkClearValue clear = new();
-        clear.color = new VkClearColorValue(clearColor.Red / 255f, clearColor.Green / 255f,
+        Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
+        FillClearValues(clears, clearColor.Red / 255f, clearColor.Green / 255f,
             clearColor.Blue / 255f, clearColor.Alpha / 255f);
-        VkRenderPassBeginInfo rpBI = new()
+        fixed (VkClearValue* pClears = clears)
         {
-            renderPass = _layerRenderPass,
-            framebuffer = _layerFramebuffers[_currentFrame],
-            renderArea = new VkRect2D(0, 0, w, h),
-            clearValueCount = 1,
-            pClearValues = &clear
-        };
-        DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+            VkRenderPassBeginInfo rpBI = new()
+            {
+                renderPass = _layerRenderPass,
+                framebuffer = _layerFramebuffers[_currentFrame],
+                renderArea = new VkRect2D(0, 0, w, h),
+                clearValueCount = ClearValueCount,
+                pClearValues = pClears
+            };
+            DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
+        }
 
         VkViewport vp = new(0, 0, w, h, 0, 1);
         DeviceApi.vkCmdSetViewport(cmd, 0, vp);
@@ -410,6 +318,7 @@ public sealed unsafe partial class VulkanContext
                 DeviceApi.vkFreeMemory(_layerMsaaMemories[i]);
                 _layerMsaaMemories[i] = VkDeviceMemory.Null;
             }
+            DestroyDepthAttachment(ref _layerDepthImages[i], ref _layerDepthMemories[i], ref _layerDepthViews[i]);
             if (_layerViews[i] != VkImageView.Null)
             {
                 DeviceApi.vkDestroyImageView(_layerViews[i]);

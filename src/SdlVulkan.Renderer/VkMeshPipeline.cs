@@ -4,17 +4,19 @@ using static Vortice.Vulkan.Vulkan;
 namespace SdlVulkan.Renderer;
 
 /// <summary>
-/// A depth-tested lit-mesh pipeline for <see cref="VulkanContext.SceneRenderPass"/>.
+/// The depth-tested lit-mesh pipeline, created against the same render pass as every 2D pipeline so a
+/// mesh is drawn inline in the frame — after whatever is under it, before whatever goes over it,
+/// antialiased by the same MSAA — and its triangles sort themselves through the pass's depth attachment.
 /// </summary>
 /// <remarks>
-/// <para>Not part of <see cref="VkPipelineSet"/>, and it cannot be: that set is baked up front
-/// against the swapchain pass, whereas the scene pass does not exist until
-/// <see cref="VulkanContext.EnsureSceneTargets"/> has run and chosen a depth format the device
-/// actually supports. So this is created on demand, against the pass it will draw into, and owns
-/// its own layout.</para>
-/// <para>It carries its own pipeline layout rather than borrowing the shared one for two reasons
-/// that both matter: the shared range is 84 bytes and a 3D transform plus material needs 96, and
-/// the shared layout declares a combined-image-sampler set this shader has no use for.</para>
+/// <para>Held by <see cref="VkPipelineSet"/> beside the 2D pipelines, but a class of its own because it
+/// cannot share their layout: the shared push-constant range is 84 bytes and a 3D transform plus
+/// material needs 96, and the shared layout declares a combined-image-sampler set this shader has no
+/// use for.</para>
+/// <para>The one thing that makes it different from every other pipeline here is
+/// <c>depthTestEnable</c>. The 2D pipelines carry a depth-stencil state too — a pass with a depth
+/// attachment requires one — with the test switched off, so painter's order goes on deciding what
+/// covers what among them, and a 2D draw after a mesh paints over it as it would over anything.</para>
 /// </remarks>
 public sealed unsafe class VkMeshPipeline : IDisposable
 {
@@ -37,14 +39,11 @@ public sealed unsafe class VkMeshPipeline : IDisposable
     }
 
     /// <summary>
-    /// Create the pipeline for <paramref name="renderPass"/>, which must have a depth attachment —
-    /// in practice <see cref="VulkanContext.SceneRenderPass"/>, after
-    /// <see cref="VulkanContext.EnsureSceneTargets"/> has returned true.
+    /// Create the pipeline for <paramref name="renderPass"/> at <paramref name="msaaSamples"/> — the
+    /// device's shared pass and sample count, which every pass in this renderer is compatible with.
     /// </summary>
-    public static VkMeshPipeline Create(VulkanContext ctx, VkRenderPass renderPass)
+    public static VkMeshPipeline Create(VkDeviceApi deviceApi, VkRenderPass renderPass, VkSampleCountFlags msaaSamples)
     {
-        var deviceApi = ctx.DeviceApi;
-
         VkPushConstantRange pushRange = new()
         {
             stageFlags = VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment,
@@ -94,14 +93,17 @@ public sealed unsafe class VkMeshPipeline : IDisposable
                 frontFace = VkFrontFace.CounterClockwise
             };
 
-            // Single-sample to match the scene target, which supersamples instead of using MSAA.
+            // The pass's sample count, like every other pipeline: the mesh's edges are antialiased by the
+            // same MSAA as the strokes and fills around it.
             VkPipelineMultisampleStateCreateInfo multisample = new()
             {
-                rasterizationSamples = VkSampleCountFlags.Count1
+                rasterizationSamples = msaaSamples
             };
 
-            // The whole point of the pass. Less against a 1.0 clear: a fragment survives when it is
-            // nearer than what is already there, and on a freshly cleared buffer everything is.
+            // The whole point of the pipeline. Less against the pass's 1.0 clear: a fragment survives
+            // when it is nearer than what is already there, and on a freshly cleared buffer everything
+            // is. VkRenderer.BeginMeshRegion re-clears the depth under each model so two models on one
+            // frame never test against each other.
             VkPipelineDepthStencilStateCreateInfo depthStencil = new()
             {
                 depthTestEnable = true,
@@ -112,8 +114,9 @@ public sealed unsafe class VkMeshPipeline : IDisposable
             };
 
             // Blending OFF, unlike every other pipeline here. Depth decides visibility, and alpha
-            // blending depth-tested geometry is order-dependent again — the exact property this pass
-            // exists to escape. Translucent meshes need a sorted second pass, not a blend state here.
+            // blending depth-tested geometry is order-dependent again — the exact property this
+            // pipeline exists to escape. Translucent meshes need a sorted second pass, not a blend
+            // state here.
             var blendAttachments = stackalloc VkPipelineColorBlendAttachmentState[1];
             blendAttachments[0] = new VkPipelineColorBlendAttachmentState
             {
@@ -163,16 +166,16 @@ public sealed unsafe class VkMeshPipeline : IDisposable
     }
 
     /// <summary>
-    /// Bind and draw one mesh inside an open scene pass. <paramref name="pushConstants"/> is
+    /// Push the constants and draw one mesh. <paramref name="pushConstants"/> is
     /// <see cref="PushConstantFloats"/> floats: a column-major mvp, then rgba, then the model-space
-    /// direction TO the light.
+    /// direction TO the light. The caller binds <see cref="Pipeline"/> first — <c>VkRenderer</c> does
+    /// so through its bind cache, which is what lets a model of many parts bind once.
     /// </summary>
     public void Draw(VkCommandBuffer cmd, ReadOnlySpan<float> pushConstants,
         VkBuffer vertexBuffer, ulong vertexOffset, uint vertexCount)
     {
         if (pushConstants.Length < PushConstantFloats || vertexCount == 0) return;
 
-        _deviceApi.vkCmdBindPipeline(cmd, VkPipelineBindPoint.Graphics, Pipeline);
         fixed (float* pPC = pushConstants)
             _deviceApi.vkCmdPushConstants(cmd, Layout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0,
