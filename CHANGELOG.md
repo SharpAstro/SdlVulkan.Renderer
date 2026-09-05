@@ -35,6 +35,14 @@ Two render-area corrections fell out of tracking the paintable region per pass: 
 never set it, so a clip popped to empty mid-frame reset the scissor to an empty rect; and a cached
 layer or thumbnail pass inherited the previous swapchain frame's region rather than its own.
 
+**Transient attachments take lazily allocated memory where the device offers it**
+(`VulkanDevice.FindTransientMemoryType`): the new depth image and the multisample colour images, which
+already carried `TransientAttachment` usage but still asked for plain device-local memory. On a tiler
+they are kept in tile memory and never backed at all; a desktop GPU has no such type and takes
+device-local as before. Found the expensive way: at 300 dpi under 4x MSAA a large sheet's offscreen
+target is 16 bytes a pixel per transient image, the depth doubled it, and a shared-memory Adreno refused
+the second gigabyte. `TransientMemoryTests` asserts the choice on a device that offers the type.
+
 `MeshRegionDepthTests` replaces `SceneTargetDepthTests`: geometry beats draw order inside a region,
 painter's order holds against it, each region's depth is its own, the rect places and confines the
 model (including half off the frame), the cached-layer pass depth-tests too, and a viewer-shaped frame

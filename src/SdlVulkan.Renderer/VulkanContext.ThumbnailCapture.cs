@@ -136,7 +136,7 @@ public sealed unsafe partial class VulkanContext
             VkMemoryAllocateInfo msaaAlloc = new()
             {
                 allocationSize = msaaMemReqs.size,
-                memoryTypeIndex = FindMemoryType(msaaMemReqs.memoryTypeBits, VkMemoryPropertyFlags.DeviceLocal)
+                memoryTypeIndex = FindTransientMemoryType(msaaMemReqs.memoryTypeBits)
             };
             DeviceApi.vkAllocateMemory(&msaaAlloc, null, out _thumbMsaaMemory).CheckResult();
             DeviceApi.vkBindImageMemory(_thumbMsaaImage, _thumbMsaaMemory, 0).CheckResult();
