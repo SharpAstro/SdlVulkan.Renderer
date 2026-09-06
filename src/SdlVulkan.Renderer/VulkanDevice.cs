@@ -126,6 +126,9 @@ public sealed unsafe class VulkanDevice : IDisposable
     // SdlVulkanApp, which owns the instance and shares one device across windows — there the app
     // destroys the instance after the device is gone.
     private readonly bool _ownsInstance;
+    // Headless: no swapchain, no window loop, so this device's queue is reached only by whatever job
+    // happens to be running. See AssertQueueThread.
+    private bool _privateQueue;
     private bool _disposed;
 
     private VulkanDevice(
@@ -264,8 +267,10 @@ public sealed unsafe class VulkanDevice : IDisposable
         var renderPass = CreateCompatibleRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples,
             VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.ColorAttachmentOptimal);
 
-        return CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
+        var dev = CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, renderPass, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples, ownsInstance);
+        dev.MarkQueuePrivate();
+        return dev;
     }
 
     // Shared tail of both factories: command pool, descriptor pool/layout/set, pipeline layout.
@@ -692,9 +697,20 @@ public sealed unsafe class VulkanDevice : IDisposable
     // arrive on different pool threads without ever overlapping.
     private int _queueThreadId;
 
+    /// <summary>Marks this device's queue as private to whatever job is running, which is what a
+    /// headless device's is. See <see cref="AssertQueueThread"/>.</summary>
+    internal void MarkQueuePrivate() => _privateQueue = true;
+
     [Conditional("DEBUG")]
     internal void AssertQueueThread(string method)
     {
+        // A headless device opts out, as the scope note above says it should. Its queue is reached
+        // only from the job currently driving it, and successive jobs legitimately arrive on
+        // different pool threads without ever overlapping -- a test collection running serially on
+        // the thread pool is exactly that, and it was failing here on whichever thread it drew
+        // second. The windowed path keeps the check, where a single owning thread IS the invariant.
+        if (_privateQueue) return;
+
         var id = Environment.CurrentManagedThreadId;
         var owner = Interlocked.CompareExchange(ref _queueThreadId, id, 0);
         if (owner != 0 && owner != id)
