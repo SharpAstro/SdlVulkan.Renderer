@@ -76,11 +76,42 @@ public sealed unsafe class VkTexture : IDisposable
     /// layout (the common CPU-renderer output) should pass <see cref="VkFormat.R8G8B8A8Unorm"/>
     /// and skip any CPU-side swizzle — letting the driver read the bytes directly is cheaper
     /// than a per-pixel swap loop.</param>
+    /// <summary>
+    /// Bytes one texel occupies in <paramref name="format"/>, for sizing a staging buffer.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a closed set that THROWS on anything else, rather than assuming four. The upload
+    /// path used to take a format and size its staging buffer at four bytes a pixel regardless, which
+    /// went wrong in two different directions and neither is the one it looks like.
+    /// <para>WIDER than four bytes, and the buffer is too small: the copy into it throws, so no format
+    /// above 32 bits could be uploaded at all.</para>
+    /// <para>NARROWER, and the buffer is oversized but the bytes still land where the image copy reads
+    /// them, since Vulkan derives the copy's extent from the image rather than the buffer. So a
+    /// single-channel texture rendered CORRECTLY and quietly cost four times the staging it needed --
+    /// which for the masks this exists to carry is megabytes per tile, on exactly the path that was
+    /// trying to save them.</para>
+    /// <para>Adding a format here is one line. Being wrong about one is a throw on the wide side and
+    /// wasted memory on the narrow, so it fails loudly in the direction that matters.</para>
+    /// </remarks>
+    private static int BytesPerPixel(VkFormat format) => format switch
+    {
+        VkFormat.R8Unorm or VkFormat.R8Snorm or VkFormat.R8Uint or VkFormat.R8Sint or VkFormat.R8Srgb => 1,
+        VkFormat.R8G8Unorm or VkFormat.R16Unorm or VkFormat.R16Sfloat => 2,
+        VkFormat.B8G8R8A8Unorm or VkFormat.B8G8R8A8Srgb
+            or VkFormat.R8G8B8A8Unorm or VkFormat.R8G8B8A8Srgb
+            or VkFormat.R32Sfloat or VkFormat.R16G16Sfloat => 4,
+        VkFormat.R16G16B16A16Sfloat or VkFormat.R32G32Sfloat => 8,
+        VkFormat.R32G32B32A32Sfloat => 16,
+        _ => throw new ArgumentOutOfRangeException(nameof(format), format,
+            "texel size unknown; add it to VkTexture.BytesPerPixel rather than letting the staging "
+            + "buffer be sized wrong")
+    };
+
     public static VkTexture CreateDeferred(VulkanContext ctx, ReadOnlySpan<byte> pixelData, int width, int height,
         VkFormat format = VkFormat.B8G8R8A8Unorm)
     {
         var api = ctx.DeviceApi;
-        var bufferSize = (ulong)(width * height * 4);
+        var bufferSize = (ulong)((long)width * height * BytesPerPixel(format));
 
         // Create and fill staging buffer
         VkBufferCreateInfo bufCI = new()
