@@ -202,6 +202,15 @@ public sealed unsafe partial class VulkanContext : IDisposable
     [Conditional("DEBUG")]
     private void AssertFrameThread(string method)
     {
+        // Headless opts out, for the reason VulkanDevice.AssertQueueThread does. What both checks
+        // are really defending is that nothing touches this state CONCURRENTLY; on the windowed path
+        // a single owning thread is how that is guaranteed, so thread identity is a faithful proxy
+        // for it. An offscreen context has no render thread at all -- it is driven by whichever job
+        // is running, one at a time -- so identity stops being a proxy for concurrency and starts
+        // being a false alarm: a serial test collection failed here on whichever pool thread it drew
+        // second, having done nothing wrong.
+        if (_isOffscreen) return;
+
         var id = Environment.CurrentManagedThreadId;
         if (_frameThreadId == 0)
         {
