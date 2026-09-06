@@ -13,6 +13,25 @@ namespace SdlVulkan.Renderer;
 public sealed unsafe class VkTexture : IDisposable
 {
     public VkDescriptorSet DescriptorSet { get; }
+
+    /// <summary>
+    /// A descriptor set binding THIS texture at 0 and <paramref name="mask"/> at 1, for
+    /// <see cref="VkPipelineSet.MaskedPipeline"/>. The caller owns the set and returns it with
+    /// <see cref="VulkanContext.FreeMaskedDescriptorSet"/>; neither texture is captured, so both must
+    /// outlive any frame that draws with it.
+    /// </summary>
+    /// <remarks>
+    /// A method here rather than the image views being made public: a view handed out is a view
+    /// somebody can bind after the texture that owns it has been deferred for destruction, which is
+    /// exactly the use-after-free the deferred-destroy machinery exists to prevent.
+    /// </remarks>
+    public VkDescriptorSet CreateMaskedDescriptorSet(VkTexture mask)
+    {
+        ArgumentNullException.ThrowIfNull(mask);
+        var set = _ctx.AllocateMaskedDescriptorSet();
+        _ctx.UpdateMaskedDescriptorSet(set, _imageView, _sampler, mask._imageView, mask._sampler);
+        return set;
+    }
     public int Width { get; }
     public int Height { get; }
 

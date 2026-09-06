@@ -1090,6 +1090,60 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     /// <summary>
+    /// <see cref="DrawTexturedQuad"/> through <see cref="VkPipelineSet.MaskedPipeline"/>: the drawn
+    /// texture's alpha is multiplied by a coverage mask sampled at the same UV. Takes a set from
+    /// <see cref="VkTexture.CreateMaskedDescriptorSet"/>, which binds both.
+    /// </summary>
+    /// <remarks>
+    /// The mask is sampled in the TEXTURE's UV space, not the quad's, so it needs no relation to the
+    /// quad's size or shape and may be a fraction of the texture's resolution -- which is the point,
+    /// since a mask that had to match the texture pixel for pixel would cost what baking it into the
+    /// texture's alpha costs.
+    /// </remarks>
+    public void DrawMaskedQuad(VkDescriptorSet maskedSet,
+        float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3)
+    {
+        if (_pipelines is null) return;
+
+        var api = Surface.DeviceApi;
+
+        ReadOnlySpan<float> vertices =
+        [
+            x0, y0, 0f, 0f,  // image origin
+            x1, y1, 1f, 0f,  // right edge
+            x3, y3, 1f, 1f,  // far corner
+            x0, y0, 0f, 0f,  // image origin
+            x3, y3, 1f, 1f,  // far corner
+            x2, y2, 0f, 1f   // bottom edge
+        ];
+
+        _pushConstants[16] = 1f;
+        _pushConstants[17] = 1f;
+        _pushConstants[18] = 1f;
+        _pushConstants[19] = 1f;
+
+        var offset = Surface.WriteVertices(vertices);
+        if (offset == uint.MaxValue) return;
+
+        BindPipeline(_pipelines.MaskedPipeline);
+
+        // The MASKED layout throughout: the set has two bindings, and pushing or binding through the
+        // single-sampler layout is a layout mismatch rather than a wrong picture.
+        var layout = Surface.MaskedPipelineLayout;
+        fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, layout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
+            layout, 0, 1, &maskedSet, 0, null);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
+    }
+
+    /// <summary>
     /// Draws a sub-region of a texture using the PagePipeline.
     /// UV coordinates specify which part of the texture to sample.
     /// </summary>

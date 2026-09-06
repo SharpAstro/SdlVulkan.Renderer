@@ -24,6 +24,9 @@ public sealed unsafe class VulkanDevice : IDisposable
     // (see AllocateDescriptorSet). A pool cannot be resized once created, so growth is always by
     // chaining — existing sets keep their handles and stay valid across a grow.
     private const uint DescriptorSetsPerPool = 512; // font atlas + textures
+    // The widest set this device allocates: a masked set binds a texture and a mask. Pool descriptor
+    // counts are sized by it so every pool can actually deliver its stated number of sets.
+    private const uint MaxDescriptorsPerSet = 2;
 
     public VkInstance Instance { get; }
     public VkInstanceApi InstanceApi { get; }
@@ -55,6 +58,15 @@ public sealed unsafe class VulkanDevice : IDisposable
     public VkDescriptorSetLayout DescriptorSetLayout { get; }
     public VkDescriptorSet DescriptorSet { get; }
     public VkPipelineLayout PipelineLayout { get; }
+
+    /// <summary>Layout for a texture-plus-mask set: binding 0 the texture, binding 1 the coverage
+    /// mask. Bound by <see cref="VkPipelineSet.MaskedPipeline"/> and nothing else, which is what
+    /// keeps <see cref="DescriptorSetLayout"/> a single sampler for every other textured draw.</summary>
+    public VkDescriptorSetLayout MaskedDescriptorSetLayout { get; }
+
+    /// <summary>Pipeline layout over <see cref="MaskedDescriptorSetLayout"/>, with the same 84-byte
+    /// push constants as <see cref="PipelineLayout"/>.</summary>
+    public VkPipelineLayout MaskedPipelineLayout { get; }
 
     /// <summary>
     /// True when the GPU is known wedged — the owning <see cref="VulkanContext"/>'s per-frame fence
@@ -105,6 +117,8 @@ public sealed unsafe class VulkanDevice : IDisposable
     // command buffer might still reference) and means the pool count tracks PEAK live sets rather
     // than growing with churn.
     private readonly Stack<VkDescriptorSet> _freeDescriptorSets = new();
+    // Masked sets recycle separately: see AllocateMaskedDescriptorSet for why the two cannot mix.
+    private readonly Stack<VkDescriptorSet> _freeMaskedDescriptorSets = new();
     private VkDescriptorPool _currentPool;
     private uint _setsLeftInCurrentPool;
     // Whether this device's Dispose also destroys the VkInstance. True on the standalone and
@@ -121,6 +135,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkCommandPool commandPool, VkRenderPass renderPass,
         VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
         VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout,
+        VkDescriptorSetLayout maskedSetLayout, VkPipelineLayout maskedPipelineLayout,
         VkFormat colorFormat, VkFormat depthFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
     {
         _ownsInstance = ownsInstance;
@@ -141,6 +156,8 @@ public sealed unsafe class VulkanDevice : IDisposable
         DescriptorSetLayout = descriptorSetLayout;
         DescriptorSet = descriptorSet;
         PipelineLayout = pipelineLayout;
+        MaskedDescriptorSetLayout = maskedSetLayout;
+        MaskedPipelineLayout = maskedPipelineLayout;
         MsaaSamples = msaaSamples;
         DepthFormat = depthFormat;
 
@@ -274,7 +291,12 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkDescriptorPoolSize poolSize = new()
         {
             type = VkDescriptorType.CombinedImageSampler,
-            descriptorCount = DescriptorSetsPerPool
+            // Two per set, not one: a masked set (see MaskedDescriptorSetLayout) binds a texture AND
+            // a mask, so a pool whose descriptor count matched its set count would run out of
+            // descriptors at half its stated set capacity. The allocator recovers from that -- an
+            // OutOfPoolMemory refusal just retires the pool -- but it would retire every pool at
+            // half use, doubling the pools a masked-heavy page creates for no reason.
+            descriptorCount = DescriptorSetsPerPool * MaxDescriptorsPerSet
         };
         VkDescriptorPoolCreateInfo dpCI = new()
         {
@@ -298,6 +320,32 @@ public sealed unsafe class VulkanDevice : IDisposable
             pBindings = &binding
         };
         deviceApi.vkCreateDescriptorSetLayout(&dslCI, null, out var descriptorSetLayout).CheckResult();
+
+        // A SECOND layout, texture plus mask, for VkPipelineSet.MaskedPipeline. Additive rather than
+        // a binding added to the layout above, because that one is shared by every textured pipeline
+        // in the renderer -- the font atlas included -- so widening it would oblige every ordinary
+        // draw to bind a mask it does not use.
+        var maskedBindings = stackalloc VkDescriptorSetLayoutBinding[2];
+        maskedBindings[0] = new()
+        {
+            binding = 0,
+            descriptorType = VkDescriptorType.CombinedImageSampler,
+            descriptorCount = 1,
+            stageFlags = VkShaderStageFlags.Fragment
+        };
+        maskedBindings[1] = new()
+        {
+            binding = 1,
+            descriptorType = VkDescriptorType.CombinedImageSampler,
+            descriptorCount = 1,
+            stageFlags = VkShaderStageFlags.Fragment
+        };
+        VkDescriptorSetLayoutCreateInfo maskedDslCI = new()
+        {
+            bindingCount = 2,
+            pBindings = maskedBindings
+        };
+        deviceApi.vkCreateDescriptorSetLayout(&maskedDslCI, null, out var maskedSetLayout).CheckResult();
 
         // Allocate the font atlas descriptor set
         var setLayout = descriptorSetLayout;
@@ -326,10 +374,23 @@ public sealed unsafe class VulkanDevice : IDisposable
         };
         deviceApi.vkCreatePipelineLayout(&plCI, null, out var pipelineLayout).CheckResult();
 
+        // Same push constants, the masked set layout: a masked pipeline is the ordinary textured one
+        // with a second sampler, so everything the shaders read through push constants is unchanged.
+        var maskedLayout = maskedSetLayout;
+        VkPipelineLayoutCreateInfo maskedPlCI = new()
+        {
+            setLayoutCount = 1,
+            pSetLayouts = &maskedLayout,
+            pushConstantRangeCount = 1,
+            pPushConstantRanges = &pushRange
+        };
+        deviceApi.vkCreatePipelineLayout(&maskedPlCI, null, out var maskedPipelineLayout).CheckResult();
+
         return new VulkanDevice(
             instance, instanceApi, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, commandPool, renderPass,
-            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout, colorFormat, depthFormat,
+            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout,
+            maskedSetLayout, maskedPipelineLayout, colorFormat, depthFormat,
             msaaSamples, ownsInstance);
     }
 
@@ -362,13 +423,98 @@ public sealed unsafe class VulkanDevice : IDisposable
         }
     }
 
+    /// <summary>
+    /// Allocates a set with <see cref="MaskedDescriptorSetLayout"/> -- a texture and a mask.
+    /// </summary>
+    /// <remarks>
+    /// Recycled through a free list of its own. A returned set is only interchangeable with another
+    /// of the SAME layout, so the two kinds cannot share one stack: handing a single-sampler set to a
+    /// masked draw would leave binding 1 unwritten, which reads as a bound-but-undefined descriptor
+    /// rather than as an error.
+    /// </remarks>
+    public VkDescriptorSet AllocateMaskedDescriptorSet()
+    {
+        lock (_descriptorPoolLock)
+        {
+            if (_freeMaskedDescriptorSets.Count > 0) return _freeMaskedDescriptorSets.Pop();
+
+            var set = TryAllocateFromCurrentPool(MaskedDescriptorSetLayout);
+            if (set == VkDescriptorSet.Null)
+            {
+                AddDescriptorPool();
+                set = TryAllocateFromCurrentPool(MaskedDescriptorSetLayout);
+                if (set == VkDescriptorSet.Null)
+                    throw new InvalidOperationException(
+                        "masked descriptor set allocation failed against a freshly created pool");
+            }
+            return set;
+        }
+    }
+
+    /// <summary>
+    /// Points a masked set at its two images: <paramref name="imageView"/> at binding 0 is what gets
+    /// drawn, <paramref name="maskView"/> at binding 1 is the coverage its alpha is multiplied by.
+    /// </summary>
+    /// <remarks>
+    /// Both writes go in ONE vkUpdateDescriptorSets call. Two calls would work, but a set whose
+    /// second binding is written later is, in between, a set the shader may read with binding 1
+    /// undefined -- and a descriptor that is merely undefined produces a plausible picture on one
+    /// driver and a device loss on another.
+    /// </remarks>
+    public void UpdateMaskedDescriptorSet(VkDescriptorSet targetSet,
+        VkImageView imageView, VkSampler sampler, VkImageView maskView, VkSampler maskSampler)
+    {
+        VkDescriptorImageInfo texInfo = new()
+        {
+            imageLayout = VkImageLayout.ShaderReadOnlyOptimal,
+            imageView = imageView,
+            sampler = sampler
+        };
+        VkDescriptorImageInfo maskInfo = new()
+        {
+            imageLayout = VkImageLayout.ShaderReadOnlyOptimal,
+            imageView = maskView,
+            sampler = maskSampler
+        };
+        var writes = stackalloc VkWriteDescriptorSet[2];
+        writes[0] = new()
+        {
+            dstSet = targetSet,
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = VkDescriptorType.CombinedImageSampler,
+            pImageInfo = &texInfo
+        };
+        writes[1] = new()
+        {
+            dstSet = targetSet,
+            dstBinding = 1,
+            descriptorCount = 1,
+            descriptorType = VkDescriptorType.CombinedImageSampler,
+            pImageInfo = &maskInfo
+        };
+        DeviceApi.vkUpdateDescriptorSets(2, writes, 0, null);
+    }
+
+    /// <summary>Hands a masked set back for re-issue. See <see cref="FreeDescriptorSet"/>.</summary>
+    public void FreeMaskedDescriptorSet(VkDescriptorSet set)
+    {
+        lock (_descriptorPoolLock)
+        {
+            if (set != VkDescriptorSet.Null) _freeMaskedDescriptorSets.Push(set);
+        }
+    }
+
     /// <summary>Takes one set from the current pool, or returns null if that pool is spent.
     /// Caller holds <see cref="_descriptorPoolLock"/>.</summary>
-    private VkDescriptorSet TryAllocateFromCurrentPool()
+    private VkDescriptorSet TryAllocateFromCurrentPool() => TryAllocateFromCurrentPool(DescriptorSetLayout);
+
+    /// <summary>Caller holds <see cref="_descriptorPoolLock"/>.</summary>
+    private VkDescriptorSet TryAllocateFromCurrentPool(VkDescriptorSetLayout setLayout)
     {
         if (_setsLeftInCurrentPool == 0) return VkDescriptorSet.Null;
 
-        var layout = DescriptorSetLayout;
+        var layout = setLayout;
         VkDescriptorSetAllocateInfo dsAI = new()
         {
             descriptorPool = _currentPool,
@@ -395,7 +541,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkDescriptorPoolSize poolSize = new()
         {
             type = VkDescriptorType.CombinedImageSampler,
-            descriptorCount = DescriptorSetsPerPool
+            descriptorCount = DescriptorSetsPerPool * MaxDescriptorsPerSet
         };
         VkDescriptorPoolCreateInfo dpCI = new()
         {
@@ -687,6 +833,8 @@ public sealed unsafe class VulkanDevice : IDisposable
         DeviceApi.vkDestroySampler(LinearClampSampler);
         DeviceApi.vkDestroyPipelineLayout(PipelineLayout);
         DeviceApi.vkDestroyDescriptorSetLayout(DescriptorSetLayout);
+        DeviceApi.vkDestroyPipelineLayout(MaskedPipelineLayout);
+        DeviceApi.vkDestroyDescriptorSetLayout(MaskedDescriptorSetLayout);
         foreach (var pool in _descriptorPools)
             DeviceApi.vkDestroyDescriptorPool(pool);
         DeviceApi.vkDestroyRenderPass(RenderPass);

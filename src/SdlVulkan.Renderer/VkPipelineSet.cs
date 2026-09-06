@@ -17,6 +17,21 @@ public sealed unsafe class VkPipelineSet : IDisposable
     public VkPipeline TexturedPipeline { get; }
     public VkPipeline EllipsePipeline { get; }
     public VkPipeline PagePipeline { get; }
+
+    /// <summary>
+    /// <see cref="PagePipeline"/> with the drawn texture's alpha multiplied by a second, coverage
+    /// texture sampled at the same UV (see <c>Shaders/masked.frag</c>). Bound with a set from
+    /// <c>VulkanDevice.AllocateMaskedDescriptorSet</c> and drawn through
+    /// <c>VulkanDevice.MaskedPipelineLayout</c>, NOT the shared one -- the layouts differ, so a draw
+    /// that mixes them is a validation error rather than a wrong picture.
+    /// </summary>
+    /// <remarks>
+    /// For removing part of a texture when what to remove is decided after the texture is on the GPU,
+    /// or across several textures at once. Baking the same result into the texture's own alpha needs
+    /// its pixels on the CPU at that moment, which for a mosaic means holding every tile or decoding
+    /// twice; a mask a fraction of the size costs neither.
+    /// </remarks>
+    public VkPipeline MaskedPipeline { get; }
     public VkPipeline StrokePipeline { get; }
     public VkPipeline SdfPipeline { get; }
 
@@ -43,7 +58,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
         VkPipeline sdf, VkPipeline roundRect,
         VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten,
-        VkMeshPipeline mesh)
+        VkPipeline masked, VkMeshPipeline mesh)
     {
         _deviceApi = deviceApi;
         FlatPipeline = flat;
@@ -57,6 +72,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         FlatScreenPipeline = flatScreen;
         FlatDarkenPipeline = flatDarken;
         FlatLightenPipeline = flatLighten;
+        MaskedPipeline = masked;
         Mesh = mesh;
     }
 
@@ -70,6 +86,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         var texVert = LoadEmbeddedModule(deviceApi, "tex.vert");
         var texFrag = LoadEmbeddedModule(deviceApi, "tex.frag");
         var pageFrag = LoadEmbeddedModule(deviceApi, "page.frag");
+        var maskedFrag = LoadEmbeddedModule(deviceApi, "masked.frag");
         var ellipseVert = LoadEmbeddedModule(deviceApi, "ellipse.vert");
         var ellipseFrag = LoadEmbeddedModule(deviceApi, "ellipse.frag");
         var strokeVert = LoadEmbeddedModule(deviceApi, "stroke.vert");
@@ -143,12 +160,18 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var flatLighten = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Max, msaa);
 
+            // Masked pipeline: the page pipeline's vertex layout and blending, against the device's
+            // OTHER pipeline layout -- the two-sampler one. Same push constants, so nothing a caller
+            // sets per draw changes.
+            var masked = CreatePipeline(deviceApi, ctx.RenderPass, ctx.MaskedPipelineLayout, texVert, maskedFrag,
+                &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
+
             // The one depth-TESTING pipeline, against the same pass: see VkMeshPipeline for why it has
             // its own layout and so its own class.
             var mesh = VkMeshPipeline.Create(deviceApi, ctx.RenderPass, msaa);
 
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, roundRect,
-                flatMultiply, flatScreen, flatDarken, flatLighten, mesh);
+                flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh);
         }
         finally
         {
@@ -157,6 +180,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             deviceApi.vkDestroyShaderModule(texVert);
             deviceApi.vkDestroyShaderModule(texFrag);
             deviceApi.vkDestroyShaderModule(pageFrag);
+            deviceApi.vkDestroyShaderModule(maskedFrag);
             deviceApi.vkDestroyShaderModule(ellipseVert);
             deviceApi.vkDestroyShaderModule(ellipseFrag);
             deviceApi.vkDestroyShaderModule(strokeVert);
@@ -178,6 +202,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(EllipsePipeline);
         _deviceApi.vkDestroyPipeline(RoundRectPipeline);
         _deviceApi.vkDestroyPipeline(PagePipeline);
+        _deviceApi.vkDestroyPipeline(MaskedPipeline);
         _deviceApi.vkDestroyPipeline(StrokePipeline);
         _deviceApi.vkDestroyPipeline(SdfPipeline);
         Mesh.Dispose();
