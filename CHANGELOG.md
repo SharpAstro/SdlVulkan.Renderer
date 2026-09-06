@@ -6,6 +6,35 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.32
+
+**A pipeline that masks a texture's alpha by a second texture.** `VkRenderer.DrawMaskedQuad` draws a
+quad sampling two textures, taking colour from the first and multiplying its alpha by the second, so
+a mask can be applied at draw time instead of being baked into the texture that carries the content.
+`VkPipelineSet.MaskedPipeline`, `VulkanContext.CreateMaskedDescriptorSet` /
+`AllocateMaskedDescriptorSet` / `FreeMaskedDescriptorSet` and `MaskedPipelineLayout` are the surface;
+`masked.frag` is the new shader and is baked like the rest.
+
+**A texture's staging buffer is sized by the format it was given, not assumed to be four bytes a
+pixel** (`VkTexture.BytesPerPixel`, a closed set that THROWS on a format it does not know rather
+than guessing again). The old assumption went wrong in two directions and neither is the one it
+looks like: WIDER than four bytes and the buffer is too small, so the copy into it throws and no
+format above 32 bits could be uploaded at all; NARROWER and the buffer is merely oversized, the
+bytes still landing where the image copy reads them because Vulkan takes the copy's extent from the
+image rather than the buffer — so a single-channel texture rendered CORRECTLY and quietly cost four
+times the staging it needed, on exactly the path meant to save memory. Adding a format is one line,
+and being wrong about one now fails loudly on the wide side rather than silently on the narrow.
+`SingleChannelTextureTests` covers both directions.
+
+**A headless context may be driven from whichever thread is running it.** `AssertQueueThread` checks
+thread identity because on the windowed path a single owning render thread is how "nothing touches
+this concurrently" is guaranteed, and identity is a faithful proxy for that. An offscreen context has
+no render thread at all — successive jobs drive it one at a time, legitimately arriving on
+different pool threads without ever overlapping — so there the proxy stops holding and starts
+raising false alarms: a serial test collection failed on whichever pool thread it drew second, having
+done nothing wrong. Headless devices are marked `MarkQueuePrivate` at creation and opt out; the
+windowed path keeps the check, where the invariant it stands for is real.
+
 ## 7.31
 
 **Every render pass carries a depth attachment, and a mesh is drawn inline in the frame.** 7.30's
