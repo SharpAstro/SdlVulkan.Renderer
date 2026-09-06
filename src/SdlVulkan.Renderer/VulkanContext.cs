@@ -120,6 +120,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public VkDescriptorSet DescriptorSet => _dev.DescriptorSet;
     public VkPipelineLayout PipelineLayout => _dev.PipelineLayout;
 
+    /// <summary>The two-sampler layout <see cref="VkPipelineSet.MaskedPipeline"/> draws through.</summary>
+    public VkPipelineLayout MaskedPipelineLayout => _dev.MaskedPipelineLayout;
+
     /// <summary>MSAA sample count (Count1 = no MSAA). Inherited from the shared device.</summary>
     public VkSampleCountFlags MsaaSamples => _dev.MsaaSamples;
 
@@ -356,6 +359,18 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// <summary>Updates a descriptor set to point to the given image view and sampler.</summary>
     public void UpdateDescriptorSet(VkDescriptorSet targetSet, VkImageView imageView, VkSampler sampler)
         => _dev.UpdateDescriptorSet(targetSet, imageView, sampler);
+
+    /// <summary>Allocates a set with the texture-plus-mask layout; see
+    /// <see cref="VulkanDevice.AllocateMaskedDescriptorSet"/>.</summary>
+    public VkDescriptorSet AllocateMaskedDescriptorSet() => _dev.AllocateMaskedDescriptorSet();
+
+    /// <summary>Frees a masked set back to the shared pool.</summary>
+    public void FreeMaskedDescriptorSet(VkDescriptorSet set) => _dev.FreeMaskedDescriptorSet(set);
+
+    /// <summary>Points a masked set at its texture and its coverage mask.</summary>
+    public void UpdateMaskedDescriptorSet(VkDescriptorSet targetSet,
+        VkImageView imageView, VkSampler sampler, VkImageView maskView, VkSampler maskSampler)
+        => _dev.UpdateMaskedDescriptorSet(targetSet, imageView, sampler, maskView, maskSampler);
 
     public uint FindMemoryType(uint typeFilter, VkMemoryPropertyFlags properties)
         => _dev.FindMemoryType(typeFilter, properties);
