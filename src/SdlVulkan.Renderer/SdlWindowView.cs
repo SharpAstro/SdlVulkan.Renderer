@@ -1,4 +1,4 @@
-using DIR.Lib;
+﻿using DIR.Lib;
 
 namespace SdlVulkan.Renderer;
 
@@ -35,6 +35,22 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// </para>
     /// </summary>
     public Func<InputEvent.KeyDown, bool>? OnKeyDown { get; set; }
+
+    /// <summary>
+    /// Called when a key is RELEASED. Return true to trigger a redraw.
+    /// </summary>
+    /// <remarks>
+    /// Only for a binding that lasts as long as the key is held; a press-triggered one wants
+    /// <see cref="OnKeyDown"/> alone and should leave this null.
+    /// <para>
+    /// <b>A release is not guaranteed.</b> SDL delivers no key-up when the window loses focus mid-hold,
+    /// so a consumer must treat "held" as a state it can be talked out of rather than one it can only
+    /// leave through this callback. The safe shape is for the release to RESTORE something, so a lost
+    /// release leaves the app in the paused / suppressed state the user can see and undo, never in one
+    /// that keeps running invisibly.
+    /// </para>
+    /// </remarks>
+    public Func<InputEvent.KeyUp, bool>? OnKeyUp { get; set; }
 
     /// <summary>Called on mouse button down. Parameters: button (1=left,2=middle,3=right), pixel X, pixel Y, click count, modifiers.</summary>
     public Func<byte, float, float, byte, InputModifier, bool>? OnMouseDown { get; set; }

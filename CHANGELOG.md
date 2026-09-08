@@ -18,6 +18,14 @@ tell those events apart. The loop now fills in `InputEvent.KeyDown.Repeat` (DIR.
 event and carries it through, never filtering here, because a STEP action wants every repeat and only the
 consumer knows which of its keys step.
 
+**`OnKeyUp`**, the release half, on both `SdlWindowView` and `SdlEventLoop` (`Func<InputEvent.KeyUp,
+bool>?`, DIR.Lib 8.14). Additive: it is null by default and the loop dispatches the SDL key-up event only
+when something is listening, so a host that binds nothing does no extra work and sees no extra redraws.
+It exists for a binding whose meaning is "while held" rather than "on press". Note that SDL delivers no
+key-up when the window loses focus mid-hold, so a consumer must treat held as a state it can be talked
+out of; the safe shape is for the release to RESTORE something, leaving a lost release in the visible
+paused state rather than in one that keeps running invisibly.
+
 Port, which removes a line rather than adding one, since every consumer was already wrapping the two
 arguments back into this record before handing it to a widget:
 
