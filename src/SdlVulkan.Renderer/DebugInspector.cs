@@ -619,7 +619,8 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
 
     private string ExecuteKey(InputKey key, InputModifier mods)
     {
-        _view.OnKeyDown?.Invoke(key, mods);
+        // A synthesized press is one press: the inspector has no held key, so Repeat stays false.
+        _view.OnKeyDown?.Invoke(new InputEvent.KeyDown(key, mods));
         _view.RequestRedraw();
         return "\"ok\"";
     }

@@ -23,8 +23,18 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// <summary>Called after this window's renderer is resized. Parameters are the new pixel dimensions.</summary>
     public Action<uint, uint>? OnResize { get; set; }
 
-    /// <summary>Called on key down in this window. Returns true if consumed.</summary>
-    public Func<InputKey, InputModifier, bool>? OnKeyDown { get; set; }
+    /// <summary>
+    /// Called on key down in this window. Returns true if consumed.
+    /// <para>
+    /// Takes the DIR.Lib event rather than the <c>(key, modifiers)</c> pair it used to, because a key
+    /// press carries a third fact no consumer can recover on its own: whether the OS is auto-repeating a
+    /// key still held (<see cref="InputEvent.KeyDown.Repeat"/>). Without it a key bound to a TOGGLE flips
+    /// at the repeat rate for as long as it is held. Every consumer was already wrapping the two
+    /// arguments back into this record before handing it to a widget, so the event shape costs nothing
+    /// and is what the pointer side already does (<see cref="OnPointerInput"/>).
+    /// </para>
+    /// </summary>
+    public Func<InputEvent.KeyDown, bool>? OnKeyDown { get; set; }
 
     /// <summary>Called on mouse button down. Parameters: button (1=left,2=middle,3=right), pixel X, pixel Y, click count, modifiers.</summary>
     public Func<byte, float, float, byte, InputModifier, bool>? OnMouseDown { get; set; }

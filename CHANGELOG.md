@@ -6,6 +6,31 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.33
+
+**BREAKING: `OnKeyDown` takes the DIR.Lib event rather than `(key, modifiers)`.**
+`SdlWindowView.OnKeyDown` and `SdlEventLoop.OnKeyDown` are now `Func<InputEvent.KeyDown, bool>?`.
+
+The reason is a fact the old signature could not carry. SDL delivers a HELD key as a stream of KeyDown
+events, and a consumer that reads each one as a fresh press drives any toggle bound to that key at the
+OS repeat rate: a held key starts and stops the action several times a second, and nothing downstream can
+tell those events apart. The loop now fills in `InputEvent.KeyDown.Repeat` (DIR.Lib 8.14) from the SDL
+event and carries it through, never filtering here, because a STEP action wants every repeat and only the
+consumer knows which of its keys step.
+
+Port, which removes a line rather than adding one, since every consumer was already wrapping the two
+arguments back into this record before handing it to a widget:
+
+```csharp
+// before
+loop.OnKeyDown = (key, mods) => widget.HandleInput(new InputEvent.KeyDown(key, mods));
+// after
+loop.OnKeyDown = evt => widget.HandleInput(evt);
+```
+
+A handler that switches on the key reads `evt.Key`, and one that wants to ignore held keys checks
+`evt.Repeat`. Requires DIR.Lib 8.14.
+
 ## 7.32
 
 **A pipeline that masks a texture's alpha by a second texture.** `VkRenderer.DrawMaskedQuad` draws a
