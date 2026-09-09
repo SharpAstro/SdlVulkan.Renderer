@@ -17,6 +17,7 @@
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageId>SdlVulkan.Renderer.WebView.Native</PackageId>
     <Description>Native WebView2Loader.dll assets (win-x64 / win-arm64 / win-x86) for SdlVulkan.Renderer.WebView.</Description>
+    <PackageTags>webview2 native runtime loader windows win-arm64</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <RepositoryUrl>https://github.com/SharpAstro/SdlVulkan.Renderer.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>

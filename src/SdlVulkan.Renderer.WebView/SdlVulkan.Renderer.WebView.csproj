@@ -16,6 +16,7 @@
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageId>SdlVulkan.Renderer.WebView</PackageId>
     <Description>Cross-platform native WebView (WebView2 / WebKitGTK / WKWebView) hosted inside an SdlVulkan.Renderer window.</Description>
+    <PackageTags>webview webview2 webkitgtk wkwebview sdl3 embedded-browser cross-platform</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <RepositoryUrl>https://github.com/SharpAstro/SdlVulkan.Renderer.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>

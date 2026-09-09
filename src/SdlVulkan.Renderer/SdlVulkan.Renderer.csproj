@@ -12,6 +12,8 @@
     <IsAotCompatible>true</IsAotCompatible>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageID>SdlVulkan.Renderer</PackageID>
+    <Description>SDL3 + Vulkan rendering backend for DIR.Lib's Renderer&lt;TSurface&gt;: window, device and swapchain lifecycle, pre-baked SPIR-V pipelines, bitmap and MSDF glyph atlases, and a surfaceless offscreen path for headless rendering and tests. Desktop and Android, AOT compatible.</Description>
+    <PackageTags>sdl3 vulkan rendering gpu spirv msdf text aot cross-platform</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/SharpAstro/SdlVulkan.Renderer.git</RepositoryUrl>
