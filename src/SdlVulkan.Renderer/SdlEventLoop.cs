@@ -800,14 +800,16 @@ public sealed class SdlEventLoop
                 vf.ActiveFingers[fid] = (fx, fy);
 
                 if ((EventType)evt.Type == EventType.FingerDown && vf.ActiveFingers.Count == 2)
-                    vf.PinchStartDist = GetFingerDistance(vf);
+                    vf.PinchRefDist = GetFingerDistance(vf);
 
-                if (vf.ActiveFingers.Count >= 2 && vf.PinchStartDist > 1f
+                if (vf.ActiveFingers.Count >= 2 && vf.PinchRefDist > 1f
                     && (EventType)evt.Type == EventType.FingerMotion)
                 {
                     var dist = GetFingerDistance(vf);
-                    // Absolute scale since pinch began (not relative per-frame)
-                    var scale = dist / vf.PinchStartDist;
+                    // The factor for THIS dispatch, not the cumulative one since the pinch began: the
+                    // reference is re-based to `dist` at the end of this block, so each scale is measured
+                    // against the previous dispatch and a consumer multiplies it onto its current zoom.
+                    var scale = dist / vf.PinchRefDist;
 
                     // Classify the touch device so consumers can anchor sensibly. A DIRECT device
                     // (touchscreen) reports coordinates relative to the window, so the finger midpoint
@@ -829,7 +831,7 @@ public sealed class SdlEventLoop
                         source = PinchSource.Touchpad;
                     }
                     vf.OnPinch?.Invoke(scale, cx, cy, source);
-                    vf.PinchStartDist = dist; // relative per-frame for scroll conversion
+                    vf.PinchRefDist = dist; // re-base: this is what makes the next scale per-event
                     vf.NeedsRedraw = true;
                 }
                 break;
