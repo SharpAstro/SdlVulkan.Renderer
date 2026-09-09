@@ -141,13 +141,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.SourceLink.GitHub">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-  </ItemGroup>
-
-  <ItemGroup>
     <!-- The inspector's request parsing decides what an injected key or click MEANS, and getting that wrong
          looks like the app misbehaving rather than like a bad request. Reachable only through a live SDL
          window otherwise, so the test project checks the resolvers directly. -->
