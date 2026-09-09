@@ -138,7 +138,9 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
         _ => MouseButton.Left,
     };
 
-    /// <summary>Called on trackpad/touch pinch. Parameters: scale (absolute since start), anchorX, anchorY
+    /// <summary>Called on trackpad/touch pinch. Parameters: scale (the factor for THIS callback, not the
+    /// cumulative one since the gesture began -- <see cref="PinchRefDist"/> is re-based after every
+    /// dispatch, so it multiplies straight onto the consumer's current zoom), anchorX, anchorY
     /// (pixels), source. For a touchscreen (<see cref="PinchSource.Touchscreen"/>) the anchor is the real
     /// finger midpoint; for a touchpad (<see cref="PinchSource.Touchpad"/>) it is the mouse cursor, since
     /// touchpad touch coordinates are touchpad-relative and don't map to a screen location.</summary>
@@ -229,7 +231,13 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     internal float MouseX, MouseY;
     internal ulong LastMouseRedrawCounter;
     internal readonly Dictionary<long, (float X, float Y)> ActiveFingers = new();
-    internal float PinchStartDist;
+
+    // The finger separation the NEXT pinch scale is measured against. It is the separation at pinch
+    // start only for the first dispatch; every dispatch then re-bases it to the current one, which is
+    // what makes OnPinch's scale per-event rather than cumulative. Named for what it is throughout
+    // rather than for its first value -- as PinchStartDist it read as "the distance at pinch start",
+    // and three separate comments had been written to match the name instead of the code.
+    internal float PinchRefDist;
 
     // Swapchain-recovery storm tracking, per window (see SdlEventLoop.Run's catch).
     internal long LastRecoverTick;
