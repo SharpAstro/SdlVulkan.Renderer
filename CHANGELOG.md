@@ -6,6 +6,25 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.34
+
+Rebuilt against **DIR.Lib 8.19**, from 8.14. No renderer code changed; this exists so the backend is
+compiled and tested against the DIR.Lib a consumer will actually load. A consumer pinning a newer
+DIR.Lib than its backend does gets that version anyway — NuGet unifies to the highest request — but by
+luck rather than by intent, and nothing in this repo's CI had ever run against it.
+
+What the five minors bring, all additive or fixes:
+
+- **8.15 is the one with a visible behaviour change.** `FontFallbackResolver` now asks Unicode's
+  `Emoji_Presentation` (UTS #51) FIRST, so a codepoint whose default presentation is emoji is drawn
+  from the emoji face even when a text face happens to carry an outline for it. A text-presentation
+  codepoint — the chess and card pictographs among them — resolves exactly as before.
+- **8.17** takes SharpAstro.Fonts 1.12, capping TrueType hinting recursion at 128 frames. A crash fix,
+  not a trade-off: a self-calling `CALL`/`LOOPCALL` used to exhaust the stack, and a .NET stack
+  overflow cannot be caught.
+- **8.14** draws a text selection's fill UNDER the glyphs rather than over them.
+- **8.16 / 8.18 / 8.19** add and then finish `FloatingPalette`; nothing here consumes it.
+
 ## 7.33
 
 **BREAKING: `OnKeyDown` takes the DIR.Lib event rather than `(key, modifiers)`.**
