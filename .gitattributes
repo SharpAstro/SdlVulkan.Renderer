@@ -1,3 +1,18 @@
+# Store every text file as LF in the repo AND check it out as LF, whatever the platform or
+# core.autocrlf says (it is on at the Git-for-Windows system level, which is what puts CRLF in
+# a Windows worktree). text=auto leaves git's binary detection alone; eol=lf is the checkout
+# half, which is the half that was missing.
+#
+# A policy declaration, not a conversion: every blob here is ALREADY lf (`git ls-files --eol`
+# reads i/lf or i/-text for all 130 tracked files), so nothing is renormalised and no commit
+# changes. What it ends is a worktree that disagrees with the repo it came from -- on Windows
+# all 94 files this rule governs check out CRLF -- which stays invisible until something reads
+# the bytes rather than the lines.
+#
+# ORDER IS LOAD-BEARING: a later line wins, so this one has to come FIRST or it would take the
+# pins below back off, and those are not cosmetic (see SVR0001).
+* text=auto eol=lf
+
 # The shader sources are HASHED, and the hash is recorded in the repo
 # (Shaders/spirv/sources.sha256) so the build can tell a stale bake from a current one.
 # That makes their bytes part of the build contract: a working tree where core.autocrlf
@@ -6,7 +21,9 @@
 #
 # `-text` and not `eol=lf`: -text disables the filter outright, so the bytes on disk are
 # the bytes in the object store on every platform. eol=lf still runs the filter and only
-# happens to agree today.
+# happens to agree today. It also survives the `*` rule above, which hands every path an
+# `eol` of lf: git applies eol only where `text` is set or auto-detected, and -text is
+# neither, so these keep their bytes.
 *.vert  -text
 *.frag  -text
 *.comp  -text
@@ -14,3 +31,11 @@
 
 # The baked output is binary; never let a filter near it.
 *.spv   -text -diff
+
+# The test font and the WebView2 loaders. Git's own detection already gets these right, and
+# `text=auto` above keeps that detection — so this changes nothing today and is here for the
+# day a new one lands rather than the day the detection happens to agree. A binary with no
+# NUL byte early on reads as text and gets rewritten, which is a corrupted fixture and a
+# checkout that still passes.
+src/SdlVulkan.Renderer.Tests/Fixtures/*.ttf              -text
+src/SdlVulkan.Renderer.WebView.Native/runtimes/**/*.dll  -text
