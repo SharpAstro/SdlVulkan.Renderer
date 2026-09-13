@@ -96,18 +96,33 @@ Android is a first-class target: the package multi-targets `net10.0;net10.0-andr
 the Java bridge plus per-ABI `libSDL3.so` come from `SDL3-CS.Android`. Two properties of that native
 package are load-bearing for **every** Android consumer, so they live here rather than in any one app:
 
-**Pin `SDL3-CS.Android` to 3.4.10.5 — not 3.4.12.x.** 3.4.12.x ships a mismatched pair: a Java bridge
-built for 3.4.10 alongside a 3.4.12 native. SDL's runtime C/Java version check rejects the
-combination and the app dies at launch (`expected 3.4.10, got 3.4.12`). 3.4.10.5 is internally
-consistent. Both halves are pinned in `src/SdlVulkan.Renderer/Directory.Packages.props`,
-TFM-conditional so desktop stays on the 3.5.0 preview.
+**Keep the Java and native halves on the same version.** SDL checks them against each other at
+startup, so a mismatch is not a warning — the app dies at launch. 3.4.12.x shipped exactly that: a
+Java bridge built for 3.4.10 alongside a 3.4.12 native (`expected 3.4.10, got 3.4.12`), which is why
+this package sat on 3.4.10.5 for a year. **3.4.16 is consistent** and is what both halves pin now, in
+`src/SdlVulkan.Renderer/Directory.Packages.props`, TFM-conditional so desktop stays on the 3.5.0
+preview.
 
-**The shipped `libSDL3.so` is not 16 KB page-aligned.** Building any Android consumer raises
-`warning XA0141` for the `android-arm64` and `android-x64` natives. Android is moving to 16 KB memory
-pages, and a native library laid out for 4 KB pages will not load on a device configured that way —
-so this is a deadline, not cosmetic noise. It is also **not fixable downstream**: the `.so` arrives
-prebuilt inside `SDL3-CS.Android`, so clearing it needs an upstream rebuild with the 16 KB
-max-page-size link flag. See [Android's page-sizes guide](https://developer.android.com/guide/practices/page-sizes).
+**16 KB page alignment — fixed in 3.4.16, and a hard Google Play requirement.** Play refuses an
+upload whose 64-bit native libraries are laid out for 4 KB pages, because an Android 15+ device may
+use 16 KB ones. Up to 3.4.10.5 the shipped `libSDL3.so` was 4 KB aligned and raised `warning XA0141`
+in every consumer build; in a real app bundle it was the *only* misaligned library among ninety,
+because everything the .NET Android SDK emits is already aligned. 3.4.16 aligns the `arm64-v8a` and
+`x86_64` natives. (`armeabi-v7a` and `x86` still are not, which does not matter: 16 KB pages are a
+64-bit concern and a Release build publishes neither ABI.) See
+[Android's page-sizes guide](https://developer.android.com/guide/practices/page-sizes).
+
+**Checking a bump without a device.** Both properties above are readable straight out of the
+packages, which is worth doing first because only one of them can fail the build:
+
+- **Version coherence** — `javap -p -constants org/libsdl/app/SDLActivity.class`, taken from the
+  `.aar` inside `SDL3-CS.Android`, prints `SDL_MAJOR/MINOR/MICRO_VERSION`; the version string inside
+  `runtimes/android-arm64/native/libSDL3.so` gives the native side. 3.4.16 reads `3.4.16` against
+  `SDL-3.4.16-release-3.4.16`.
+- **Page size** — the `p_align` of the `PT_LOAD` segments in each `runtimes/android-*/native/libSDL3.so`
+  must be at least 16384 for the 64-bit ABIs.
+
+Neither replaces launching it. The version check fails at startup, on a device, and nowhere else.
 
 Consumers also need `dotnet workload install android`; the workload supplies the .NET bits but not
 the Android SDK, which `dotnet build -t:InstallAndroidDependencies -p:AcceptAndroidSDKLicenses=true`
@@ -427,8 +442,7 @@ no scRGB, no HDR10 via OpenGL on any platform.
 - **WebGPU .NET bindings** — if they mature, a future browser target becomes possible.
 - **Silk.NET 3.0** — if it ever ships with working Vulkan + a non-GLFW windowing path,
   the comparison may change.
-- **`SDL3-CS.Android` releases** — worth re-testing on each one, because a single bump could clear
-  *both* Android constraints above. The 16 KB page alignment needs an upstream rebuild, and the
-  Java/native mismatch that forces the 3.4.10.5 pin was last seen in early 3.4.12.x; 3.4.12.6 is
-  the current latest and is several patches past it, so it may already be consistent. Verify by
-  launching on a device — the mismatch fails SDL's version check at startup, not at build time.
+- **`SDL3-CS.Android` releases** — 3.4.16 cleared *both* Android constraints that had held the pin
+  at 3.4.10.5, so the thing to watch now is that a future bump does not reintroduce either. Run the
+  two package checks in the Android section above before taking one, and still launch it: the
+  version check fails at startup, not at build time.

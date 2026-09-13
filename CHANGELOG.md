@@ -6,6 +6,40 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+## 7.36
+
+**Android: `SDL3-CS` and `SDL3-CS.Android` move from 3.4.10.5 to 3.4.16**, clearing both constraints
+that had held that pin for a year. No renderer code changed and the desktop TFM is untouched — it
+stays on the 3.5.0 preview — so this reaches only Android consumers.
+
+**The page-size one is a Google Play blocker, not advice.** Play refuses an upload whose 64-bit
+native libraries are laid out for 4 KB pages, because an Android 15+ device may use 16 KB ones. Up to
+3.4.10.5 the shipped `libSDL3.so` was 4 KB aligned — `warning XA0141` in every consumer build, and in
+a real app bundle the *only* misaligned library among ninety, since everything the .NET Android SDK
+emits is already aligned. 3.4.16 aligns `arm64-v8a` and `x86_64`. `armeabi-v7a` and `x86` are still
+4 KB, which does not matter: 16 KB pages are a 64-bit concern and a Release build publishes neither.
+
+**The mismatch that forced 3.4.10.5 is gone too.** 3.4.12.x shipped a Java bridge built for 3.4.10
+against a 3.4.12 native, and SDL's own C/Java version check rejects that at launch. 3.4.16 reads Java
+3.4.16 against a native `SDL-3.4.16-release-3.4.16`.
+
+**What was verified, and what was not.** Both halves were read out of the packages (the `.aar`'s
+`SDLActivity` constants against the native's version string, and the `p_align` of every `PT_LOAD`
+segment), and the `net10.0-android` target compiles against 3.4.16 with no errors — which matters
+because a consumer runs a renderer built against one SDL3-CS managed assembly and loads another.
+**It has not been launched on a device.** A version mismatch fails SDL's startup check and nothing
+else, so that remains the one test this release cannot claim. README.md now carries both package
+checks so the next bump starts from evidence rather than from a guess.
+
+## 7.35
+
+Rebuilt against **DIR.Lib 8.20**, from 8.19. No renderer code changed; the declared floor moves so
+this repo's own CI exercises 8.20 rather than meeting it only through a consumer. 8.20 is additive
+(a `ListCursor` API nothing here uses), so 7.34 already bound against it correctly.
+
+*(Written after the fact: 7.35 was released without an entry here. The commit message carried the
+reasoning and this file did not, which is the gap the header above exists to prevent.)*
+
 ## 7.34
 
 Rebuilt against **DIR.Lib 8.19**, from 8.14. No renderer code changed; this exists so the backend is

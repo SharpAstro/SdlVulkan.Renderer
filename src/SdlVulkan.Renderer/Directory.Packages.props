@@ -17,18 +17,22 @@
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
 
     <!-- SDL3-CS.Android has no 3.5.0 preview, so the android TFM pins a coherent managed+native
-         pair; desktop stays on the 3.5.0 preview. NB: SDL3-CS.Android 3.4.12.x ships a MISMATCHED
-         pair (Java bridge 3.4.10 vs native 3.4.12) that fails SDL's runtime C/Java version check,
-         so pin 3.4.10.5 where both halves agree.
-         BEFORE BUMPING, read the Android section of README.md. Two open constraints ride on this
-         pin: (1) the mismatch above, which only shows at launch on a device, never at build time;
-         (2) the shipped libSDL3.so is NOT 16 KB page-aligned (warning XA0141 in every consumer),
-         which Android 16 rejects and which only an upstream rebuild can fix. A newer release could
-         clear both at once: 3.4.12.6 is the latest as of 2026-07-27 and is well past the 3.4.12.x
-         that broke, but it is unverified here. Test on a real device, not just CI. -->
+         pair; desktop stays on the 3.5.0 preview.
+
+         3.4.16 clears BOTH constraints that had held this pin at 3.4.10.5 for a year, and the
+         Android section of README.md carries the detail. Briefly: the arm64-v8a and x86_64 natives
+         are now 16 KB page aligned, which Google Play requires of every upload; and the Java and
+         native halves agree on their version, which 3.4.12.x did not (a 3.4.10 Java bridge against
+         a 3.4.12 native, which SDL's own startup check rejects).
+
+         BEFORE BUMPING: both properties are readable from the package, so this need not be
+         guesswork. `javap -p -constants org/libsdl/app/SDLActivity.class` out of the .aar gives the
+         Java version; the version string inside runtimes/android-arm64/native/libSDL3.so gives the
+         native one; the p_align of that library's PT_LOAD segments gives the page size. Then still
+         launch it on a device, because a mismatch fails at startup and never at build time. -->
     <PackageVersion Include="SDL3-CS" Version="3.5.0-preview.20260213-150035" Condition="'$(TargetFramework)' != 'net10.0-android'" />
-    <PackageVersion Include="SDL3-CS" Version="3.4.10.5" Condition="'$(TargetFramework)' == 'net10.0-android'" />
-    <PackageVersion Include="SDL3-CS.Android" Version="3.4.10.5" />
+    <PackageVersion Include="SDL3-CS" Version="3.4.16" Condition="'$(TargetFramework)' == 'net10.0-android'" />
+    <PackageVersion Include="SDL3-CS.Android" Version="3.4.16" />
     <PackageVersion Include="Vortice.Vulkan" Version="3.2.3" />
     <!-- Vortice.ShaderCompiler (runtime GLSL->SPIR-V) is no longer referenced by the shipped package:
          shaders are pre-baked to SPIR-V by tools/BakeShaders (which pins its own version inline, outside
