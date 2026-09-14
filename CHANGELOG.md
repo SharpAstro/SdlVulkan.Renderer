@@ -6,6 +6,20 @@ The version NUMBER is not here: it lives in `src/Directory.Build.props` (`Versio
 build job reads that property back rather than restating it, so a package can never declare a version
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
+
+## 7.37
+
+Rebuilt against **DIR.Lib 9.0** (from 8.20). Also carries a `.gitattributes` that checks text files out as LF, which is a working-tree change only — the blobs were already stored that way.
+
+**No code change here, and none was needed.** DIR.Lib 9.0's break is in the pre-layout scale's
+currency: `ListScrollController.SetExtent`, `TapOrDragGesture.Arm`, `FloatingPalette`'s offsets and
+the layout helpers' `dpiScale:` argument now take a `DesignScale` — surface units per design unit, per
+axis — instead of a bare float. This backend calls none of them, which was checked rather than
+assumed.
+
+It is released anyway, and that is the point of a lockstep: a consumer holding two backends that pin
+different DIR.Lib majors does not get a choice about which one wins, it gets whichever NuGet unifies
+to. 9.0 is the first DIR.Lib major where that would be a break rather than a surprise.
 ## 7.36
 
 **Android: `SDL3-CS` and `SDL3-CS.Android` move from 3.4.10.5 to 3.4.16**, clearing both constraints
