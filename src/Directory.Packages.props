@@ -2,8 +2,6 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
 
-    <!-- Allow floating versions (e.g. "8.3.*") so the DIR.Lib pin auto-picks up new CI publishes
-         without a manual bump here. -->
     <CentralPackageFloatingVersionsEnabled>true</CentralPackageFloatingVersionsEnabled>
   </PropertyGroup>
 
@@ -12,49 +10,21 @@
 
     <PackageVersion Include="SharpAstro.AppShell" Version="1.1.*" />
 
-    <!-- Interface-only (no implementation assemblies): the renderer logs its unconditional
-         diagnostics through an injectable ILogger (SdlVulkanLog) with a stderr fallback. -->
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
 
-    <!-- SDL3-CS.Android has no 3.5.0 preview, so the android TFM pins a coherent managed+native
-         pair; desktop stays on the 3.5.0 preview.
-
-         3.4.16 clears BOTH constraints that had held this pin at 3.4.10.5 for a year, and the
-         Android section of README.md carries the detail. Briefly: the arm64-v8a and x86_64 natives
-         are now 16 KB page aligned, which Google Play requires of every upload; and the Java and
-         native halves agree on their version, which 3.4.12.x did not (a 3.4.10 Java bridge against
-         a 3.4.12 native, which SDL's own startup check rejects).
-
-         BEFORE BUMPING: both properties are readable from the package, so this need not be
-         guesswork. `javap -p -constants org/libsdl/app/SDLActivity.class` out of the .aar gives the
-         Java version; the version string inside runtimes/android-arm64/native/libSDL3.so gives the
-         native one; the p_align of that library's PT_LOAD segments gives the page size. Then still
-         launch it on a device, because a mismatch fails at startup and never at build time. -->
     <PackageVersion Include="SDL3-CS" Version="3.5.0-preview.20260213-150035" Condition="'$(TargetFramework)' != 'net10.0-android'" />
     <PackageVersion Include="SDL3-CS" Version="3.4.16" Condition="'$(TargetFramework)' == 'net10.0-android'" />
     <PackageVersion Include="SDL3-CS.Android" Version="3.4.16" />
     <PackageVersion Include="Vortice.Vulkan" Version="3.2.3" />
 
-    <!-- The other four projects under src/, which joined this file on 2026-09-14 when it moved up
-         from src/SdlVulkan.Renderer/ to src/. Each had opted out of central management and pinned
-         inline, and each said in a comment that it did so because it sat outside this file's
-         subtree. That was true, and it was the file's placement that made it true: one level too
-         deep to cover its own repo. Moving it up removes the reason rather than the symptom.
-
-         The Tests' Vortice.Vulkan pin above is the case that proves it. In its own words, the
-         inline copy had to be "bumped in step with the lib, or restore fails the build outright on
-         NU1605". There is now one pin, so there is nothing to keep in step. -->
     <PackageVersion Include="coverlet.collector" Version="8.0.1" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
-    <PackageVersion Include="SharpAstro.Png" Version="3.8.*" />
+    <PackageVersion Include="SharpAstro.Png" Version="3.14.*" />
     <PackageVersion Include="Shouldly" Version="4.3.0" />
     <PackageVersion Include="WebView2Aot" Version="1.4.1" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
     <PackageVersion Include="xunit.v3" Version="3.2.2" />
-    <!-- Vortice.ShaderCompiler (runtime GLSL->SPIR-V) is no longer referenced by the shipped package:
-         shaders are pre-baked to SPIR-V by tools/BakeShaders (which pins its own version inline, outside
-         this CPM scope). Kept out of runtime so the package has no shaderc native (no Android RID). -->
   </ItemGroup>
 </Project>
