@@ -34,6 +34,25 @@
     <PackageVersion Include="SDL3-CS" Version="3.4.16" Condition="'$(TargetFramework)' == 'net10.0-android'" />
     <PackageVersion Include="SDL3-CS.Android" Version="3.4.16" />
     <PackageVersion Include="Vortice.Vulkan" Version="3.2.3" />
+
+    <!-- The other four projects under src/, which joined this file on 2026-09-14 when it moved up
+         from src/SdlVulkan.Renderer/ to src/. Each had opted out of central management and pinned
+         inline, and each said in a comment that it did so because it sat outside this file's
+         subtree. That was true, and it was the file's placement that made it true: one level too
+         deep to cover its own repo. Moving it up removes the reason rather than the symptom.
+
+         The Tests' Vortice.Vulkan pin above is the case that proves it. In its own words, the
+         inline copy had to be "bumped in step with the lib, or restore fails the build outright on
+         NU1605". There is now one pin, so there is nothing to keep in step. -->
+    <PackageVersion Include="coverlet.collector" Version="8.0.1" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
+    <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageVersion Include="SharpAstro.Png" Version="3.8.*" />
+    <PackageVersion Include="Shouldly" Version="4.3.0" />
+    <PackageVersion Include="WebView2Aot" Version="1.4.1" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
     <!-- Vortice.ShaderCompiler (runtime GLSL->SPIR-V) is no longer referenced by the shipped package:
          shaders are pre-baked to SPIR-V by tools/BakeShaders (which pins its own version inline, outside
          this CPM scope). Kept out of runtime so the package has no shaderc native (no Android RID). -->

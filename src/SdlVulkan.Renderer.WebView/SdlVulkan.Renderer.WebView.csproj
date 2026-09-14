@@ -25,7 +25,6 @@
     <!-- This project sits outside the core's Directory.Packages.props directory,
          so it does not inherit central versions (same situation the Tests project
          documents). Pin package versions inline here. -->
-    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
   </PropertyGroup>
 
   <ItemGroup>
@@ -44,7 +43,7 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
-    <PackageReference Include="WebView2Aot" Version="1.4.1" />
+    <PackageReference Include="WebView2Aot" />
     <!-- Native loader package; ProjectReference emits the package dependency on pack. -->
     <ProjectReference Include="..\SdlVulkan.Renderer.WebView.Native\SdlVulkan.Renderer.WebView.Native.csproj" />
   </ItemGroup>

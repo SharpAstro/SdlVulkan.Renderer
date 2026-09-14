@@ -20,6 +20,12 @@ assumed.
 It is released anyway, and that is the point of a lockstep: a consumer holding two backends that pin
 different DIR.Lib majors does not get a choice about which one wins, it gets whichever NuGet unifies
 to. 9.0 is the first DIR.Lib major where that would be a break rather than a surprise.
+*Later in 7.37:* `Directory.Packages.props` moved from `src/SdlVulkan.Renderer/` up to `src/`, so it
+covers the whole repo rather than one project of five. The other four had each opted out of central
+management because they sat outside its subtree — which was the file's placement, not their nature.
+Ten inline pins folded in at their existing versions, so consumers see nothing; the Tests' Vortice
+.Vulkan pin no longer has to be kept in step with the library's by hand.
+
 ## 7.36
 
 **Android: `SDL3-CS` and `SDL3-CS.Android` move from 3.4.10.5 to 3.4.16**, clearing both constraints

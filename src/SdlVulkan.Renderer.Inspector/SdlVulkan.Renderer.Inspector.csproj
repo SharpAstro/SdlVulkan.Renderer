@@ -18,7 +18,6 @@
 
     <!-- This project lives outside the framework's Directory.Packages.props subtree, so it pins
          its own versions rather than using central package management. -->
-    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
 
     <!-- NuGet MCP-server packaging (consumed via `dnx`). Packed on build so the repo's CI
          (dotnet build -c Release, then push of all *.nupkg) publishes it like the framework. -->
@@ -36,9 +35,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
-    <PackageReference Include="SharpAstro.Png" Version="3.8.*" />
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="SharpAstro.Png" />
   </ItemGroup>
 
   <ItemGroup>

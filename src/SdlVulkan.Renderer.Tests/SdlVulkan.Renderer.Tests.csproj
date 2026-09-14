@@ -12,18 +12,17 @@
          but the test project sits outside that file's directory and would not inherit it.
          Disable central management here so we can pin test-framework versions inline without
          duplicating the lib's package list. -->
-    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
-    <PackageReference Include="Shouldly" Version="4.3.0" />
-    <PackageReference Include="xunit.v3" Version="3.2.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Shouldly" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="coverlet.collector" Version="8.0.1">
+    <PackageReference Include="coverlet.collector">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
@@ -32,7 +31,7 @@
          outside src/SdlVulkan.Renderer/, so it is out of that Directory.Packages.props' scope and
          states the version inline — it has to be bumped in step with the lib, or restore fails the
          build outright on NU1605 (a downgrade from the lib's transitive). -->
-    <PackageReference Include="Vortice.Vulkan" Version="3.2.3" />
+    <PackageReference Include="Vortice.Vulkan" />
   </ItemGroup>
 
   <ItemGroup>
