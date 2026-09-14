@@ -80,12 +80,7 @@ public sealed class InspectorTools
         var payload = Convert.FromBase64String(result.GetProperty("base64").GetString() ?? "");
         var rgba = format == "rgba+gzip" ? Gunzip(payload) : payload;
         var png = PngWriter.Encode(rgba, width, height);
-        // ImageContentBlock.Data holds the base64-encoded UTF-8 bytes that go on the wire verbatim
-        // as the `data` string (DecodedData, the raw-bytes view, is get-only). So encode the PNG to
-        // base64 text ourselves and store its UTF-8 bytes; assigning raw PNG bytes here makes the SDK
-        // emit them as the `data` string directly, which fails the client's base64 validation.
-        var base64 = Convert.ToBase64String(png);
-        return new ImageContentBlock { Data = Encoding.UTF8.GetBytes(base64), MimeType = "image/png" };
+        return ImageContentBlock.FromBytes(png, "image/png");
     }
 
     [McpServerTool, Description("Synthesize a left mouse click at pixel coordinates (routes through the same input path as a real SDL click). Pass mods to hold a keyboard modifier during the click, e.g. Ctrl for a Ctrl+click, and clicks:2 for a double click.")]
