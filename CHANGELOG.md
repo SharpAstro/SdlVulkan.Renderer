@@ -7,6 +7,17 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.38
+
+Rebuilt against **DIR.Lib 9.2** (from 9.0), the wave that gave the engine an `InputRouter`, a slider and
+a popover as declarations. No source change was needed here and nothing in this library moved.
+
+That is worth a sentence rather than silence, because 9.2 does add five members to `IPixelWidget`, which
+breaks an implementer that does not derive from `PixelWidgetBase`. This library has none: its windows and
+surfaces sit beside the widget tree rather than implementing it, so the additions are invisible from here.
+The rebuild is what makes the new `InputEvent` shapes bind, and it is mandatory for that reason rather
+than for any change in this package.
+
 ## 7.37
 
 Rebuilt against **DIR.Lib 9.0** (from 8.20). Also carries a `.gitattributes` that checks text files out as LF, which is a working-tree change only — the blobs were already stored that way.
