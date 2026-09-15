@@ -371,7 +371,7 @@ natives; Android works but needs manual lib bundling.
 | Platform | Vulkan | SDL3 native | AOT | HDR |
 |----------|--------|-------------|-----|-----|
 | Windows x64 | Native | NuGet | Yes | Yes (Vulkan HDR swapchain) |
-| Windows ARM64 | Native | NuGet | Yes | Yes |
+| Windows ARM64 | Native | NuGet | Yes | Driver-gated: Qualcomm Adreno X1-85 driver 0.855 offers no `VK_EXT_swapchain_colorspace` (probed 2026-09-15 with `tools/HdrProbe`, Windows HDR on) |
 | Linux x64 | Native (Mesa/NVIDIA) | NuGet | Yes | Possible (Wayland + Vulkan) |
 | Linux ARM64 | Native (Mesa) | NuGet | Yes | Limited |
 | macOS x64 | MoltenVK | NuGet | Yes | MoltenVK limitations |
@@ -383,6 +383,13 @@ SDL3 HDR support: `SDL.window.HDR_enabled`, `SDL.window.SDR_white_level`,
 `SDL.window.HDR_headroom` display properties, plus PQ (ST 2084) and HLG transfer
 characteristics. Combined with Vulkan `VK_COLOR_SPACE_HDR10_ST2084_EXT` swapchain,
 full HDR output is achievable.
+
+Whether it is achievable on a GIVEN machine is a fact about that machine's Vulkan driver, and
+`tools/HdrProbe` states it (`dotnet run` in that folder): the loader's instance extensions,
+SDL3's HDR properties per display and per window, and every surface format and colour space each
+physical device offers on a surface created on each display. Exit code 0 when some display can take
+an HDR swapchain, 2 when none can. The library itself still creates every swapchain as
+`SRGB_NONLINEAR`; the probe is the first step of changing that, not the change.
 
 SDL3 Vulkan surface creation: `SDL.VulkanLoadLibrary()` auto-finds MoltenVK on macOS;
 `SDL.VulkanCreateSurface()` returns a `VkSurfaceKHR` that pairs directly with

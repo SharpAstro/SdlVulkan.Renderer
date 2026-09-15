@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Answers ONE question, per connected display: can this machine present HDR through SDL3 + Vulkan?
+    NOT part of the solution / package build. Run it directly:
+      dotnet run
+    It opens a small borderless window on each display in turn, reads SDL3's HDR properties for the
+    display and the window, creates a Vulkan surface there, and lists every surface format and colour
+    space each physical device offers, with VK_EXT_swapchain_colorspace enabled when the loader has it
+    (without that extension a driver reports SRGB_NONLINEAR only, however capable the panel is).
+    Exit code 0 when at least one display can take an HDR swapchain, 2 when none can, 1 on an error.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- SDL3.dll for window and surface creation. Native asset resolved at run time via deps.json. -->
+    <PackageReference Include="SDL3-CS.Native" Version="3.5.0-preview.20260205-174353" />
+  </ItemGroup>
+
+</Project>
