@@ -20,7 +20,7 @@ The solution is centered on `SdlVulkan.Renderer`, a .NET 10 library providing a 
 - `SdlVulkan.Renderer.WebView` / `SdlVulkan.Renderer.WebView.Native` — optional native-webview-in-window packages (WebView2 on Windows, WebKitGTK on Linux). Shipped separately so core consumers pull no webview dependency. See README "Native WebView".
 - `SdlVulkan.Renderer.Inspector` — a debug-inspector tool/client (pairs with `DebugInspector` in the core lib).
 - `tools/WebViewSmoke` — headless self-test exercised by CI.
-- `tools/HdrProbe` — run by hand: can this machine present HDR through SDL3 + Vulkan, per display? Exit 0 yes, 2 no (README, "Why Vulkan").
+- `tools/HdrProbe` — run by hand: can this machine present HDR through SDL3 + Vulkan, per display? Exit 0 yes, 2 no; `-- --show` puts scRGB patches on the capable panel, and only the panel can judge them (a screenshot clips at 1.0) (README, "Why Vulkan").
 
 The core library, `WebView`, and `WebView.Native` are published as NuGet packages (`GeneratePackageOnBuild`). CI/CD (`.github/workflows/dotnet.yml`) builds on push/PR to main, runs the offscreen test matrix (`ubuntu-latest` + `ubuntu-24.04-arm` with Mesa lavapipe) and a non-gating Linux WebView smoke job under Xvfb, and publishes to nuget.org on main push.
 

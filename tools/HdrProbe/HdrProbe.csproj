@@ -9,6 +9,10 @@
     space each physical device offers, with VK_EXT_swapchain_colorspace enabled when the loader has it
     (without that extension a driver reports SRGB_NONLINEAR only, however capable the panel is).
     Exit code 0 when at least one display can take an HDR swapchain, 2 when none can, 1 on an error.
+    With the "show" switch (dotnet run, two dashes, then the switch, itself two dashes and the word
+    show; XML forbids spelling it out here) it also opens a window on the first capable display and
+    presents scRGB patches above SDR white through a real swapchain, for a person to look at. Judge
+    them on the panel; a screenshot clips them at 1.0 (see HdrShow.cs).
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
