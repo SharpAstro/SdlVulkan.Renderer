@@ -201,7 +201,12 @@ public sealed unsafe class VulkanDevice : IDisposable
             pQueuePriorities = &queuePriority
         };
 
-        using var extensionNames = new VkStringArray([VK_KHR_SWAPCHAIN_EXTENSION_NAME]);
+        var wantsBudget = SupportsMemoryBudget(instanceApi, physicalDevice);
+        // Spelled out rather than built from VK_KHR_SWAPCHAIN_EXTENSION_NAME: that constant is a
+        // UTF-8 span, and a mixed array of it and a string has no common element type.
+        using var extensionNames = new VkStringArray(wantsBudget
+            ? new[] { SwapchainExtensionName, MemoryBudgetExtensionName }
+            : new[] { SwapchainExtensionName });
         VkDeviceCreateInfo deviceCI = new()
         {
             queueCreateInfoCount = 1,
@@ -223,8 +228,10 @@ public sealed unsafe class VulkanDevice : IDisposable
         var renderPass = CreateCompatibleRenderPass(deviceApi, colorFormat, depthFormat, msaaSamples,
             VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.PresentSrcKHR);
 
-        return CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
+        var created = CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, renderPass, colorFormat, depthFormat, msaaSamples, ownsInstance);
+        created.MemoryBudgetAvailable = wantsBudget;
+        return created;
     }
 
     /// <summary>
@@ -250,12 +257,14 @@ public sealed unsafe class VulkanDevice : IDisposable
         // device. Important for headless environments (Linux CI with Mesa lavapipe / llvmpipe
         // software rasterizer, containers without a display server) where the instance has no
         // surface extensions enabled.
+        var wantsBudget = SupportsMemoryBudget(instanceApi, physicalDevice);
+        using var extensionNames = new VkStringArray(new[] { MemoryBudgetExtensionName });
         VkDeviceCreateInfo deviceCI = new()
         {
             queueCreateInfoCount = 1,
             pQueueCreateInfos = &queueCI,
-            enabledExtensionCount = 0,
-            ppEnabledExtensionNames = null,
+            enabledExtensionCount = wantsBudget ? extensionNames.Length : 0,
+            ppEnabledExtensionNames = wantsBudget ? extensionNames : null,
         };
         instanceApi.vkCreateDevice(physicalDevice, &deviceCI, null, out var device).CheckResult();
         var deviceApi = GetApi(instance, device);
@@ -270,6 +279,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         var dev = CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, renderPass, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples, ownsInstance);
         dev.MarkQueuePrivate();
+        dev.MemoryBudgetAvailable = wantsBudget;
         return dev;
     }
 
@@ -602,6 +612,86 @@ public sealed unsafe class VulkanDevice : IDisposable
     // round-tripping into the ICD on every buffer/image allocation.
     private VkPhysicalDeviceMemoryProperties _memProperties;
     private bool _memPropertiesCached;
+
+    private const string SwapchainExtensionName = "VK_KHR_swapchain";
+    private const string MemoryBudgetExtensionName = "VK_EXT_memory_budget";
+
+    /// <summary>
+    /// Whether this device was created with <c>VK_EXT_memory_budget</c>, and so whether
+    /// <see cref="TryGetDeviceMemoryBudget"/> can answer.
+    /// </summary>
+    public bool MemoryBudgetAvailable { get; private set; }
+
+    /// <summary>
+    /// What the driver says is available to THIS process on the device-local heaps right now, and how
+    /// much of it this process is already using. Both in bytes; false when the extension is absent.
+    /// </summary>
+    /// <remarks>
+    /// <para>This is the question <see cref="VkPhysicalDeviceMemoryProperties"/> cannot answer, and
+    /// the difference matters most on exactly the hardware where it is easiest to miss. A heap's
+    /// <c>size</c> is its CAPACITY — on an integrated GPU whose memory IS system memory, that is all
+    /// of RAM, so a budget built on it reads "plenty" at the precise moment the machine has started
+    /// paging. <c>heapBudget</c> is the driver's own estimate of what this process may use given
+    /// everything else on the system, and it moves as other applications come and go.</para>
+    /// <para>Reported from ONE device-local heap: the one this process is using most, or the largest
+    /// before anything is allocated. Two tempting alternatives are both wrong. Summing overcounts on a
+    /// unified-memory device, where heaps can be views on the same physical RAM -- this Adreno reports
+    /// a 7,989 MB heap and a 4,095 MB one, which together claim more than the machine has. Taking the
+    /// least headroom sounds safer and is worse: measured here it selects the 4,095 MB heap that
+    /// nothing allocates from, whose headroom therefore never moves, so the number would sit still
+    /// while the heap we really use filled up. Non-device-local heaps are skipped, because a discrete
+    /// GPU's host-visible upload heap is system RAM and not what a caller sizing GPU residency
+    /// means.</para>
+    /// </remarks>
+    public bool TryGetDeviceMemoryBudget(out long budgetBytes, out long usageBytes)
+    {
+        budgetBytes = 0;
+        usageBytes = 0;
+        if (!MemoryBudgetAvailable) return false;
+
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = new();
+        VkPhysicalDeviceMemoryProperties2 props2 = new() { pNext = &budget };
+        InstanceApi.vkGetPhysicalDeviceMemoryProperties2(PhysicalDevice, &props2);
+
+        for (var i = 0; i < props2.memoryProperties.memoryHeapCount; i++)
+        {
+            if ((props2.memoryProperties.memoryHeaps[i].flags & VkMemoryHeapFlags.DeviceLocal) == 0)
+                continue;
+            var heapBudget = (long)budget.heapBudget[i];
+            var heapUsage = (long)budget.heapUsage[i];
+            if (heapBudget <= 0) continue;
+            // Prefer the heap this process is actually using; fall back to the largest budget before
+            // anything has been allocated. See the remarks for why not a sum and not least-headroom.
+            var better = usageBytes == 0 && heapUsage == 0
+                ? heapBudget > budgetBytes
+                : heapUsage > usageBytes;
+            if (!better) continue;
+            budgetBytes = heapBudget;
+            usageBytes = heapUsage;
+        }
+        return budgetBytes > 0;
+    }
+
+    /// <summary>Whether the physical device offers <c>VK_EXT_memory_budget</c>. Asked before device
+    /// creation, because chaining the budget struct onto a device that did not enable the extension
+    /// is undefined rather than merely unanswered.</summary>
+    private static bool SupportsMemoryBudget(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice)
+    {
+        uint count = 0;
+        if (instanceApi.vkEnumerateDeviceExtensionProperties(physicalDevice, (byte*)null, &count, null)
+                != VkResult.Success || count == 0)
+            return false;
+
+        var props = stackalloc VkExtensionProperties[(int)count];
+        if (instanceApi.vkEnumerateDeviceExtensionProperties(physicalDevice, (byte*)null, &count, props)
+                != VkResult.Success)
+            return false;
+
+        for (var i = 0; i < count; i++)
+            if (new string((sbyte*)props[i].extensionName) == MemoryBudgetExtensionName)
+                return true;
+        return false;
+    }
 
     public uint FindMemoryType(uint typeFilter, VkMemoryPropertyFlags properties)
         => TryFindMemoryType(typeFilter, properties, out var index)

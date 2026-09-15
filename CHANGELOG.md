@@ -7,6 +7,39 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.39
+
+**The instance was Vulkan 1.0, so every chained physical-device query was quietly returning
+nothing.** `VkInstanceCreateInfo` carried no `pApplicationInfo`, and by spec that means an instance at
+API version 1.0. The failure mode is the bad kind: a core-1.1 `*2` query such as
+`vkGetPhysicalDeviceProperties2` still answers — through the 1.0 entry point — filling the base struct
+and ignoring the `pNext` chain entirely. So every chained struct read back zeroed, which is
+indistinguishable from a driver that does not implement the feature. On this Adreno,
+`VkPhysicalDeviceDriverProperties` reported an empty driver name and a driver ID of 0; both are real
+once the instance asks for 1.1.
+
+The instance now requests the version the loader supports, capped at 1.1 — which is where the `*2`
+queries became core, and asking for more would only refuse to create an instance on an older loader.
+`vkEnumerateInstanceVersion` is itself a 1.1 function, so a loader that does not export it *is* 1.0 and
+is treated as such.
+
+**`VK_EXT_memory_budget` is now requested when the device offers it**, and `VulkanDevice` exposes
+`TryGetDeviceMemoryBudget` beside `MemoryBudgetAvailable`. This answers a question
+`VkPhysicalDeviceMemoryProperties` cannot: a heap's `size` is its CAPACITY, and where the GPU's memory
+IS system memory that capacity is all of RAM — so a residency budget built on it reads "plenty" at
+the exact moment the machine has begun paging, which is when a budget was supposed to intervene.
+`heapBudget` is the driver's own estimate of what this process may use given everything else running,
+and it moves as other applications come and go.
+
+The figure comes from ONE device-local heap: the one this process is using most, or the largest before
+anything is allocated. Two tempting alternatives are both wrong, and were measured rather than
+reasoned about. Summing overcounts on a unified-memory device, where heaps can be views on the same
+physical RAM — this Adreno reports a 7,989 MB heap and a 4,095 MB one, which together claim more than
+the machine has. Taking the least headroom sounds safer and is worse: it selects the 4,095 MB heap
+that nothing allocates from, whose headroom therefore never moves, so the number would sit still while
+the heap actually in use filled up.
+
+
 ## 7.38
 
 Rebuilt against **DIR.Lib 9.2** (from 9.0), the wave that gave the engine an `InputRouter`, a slider and
