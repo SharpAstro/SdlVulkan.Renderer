@@ -8,10 +8,9 @@
     <!-- BlendOpRegressionTests construct VkInstance + push constants via Vortice.Vulkan, which
          needs unsafe pointer handling. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- The lib's csproj uses central package versions via its own Directory.Packages.props,
-         but the test project sits outside that file's directory and would not inherit it.
-         Disable central management here so we can pin test-framework versions inline without
-         duplicating the lib's package list. -->
+    <!-- Package versions come from src/Directory.Packages.props, which covers this project because it
+         sits at src/ rather than beside the library. While it lived at src/SdlVulkan.Renderer/ this
+         project was outside its scope and had to opt out of central management and pin inline. -->
   </PropertyGroup>
 
   <ItemGroup>
@@ -27,10 +26,10 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <!-- Vortice.Vulkan is a transitive of the renderer ProjectReference but we use its types
-         (VkInstance, VkBlendOp etc.) directly in the test, so pin it explicitly. This project sits
-         outside src/SdlVulkan.Renderer/, so it is out of that Directory.Packages.props' scope and
-         states the version inline — it has to be bumped in step with the lib, or restore fails the
-         build outright on NU1605 (a downgrade from the lib's transitive). -->
+         (VkInstance, VkBlendOp etc.) directly in the test, so reference it explicitly. One version for
+         both, from src/Directory.Packages.props — which is the point of that file covering the whole
+         src/ tree. Two versions is what fails restore outright on NU1605, a downgrade from the lib's
+         transitive. -->
     <PackageReference Include="Vortice.Vulkan" />
   </ItemGroup>
 

@@ -22,9 +22,9 @@
     <RepositoryType>git</RepositoryType>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <DebugType>embedded</DebugType>
-    <!-- This project sits outside the core's Directory.Packages.props directory,
-         so it does not inherit central versions (same situation the Tests project
-         documents). Pin package versions inline here. -->
+    <!-- Package versions come from src/Directory.Packages.props, which covers this project because it
+         sits at src/ rather than beside the core (same situation the Tests project documents). While it
+         lived beside the core this project was outside its directory and pinned versions inline. -->
   </PropertyGroup>
 
   <ItemGroup>

@@ -16,8 +16,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
 
-    <!-- This project lives outside the framework's Directory.Packages.props subtree, so it pins
-         its own versions rather than using central package management. -->
+    <!-- Package versions come from src/Directory.Packages.props, which covers this project because it
+         sits at src/ rather than beside the library. It used to live beside the library, which put this
+         project outside its subtree and made it pin its own versions. -->
 
     <!-- NuGet MCP-server packaging (consumed via `dnx`). Packed on build so the repo's CI
          (dotnet build -c Release, then push of all *.nupkg) publishes it like the framework. -->
