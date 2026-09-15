@@ -16,8 +16,13 @@ namespace HdrProbe;
 /// <list type="number">
 /// <item>The Vulkan LOADER has to offer <c>VK_EXT_swapchain_colorspace</c> as an instance extension.
 /// Without it a driver reports <c>SRGB_NONLINEAR</c> for every format, whatever the panel can do, and
-/// nothing else can even be asked for. (Measured 2026-09-15: Qualcomm Adreno X1-85, driver 0.855,
-/// Windows HDR ON for the Surface OLED, thirteen instance extensions, not this one.)</item>
+/// nothing else can even be asked for. Measured 2026-09-15 on one Surface Pro 11 (Adreno X1-85),
+/// Windows HDR ON for its OLED, twice in one afternoon: the OEM-channel driver 31.0.137.0 listed
+/// thirteen instance extensions and not this one, every surface SRGB_NONLINEAR only, exit 2; the
+/// Qualcomm Software Center driver 31.0.170.0 (their "2026.08.2") listed fourteen including it,
+/// reported Vulkan 1.4, and the same surface gained <c>R16G16B16A16_SFLOAT</c> in
+/// <c>EXTENDED_SRGB_LINEAR_EXT</c>, exit 0. Same panel, same Windows, one driver apart, which is the
+/// whole reason this is a tool and not a table.</item>
 /// <item>SDL3 has to see HDR on the DISPLAY the window is on (<c>SDL_PROP_DISPLAY_HDR_ENABLED</c>) and
 /// on the WINDOW (<c>HDR_ENABLED</c>, <c>SDR_WHITE_LEVEL</c>, <c>HDR_HEADROOM</c>). That is the
 /// compositor's view, independent of Vulkan; on a two-display box it differs per display.</item>
