@@ -371,7 +371,7 @@ natives; Android works but needs manual lib bundling.
 | Platform | Vulkan | SDL3 native | AOT | HDR |
 |----------|--------|-------------|-----|-----|
 | Windows x64 | Native | NuGet | Yes | Yes (Vulkan HDR swapchain) |
-| Windows ARM64 | Native | NuGet | Yes | Driver-gated: Qualcomm Adreno X1-85 driver 0.855 offers no `VK_EXT_swapchain_colorspace` (probed 2026-09-15 with `tools/HdrProbe`, Windows HDR on) |
+| Windows ARM64 | Native | NuGet | Yes | Yes from Qualcomm Adreno driver 31.0.170.0 (scRGB: `R16G16B16A16_SFLOAT` + `EXTENDED_SRGB_LINEAR_EXT`); the OEM-channel 31.0.137.0 offered no `VK_EXT_swapchain_colorspace` at all. Both probed 2026-09-15 with `tools/HdrProbe` on a Surface Pro 11 |
 | Linux x64 | Native (Mesa/NVIDIA) | NuGet | Yes | Possible (Wayland + Vulkan) |
 | Linux ARM64 | Native (Mesa) | NuGet | Yes | Limited |
 | macOS x64 | MoltenVK | NuGet | Yes | MoltenVK limitations |
