@@ -26,6 +26,14 @@ management because they sat outside its subtree — which was the file's placeme
 Ten inline pins folded in at their existing versions, so consumers see nothing; the Tests' Vortice
 .Vulkan pin no longer has to be kept in step with the library's by hand.
 
+*Later in 7.37:* republished so the **DIR.Lib floor this package declares** moves onto the 9.0 build
+that takes `SharpAstro.Fonts` 1.12.901, and with it `SharpAstro.Png` 3.14. Nothing here changed: the
+pin is `9.0.*` and floats onto it by itself. The publish is the whole of it. A package declares the
+floor its own pack resolved, and NuGet hands a consumer exactly that floor for a transitive
+dependency, never the newest — so anyone reaching Png only through this backend was restoring a
+decoder six published families behind the Codecs repo, and would have kept restoring it however often
+Fonts.Lib or DIR.Lib republished.
+
 ## 7.36
 
 **Android: `SDL3-CS` and `SDL3-CS.Android` move from 3.4.10.5 to 3.4.16**, clearing both constraints
