@@ -43,7 +43,11 @@ public sealed unsafe class OffscreenGpuFixture : IDisposable
         try
         {
             vkInitialize().CheckResult();
-            VkInstanceCreateInfo ici = new();
+            // Same instance version the window path asks for. Without it the instance is Vulkan 1.0
+            // and every core-1.1 physical-device query silently drops its pNext chain, which would
+            // make these tests disagree with the renderer they are testing.
+            VkApplicationInfo appInfo = new() { apiVersion = SdlVulkanWindow.InstanceApiVersion() };
+            VkInstanceCreateInfo ici = new() { pApplicationInfo = &appInfo };
             vkCreateInstance(&ici, null, out var instance).CheckResult();
             // CreateOffscreen's device is created with ownsInstance: true, so disposing the context
             // tears down the device AND the instance -- one instance/device lifecycle for the run.
