@@ -361,6 +361,30 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
             Quit();
     }
 
+    /// <summary>
+    /// The instance API version to request: what the loader supports, capped at 1.1.
+    ///
+    /// <para>1.1 is where the <c>*2</c> physical-device queries and the pNext chains they carry became
+    /// core, which is all this renderer needs from a version bump; asking for more would refuse to
+    /// create an instance on an older loader for no gain. <c>vkEnumerateInstanceVersion</c> is itself a
+    /// 1.1 function, so a loader that does not export it IS 1.0 and gets 1.0.</para>
+    /// </summary>
+    internal static VkVersion InstanceApiVersion()
+    {
+        uint raw = 0;
+        try
+        {
+            if (vkEnumerateInstanceVersion(&raw) != VkResult.Success) return VkVersion.Version_1_0;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            // A strictly 1.0 loader does not export it. 1.0 it is.
+            return VkVersion.Version_1_0;
+        }
+        var supported = new VkVersion(raw);
+        return supported >= VkVersion.Version_1_1 ? VkVersion.Version_1_1 : VkVersion.Version_1_0;
+    }
+
     private static VkInstance CreateVulkanInstance()
     {
         var sdlExtensionNames = VulkanGetInstanceExtensions(out _)
@@ -377,8 +401,17 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
             : new VkStringArray(sdlExtensionNames);
         using var validationLayers = useValidation ? new VkStringArray([VulkanValidation.LayerName]) : default;
 
+        // Ask for the highest instance version the loader offers, capped at what this renderer needs.
+        // With no pApplicationInfo at all the instance is Vulkan 1.0 BY SPEC, and the failure mode of
+        // that is quiet rather than loud: a core-1.1 physical-device query like
+        // vkGetPhysicalDeviceProperties2 still fills the base struct -- through the 1.0 entry point --
+        // and simply ignores the pNext chain, so every chained struct reads back zeroed and looks like
+        // a driver that does not implement the feature. VK_EXT_memory_budget is the case that found
+        // this: the extension is advertised, the device enables it, and the budget came back 0 MB.
+        VkApplicationInfo appInfo = new() { apiVersion = InstanceApiVersion() };
         VkInstanceCreateInfo instanceCI = new()
         {
+            pApplicationInfo = &appInfo,
             enabledExtensionCount = extensionArray.Length,
             ppEnabledExtensionNames = extensionArray
         };
