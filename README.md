@@ -388,8 +388,14 @@ Whether it is achievable on a GIVEN machine is a fact about that machine's Vulka
 `tools/HdrProbe` states it (`dotnet run` in that folder): the loader's instance extensions,
 SDL3's HDR properties per display and per window, and every surface format and colour space each
 physical device offers on a surface created on each display. Exit code 0 when some display can take
-an HDR swapchain, 2 when none can. The library itself still creates every swapchain as
-`SRGB_NONLINEAR`; the probe is the first step of changing that, not the change.
+an HDR swapchain, 2 when none can. `dotnet run -- --show` then puts it on the panel: an scRGB
+swapchain on the first capable display with patches at 0.25 to 2.0 times SDR white and at the
+panel's peak, the primaries at both, and a ramp, drawn with clear rectangles so nothing but the
+colour space sits between the numbers and the screen. Judge it on the panel: a screenshot goes
+through Windows' SDR capture path and clips everything above 1.0 to 255 (measured 2026-09-15, the
+patches from 1.0 up all read 255 while the OLED showed each brighter than the last). The library
+itself still creates every swapchain as `SRGB_NONLINEAR`; the probe is the first step of changing
+that, not the change.
 
 SDL3 Vulkan surface creation: `SDL.VulkanLoadLibrary()` auto-finds MoltenVK on macOS;
 `SDL.VulkanCreateSurface()` returns a `VkSurfaceKHR` that pairs directly with

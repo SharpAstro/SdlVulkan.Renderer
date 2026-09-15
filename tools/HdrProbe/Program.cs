@@ -38,11 +38,11 @@ internal static unsafe class Program
     private const string SwapchainColorSpaceExtension = "VK_EXT_swapchain_colorspace";
     private const string SurfaceCapabilities2Extension = "VK_KHR_get_surface_capabilities2";
 
-    private static int Main()
+    private static int Main(string[] args)
     {
         try
         {
-            return Run();
+            return Run(show: args.Contains("--show", StringComparer.OrdinalIgnoreCase));
         }
         catch (Exception ex)
         {
@@ -51,7 +51,10 @@ internal static unsafe class Program
         }
     }
 
-    private static int Run()
+    /// <param name="show">After the listing, open a window on the first HDR-capable display and present
+    /// scRGB patches at known brightness (<see cref="HdrShow"/>), so the answer can be seen and not only
+    /// read. Off by default: the listing is the probe, the show is the demonstration.</param>
+    private static int Run(bool show)
     {
         if (!Init(InitFlags.Video | InitFlags.Events))
             throw new InvalidOperationException($"SDL_Init failed: {GetError()}");
@@ -119,6 +122,9 @@ internal static unsafe class Program
         var displays = GetDisplays(out var displayCount)
             ?? throw new InvalidOperationException($"SDL_GetDisplays failed: {GetError()}");
         var anyHdrCapable = false;
+        var hdrDisplay = 0u;
+        var hdrBounds = default(Rect);
+        var hdrDevice = -1;
 
         for (var d = 0; d < displayCount; d++)
         {
@@ -193,14 +199,20 @@ internal static unsafe class Program
                 Console.WriteLine($"   [{i}] {deviceNames[i]}: {count} surface formats, {verdict}");
                 Console.Write(sb);
                 anyHdrCapable |= scRgb || hdr10;
+
+                // The first (display, device) pair that can do scRGB is the one the show uses; the show
+                // draws scRGB values, so an HDR10-only surface would need a PQ encode it does not have.
+                if (scRgb && hdrDevice < 0)
+                {
+                    hdrDisplay = display;
+                    hdrBounds = bounds;
+                    hdrDevice = i;
+                }
             }
 
             api.vkDestroySurfaceKHR(surface);
             DestroyWindow(window);
         }
-
-        api.vkDestroyInstance();
-        Quit();
 
         Console.WriteLine();
         Console.WriteLine(anyHdrCapable
@@ -208,6 +220,17 @@ internal static unsafe class Program
             : hasColorSpaceExt
                 ? "VERDICT: the loader offers VK_EXT_swapchain_colorspace but no surface listed an HDR colour space; check Windows HDR is on for the display."
                 : "VERDICT: no HDR present is possible through Vulkan here; the loader offers no VK_EXT_swapchain_colorspace, so the driver is the block, not the panel.");
+
+        if (show)
+        {
+            if (hdrDevice >= 0)
+                HdrShow.Run(instance, api, devices[hdrDevice], deviceNames[hdrDevice], hdrDisplay, hdrBounds);
+            else
+                Console.WriteLine("   (--show: nothing to show, no display offers an scRGB surface.)");
+        }
+
+        api.vkDestroyInstance();
+        Quit();
         return anyHdrCapable ? 0 : 2;
     }
 }
