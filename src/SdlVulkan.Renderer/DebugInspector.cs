@@ -1,5 +1,6 @@
-#if DEBUG
+﻿#if DEBUG
 using System.Buffers;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -457,7 +458,11 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         HitResult.ButtonHit b => ("button", b.Action),
         HitResult.TextInputHit => ("textinput", null),
         HitResult.ListItemHit li => ("listitem", $"{li.ListId}[{li.Index}]"),
-        HitResult.SliderHit s => ("slider", s.SliderIndex.ToString()),
+        // The VALUE, not an index. DIR.Lib 10.0 dropped SliderHit(int): a slider is a Content.Slider leaf
+        // whose hit carries the live SliderState, so there is no parallel array left for an index to point
+        // into -- and a person driving the inspector was asking what the slider is SET to anyway.
+        HitResult.SliderStateHit s => ("slider",
+            s.State.Value.ToString("0.###", CultureInfo.InvariantCulture)),
         _ => (hit.GetType().Name, null) // covers SlotHit<T> and any app-specific HitResult subtype
     };
 
