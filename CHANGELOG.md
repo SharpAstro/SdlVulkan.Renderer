@@ -7,6 +7,15 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.40
+
+**Rebuilt against DIR.Lib 9.3**, which adds `Layout.Builder.Dropdown` and `PopoverState.ContentKeys`.
+Nothing here changes. The rebuild is mandatory rather than a nicety because the engine's records reach
+this surface directly: 9.1 added an optional parameter to a record's primary constructor, which is
+source-compatible and a BINARY break, and the published consumer threw `MissingMethodException` until it
+was rebuilt. A dev box cannot see it, because `UseLocalDirLib` compiles the sibling from source and never
+takes the package path CI does.
+
 ## 7.39
 
 **The instance was Vulkan 1.0, so every chained physical-device query was quietly returning
