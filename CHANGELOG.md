@@ -7,6 +7,18 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.42
+
+**Rebuilt against DIR.Lib 9.4**, whose three `Layout.Node.Wrap` additions the pixel surface renders
+through the shared engine: `FirstLineReserve` (the FIRST line stops short so a run flows under a
+floated corner, where a `Dock` would narrow every line and start dropping children), `LeadingGap` on a
+child (group separation suppressed when the child begins a line) and `MaxLines` (the tail is DROPPED
+past the cap, not clipped -- a clipped child still registers its region and keeps taking the clicks
+aimed at what covers it).
+
+A currency rebuild: nothing here calls them yet, so the declared dependency range moves and nothing
+else does.
+
 ## 7.41
 
 **The per-frame vertex ring grows on demand instead of dropping draws.** `vertexBufferSize` used to
