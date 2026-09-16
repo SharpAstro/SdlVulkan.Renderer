@@ -691,6 +691,12 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         w.WriteStartObject();
         w.WriteNumber("avgFrameMs", _loop.DebugFrameAvgMs);
         w.WriteNumber("slowFrameFloorMs", SdlEventLoop.DebugSlowFrameFloorMs);
+        // The per-frame vertex ring: how much one frame has ever needed, what the current slot holds,
+        // and how many frames dropped draws. What a consumer reads to size its initial ring.
+        var ring = _view.Renderer.Context;
+        w.WriteNumber("vertexRingPeakBytes", ring.VertexRingPeakBytes);
+        w.WriteNumber("vertexRingCapacityBytes", ring.VertexRingCapacityBytes);
+        w.WriteNumber("vertexRingOverflowFrames", ring.VertexRingOverflowFrames);
         w.WriteEndObject();
     });
 
