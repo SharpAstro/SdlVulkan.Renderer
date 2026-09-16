@@ -305,7 +305,40 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private readonly VkBuffer[] _vertexBuffers = new VkBuffer[MaxFramesInFlight];
     private readonly VkDeviceMemory[] _vertexMemories = new VkDeviceMemory[MaxFramesInFlight];
     private readonly float*[] _vertexMapped = new float*[MaxFramesInFlight];
+    // Each slot's capacity in bytes. They start at the size the consumer asked for and grow on
+    // demand, one slot at a time: a slot's buffer can only be replaced at the start of a frame that
+    // owns it, once its fence has retired, so after an overflow the two catch up a frame apart.
+    private readonly uint[] _vertexBufferSizes = new uint[MaxFramesInFlight];
     private int _vertexOffset; // in floats
+    // Everything the current frame ASKED to write, in floats, whether or not it fit. A frame that
+    // runs out keeps issuing writes, each of which fails the same way, so the size the ring grows to
+    // has to be what the whole frame needed rather than where it first ran out.
+    private int _vertexDemand;
+    private uint _vertexRingWanted;        // bytes a frame needed and did not have; 0 = nothing pending
+    private uint _vertexRingPeakBytes;
+    private int _vertexRingOverflowFrames;
+    private bool _vertexRingOverflowed;
+
+    /// <summary>
+    /// Ceiling for one slot of the per-frame vertex ring. Growth stops here and a frame needing more
+    /// drops draws the way every frame used to; the old fixed ring's worst case was a consumer asking
+    /// for this much up front, for every window, whatever it turned out to draw.
+    /// </summary>
+    public const uint VertexRingMaxBytes = 512u * 1024 * 1024;
+
+    /// <summary>The most bytes a single frame has written into the ring over this context's life.
+    /// What a consumer should size its initial ring from, once it has looked.</summary>
+    public uint VertexRingPeakBytes => _vertexRingPeakBytes;
+    /// <summary>The current frame's slot capacity, in bytes.</summary>
+    public uint VertexRingCapacityBytes => _vertexBufferSizes[_currentFrame];
+    /// <summary>Frames that dropped at least one write because the ring was full.</summary>
+    public int VertexRingOverflowFrames => _vertexRingOverflowFrames;
+    /// <summary>
+    /// True from the first write the current frame dropped until the next frame begins. The ring
+    /// grows at that next frame start, so a consumer that sees this after its frame should draw
+    /// once more: the frame it just drew is missing whatever did not fit.
+    /// </summary>
+    public bool VertexRingOverflowed => _vertexRingOverflowed;
 
     // Not readonly: Android destroys the native surface on background and hands back a fresh one on
     // foreground, so the swapchain is rebuilt against a new surface via AdoptSurface.
@@ -317,6 +350,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         _dev = device;
         _surface = surface;
         _vertexBufferSize = vertexBufferSize;
+        Array.Fill(_vertexBufferSizes, vertexBufferSize);
         _ownsDevice = ownsDevice;
     }
 
@@ -745,8 +779,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
         _frameBegun = true;
         _renderPassBegun = false;
 
-        // Reset vertex offset for this frame
-        _vertexOffset = 0;
+        // Grow the ring if the last frame in this slot ran out, and reset its cursor. Legal here
+        // because the slot's fence was waited on above.
+        BeginVertexRingFrame();
 
         return cmd;
     }
@@ -951,9 +986,19 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     public uint WriteVertices(ReadOnlySpan<float> data)
     {
-        var maxFloats = (int)(_vertexBufferSize / sizeof(float));
+        _vertexDemand += data.Length;
+        var maxFloats = (int)(_vertexBufferSizes[_currentFrame] / sizeof(float));
         if (_vertexOffset + data.Length > maxFloats)
         {
+            // Dropped for THIS frame; the ring grows to the whole frame's demand at the next frame
+            // start (see BeginVertexRingFrame), and VertexRingOverflowed tells the loop to draw again.
+            var wanted = (uint)Math.Min((long)_vertexDemand * sizeof(float), VertexRingMaxBytes);
+            if (wanted > _vertexRingWanted) _vertexRingWanted = wanted;
+            if (!_vertexRingOverflowed)
+            {
+                _vertexRingOverflowed = true;
+                _vertexRingOverflowFrames++;
+            }
             DebugLogBufferFull(_vertexOffset, data.Length);
             return uint.MaxValue;
         }
@@ -961,7 +1006,48 @@ public sealed unsafe partial class VulkanContext : IDisposable
         var byteOffset = (uint)(_vertexOffset * sizeof(float));
         data.CopyTo(new Span<float>(_vertexMapped[_currentFrame] + _vertexOffset, data.Length));
         _vertexOffset += data.Length;
+        var used = (uint)_vertexOffset * sizeof(float);
+        if (used > _vertexRingPeakBytes) _vertexRingPeakBytes = used;
         return byteOffset;
+    }
+
+    /// <summary>
+    /// Starts the current slot's frame in the vertex ring: grows the slot's buffer if an earlier
+    /// frame ran out, then resets the write cursor. Only legal where the slot's in-flight fence has
+    /// just been waited on, which is what makes replacing its buffer safe -- the frame that last
+    /// drew from it has retired, and the other slot's frame draws from its own buffer.
+    /// </summary>
+    /// <remarks>
+    /// Growth is per slot and the demand is shared, so a slot grows when its own turn comes and the
+    /// request stays pending until every slot can hold it. Sized to the larger of twice the current
+    /// size and a quarter over the demand, rounded up to a megabyte and capped at
+    /// <see cref="VertexRingMaxBytes"/>: doubling keeps a slowly rising demand from reallocating
+    /// every other frame, and the margin over demand keeps the very next frame, which is usually a
+    /// little larger than the one that overflowed, from overflowing again.
+    /// </remarks>
+    private void BeginVertexRingFrame()
+    {
+        var slot = _currentFrame;
+        var wanted = _vertexRingWanted;
+        if (wanted > _vertexBufferSizes[slot])
+        {
+            const ulong megabyte = 1UL << 20;
+            var grown = Math.Max(_vertexBufferSizes[slot] * 2UL, wanted * 5UL / 4);
+            grown = Math.Min(grown, VertexRingMaxBytes);
+            grown = (grown + megabyte - 1) & ~(megabyte - 1);
+            grown = Math.Min(grown, VertexRingMaxBytes);
+            if (grown > _vertexBufferSizes[slot]) RecreateVertexBuffer(slot, (uint)grown);
+        }
+        if (wanted != 0)
+        {
+            var everySlotFits = true;
+            for (var i = 0; i < MaxFramesInFlight; i++)
+                if (_vertexBufferSizes[i] < wanted) everySlotFits = false;
+            if (everySlotFits) _vertexRingWanted = 0;
+        }
+        _vertexOffset = 0;
+        _vertexDemand = 0;
+        _vertexRingOverflowed = false;
     }
 
     public VkBuffer VertexBuffer => _vertexBuffers[_currentFrame];
@@ -1283,28 +1369,46 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private void CreateVertexBuffers()
     {
         for (var i = 0; i < MaxFramesInFlight; i++)
+            CreateVertexBuffer(i, _vertexBufferSizes[i]);
+    }
+
+    private void CreateVertexBuffer(int slot, uint size)
+    {
+        VkBufferCreateInfo bufCI = new()
         {
-            VkBufferCreateInfo bufCI = new()
-            {
-                size = _vertexBufferSize,
-                usage = VkBufferUsageFlags.VertexBuffer,
-                sharingMode = VkSharingMode.Exclusive
-            };
-            DeviceApi.vkCreateBuffer(&bufCI, null, out _vertexBuffers[i]).CheckResult();
+            size = size,
+            usage = VkBufferUsageFlags.VertexBuffer,
+            sharingMode = VkSharingMode.Exclusive
+        };
+        DeviceApi.vkCreateBuffer(&bufCI, null, out _vertexBuffers[slot]).CheckResult();
 
-            DeviceApi.vkGetBufferMemoryRequirements(_vertexBuffers[i], out var memReqs);
-            VkMemoryAllocateInfo allocInfo = new()
-            {
-                allocationSize = memReqs.size,
-                memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits,
-                    VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent)
-            };
-            DeviceApi.vkAllocateMemory(&allocInfo, null, out _vertexMemories[i]).CheckResult();
-            DeviceApi.vkBindBufferMemory(_vertexBuffers[i], _vertexMemories[i], 0);
+        DeviceApi.vkGetBufferMemoryRequirements(_vertexBuffers[slot], out var memReqs);
+        VkMemoryAllocateInfo allocInfo = new()
+        {
+            allocationSize = memReqs.size,
+            memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits,
+                VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent)
+        };
+        DeviceApi.vkAllocateMemory(&allocInfo, null, out _vertexMemories[slot]).CheckResult();
+        DeviceApi.vkBindBufferMemory(_vertexBuffers[slot], _vertexMemories[slot], 0);
 
-            void* mapped;
-            DeviceApi.vkMapMemory(_vertexMemories[i], 0, _vertexBufferSize, 0, &mapped);
-            _vertexMapped[i] = (float*)mapped;
+        void* mapped;
+        DeviceApi.vkMapMemory(_vertexMemories[slot], 0, size, 0, &mapped);
+        _vertexMapped[slot] = (float*)mapped;
+        _vertexBufferSizes[slot] = size;
+    }
+
+    /// <summary>Replaces one slot's ring buffer with a larger one. The caller has waited on the slot's
+    /// fence, so nothing on the GPU still reads the old buffer; it is freed outright, not deferred.</summary>
+    private void RecreateVertexBuffer(int slot, uint size)
+    {
+        if (_vertexBuffers[slot] != VkBuffer.Null)
+        {
+            DeviceApi.vkUnmapMemory(_vertexMemories[slot]);
+            DeviceApi.vkDestroyBuffer(_vertexBuffers[slot]);
+            DeviceApi.vkFreeMemory(_vertexMemories[slot]);
+            _vertexBuffers[slot] = VkBuffer.Null;
         }
+        CreateVertexBuffer(slot, size);
     }
 }

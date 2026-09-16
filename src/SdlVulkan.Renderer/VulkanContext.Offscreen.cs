@@ -200,7 +200,8 @@ public sealed unsafe partial class VulkanContext
         VkCommandBufferBeginInfo bi = new() { flags = VkCommandBufferUsageFlags.OneTimeSubmit };
         DeviceApi.vkBeginCommandBuffer(cmd, &bi);
 
-        _vertexOffset = 0;
+        // Same contract as BeginFrame: the slot's fence has retired, so its ring buffer may grow here.
+        BeginVertexRingFrame();
         return cmd;
     }
 

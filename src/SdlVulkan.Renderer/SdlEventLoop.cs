@@ -255,7 +255,13 @@ public sealed class SdlEventLoop
                 // Committed to a frame: let the app configure it before the pass opens.
                 v.OnBeforeFrame?.Invoke();
                 if (RenderView(v))
+                {
                     renderedAny = true;
+                    // A frame that ran out of vertex ring dropped some of its draws. The ring grows at
+                    // the next BeginFrame, so one more frame paints what this one could not; without
+                    // this the hole stays until something else happens to ask for a redraw.
+                    if (v.Renderer.Context.VertexRingOverflowed) v.NeedsRedraw = true;
+                }
             }
 
             if (renderedAny)

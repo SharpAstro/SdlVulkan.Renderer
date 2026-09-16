@@ -7,6 +7,30 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.41
+
+**The per-frame vertex ring grows on demand instead of dropping draws.** `vertexBufferSize` used to
+be a fixed allocation per frame in flight, committed at startup for every window whatever it turned
+out to draw, and a frame that needed more silently lost its remaining draws: `WriteVertices` returned
+`uint.MaxValue`, the caller skipped the draw, and the hole stayed until something else asked for a
+redraw. A consumer that could not afford holes therefore asked for the worst case up front — 256 MB a
+slot, 512 MB of host-visible, persistently mapped memory before a document was even open — and on an
+integrated GPU that is system RAM.
+
+Now a frame that runs out records what the WHOLE frame needed (every write is counted whether it fit
+or not, because the frame keeps issuing them), and the slot grows at the start of its next frame,
+once its in-flight fence has retired and nothing on the GPU can still read the old buffer. Sized to
+the larger of double and a quarter over the demand, rounded to a megabyte, capped at
+`VertexRingMaxBytes` (512 MB a slot). The two slots grow a frame apart, since each can only be
+replaced on its own turn; the request stays pending until both fit. `SdlEventLoop` re-arms the
+window's redraw when its frame overflowed, so the frame after paints what the overflowing one could
+not, and the offscreen path grows the same way at `BeginOffscreenFrame`.
+
+Telemetry to size the initial ring from, instead of guessing: `VertexRingPeakBytes` (the most one
+frame has ever written), `VertexRingCapacityBytes`, `VertexRingOverflowFrames`, and
+`VertexRingOverflowed` for the frame just drawn. The debug inspector's `frame_stats` reports the first
+three.
+
 ## 7.40
 
 **Rebuilt against DIR.Lib 9.3**, which adds `Layout.Builder.Dropdown` and `PopoverState.ContentKeys`.
