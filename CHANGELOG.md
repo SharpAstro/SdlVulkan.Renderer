@@ -7,6 +7,23 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.43
+
+**Rebuilt against DIR.Lib 10.0**, which cut seven things the 9.x line had kept alive for consumers that
+had stopped using them. Exactly one reaches this library, and it is DEBUG-only: `HitResult.SliderHit(int)`
+is gone, a slider being a `Content.Slider` leaf whose hit carries its live `SliderState`, so
+`describe_ui` reports the slider's VALUE where it used to report an index into a parallel array the
+consumer no longer keeps. That is also what a person driving the inspector was asking for.
+
+**A minor, not a major, and the distinction is the org's rather than a judgement call**: DIR.Lib 9.0 was
+a breaking release too and this library went 7.x to 7.x across it. A rebuild against a breaking
+dependency is a rebuild.
+
+**`dotnet build -c Release` could not have caught this.** `DebugInspector` is inside `#if DEBUG`, so the
+Release build the package is made from never compiles the line that broke. The Debug build is the one
+that reports it -- which is the same asymmetry `../.github/CLAUDE.md` warns about from the other
+direction, where a Debug consumer of a Release package cannot find `DIR.Lib.Diagnostics` at all.
+
 ## 7.42
 
 **Rebuilt against DIR.Lib 9.4**, whose three `Layout.Node.Wrap` additions the pixel surface renders
