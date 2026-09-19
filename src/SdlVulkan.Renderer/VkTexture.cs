@@ -67,16 +67,6 @@ public sealed unsafe class VkTexture : IDisposable
     }
 
     /// <summary>
-    /// Creates a texture with deferred upload. Call RecordUpload() with the frame's command buffer
-    /// before the render pass to schedule the GPU copy. No vkQueueWaitIdle — zero blocking.
-    /// Call CleanupStaging() after the frame is submitted to free the staging buffer.
-    /// </summary>
-    /// <param name="format">Pixel format of <paramref name="pixelData"/>. Defaults to
-    /// <see cref="VkFormat.B8G8R8A8Unorm"/> for historical reasons; callers with RGBA byte
-    /// layout (the common CPU-renderer output) should pass <see cref="VkFormat.R8G8B8A8Unorm"/>
-    /// and skip any CPU-side swizzle — letting the driver read the bytes directly is cheaper
-    /// than a per-pixel swap loop.</param>
-    /// <summary>
     /// Bytes one texel occupies in <paramref name="format"/>, for sizing a staging buffer.
     /// </summary>
     /// <remarks>
@@ -107,6 +97,16 @@ public sealed unsafe class VkTexture : IDisposable
             + "buffer be sized wrong")
     };
 
+    /// <summary>
+    /// Creates a texture with deferred upload. Call RecordUpload() with the frame's command buffer
+    /// before the render pass to schedule the GPU copy. No vkQueueWaitIdle — zero blocking.
+    /// Call CleanupStaging() after the frame is submitted to free the staging buffer.
+    /// </summary>
+    /// <param name="format">Pixel format of <paramref name="pixelData"/>. Defaults to
+    /// <see cref="VkFormat.B8G8R8A8Unorm"/> for historical reasons; callers with RGBA byte
+    /// layout (the common CPU-renderer output) should pass <see cref="VkFormat.R8G8B8A8Unorm"/>
+    /// and skip any CPU-side swizzle — letting the driver read the bytes directly is cheaper
+    /// than a per-pixel swap loop.</param>
     public static VkTexture CreateDeferred(VulkanContext ctx, ReadOnlySpan<byte> pixelData, int width, int height,
         VkFormat format = VkFormat.B8G8R8A8Unorm)
     {

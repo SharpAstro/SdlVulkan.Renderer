@@ -7,6 +7,19 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.44
+
+**Rebuilt against DIR.Lib 10.2**, which is additive: popover triggers and groups, presses declared on a
+tab item, and layout scroll containers. Nothing here changed to take it and every test passes as it
+was; the minor keeps the chain in step, so a consumer taking 7.44 gets the DIR.Lib this was built and
+tested against.
+
+**`VkTexture.CreateDeferred` has its documentation back.** 7.31's `BytesPerPixel` was inserted between
+that method and its doc comment, so `CreateDeferred` showed none and `BytesPerPixel` showed two
+summaries, one of them naming a `pixelData` it does not take (CS1734 on every build since). The comment
+is back on the method it describes.
+
+
 ## 7.43
 
 **Rebuilt against DIR.Lib 10.0**, which cut seven things the 9.x line had kept alive for consumers that
