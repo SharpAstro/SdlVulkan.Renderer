@@ -35,6 +35,14 @@ public sealed unsafe class VulkanDevice : IDisposable
     public VkDeviceApi DeviceApi { get; }
     public VkQueue GraphicsQueue { get; }
     public uint GraphicsQueueFamily { get; }
+
+    /// <summary>
+    /// The graphics queue family's <c>minImageTransferGranularity</c>: what offsets and extents a
+    /// buffer→image copy may use. (1,1,1) on every desktop driver, which allows any rectangle, and
+    /// <b>(0,0,0)</b> on Mesa's dzn, which allows whole subresources only. Read here so the atlases
+    /// can obey it rather than assume it — see <see cref="ImageTransferGranularity"/>.
+    /// </summary>
+    public VkExtent3D MinImageTransferGranularity { get; }
     public VkCommandPool CommandPool { get; }
     public VkRenderPass RenderPass { get; }
 
@@ -149,6 +157,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         DeviceApi = deviceApi;
         GraphicsQueue = graphicsQueue;
         GraphicsQueueFamily = graphicsQueueFamily;
+        MinImageTransferGranularity = QueryTransferGranularity(instanceApi, physicalDevice, graphicsQueueFamily);
         CommandPool = commandPool;
         RenderPass = renderPass;
         ColorFormat = colorFormat;
@@ -1023,6 +1032,21 @@ public sealed unsafe class VulkanDevice : IDisposable
             $"{api >> 22}.{(api >> 12) & 0x3FF}.{api & 0xFFF}",
             queueFamily,
             deviceCount);
+    }
+
+    /// <summary>
+    /// The chosen queue family's image transfer granularity. Queried once, at device creation:
+    /// it is fixed for the life of the device, and every atlas flush needs it.
+    /// </summary>
+    private static VkExtent3D QueryTransferGranularity(VkInstanceApi instanceApi, VkPhysicalDevice device, uint family)
+    {
+        uint count = 0;
+        instanceApi.vkGetPhysicalDeviceQueueFamilyProperties(device, &count, null);
+        if (family >= count) return new VkExtent3D(1, 1, 1);   // cannot happen; a sane default beats a throw here
+        var props = new VkQueueFamilyProperties[count];
+        fixed (VkQueueFamilyProperties* pProps = props)
+            instanceApi.vkGetPhysicalDeviceQueueFamilyProperties(device, &count, pProps);
+        return props[family].minImageTransferGranularity;
     }
 
     private static bool TryFindGraphicsQueue(VkInstanceApi instanceApi, VkPhysicalDevice device, VkSurfaceKHR surface, out uint family)

@@ -109,6 +109,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public VkDeviceApi DeviceApi => _dev.DeviceApi;
     public VkQueue GraphicsQueue => _dev.GraphicsQueue;
     public uint GraphicsQueueFamily => _dev.GraphicsQueueFamily;
+    /// <summary>What offsets and extents a buffer→image copy may use on this queue — (0,0,0) means
+    /// whole subresources only. See <see cref="ImageTransferGranularity"/>.</summary>
+    public VkExtent3D MinImageTransferGranularity => _dev.MinImageTransferGranularity;
     public VkCommandPool CommandPool => _dev.CommandPool;
     public VkRenderPass RenderPass => _dev.RenderPass;
     public VkDescriptorPool DescriptorPool => _dev.DescriptorPool;

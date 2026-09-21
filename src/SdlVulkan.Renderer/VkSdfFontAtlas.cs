@@ -168,8 +168,18 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
 
         var page = _pageResources[pageIndex];
         var pageDim = _core.PageDimension;
-        var regionW = r.Width;
-        var regionH = r.Height;
+
+        // What this queue will actually accept. (1,1,1) leaves the dirty rect alone; dzn reports
+        // (0,0,0) and takes whole subresources only, so the rect becomes the whole page. Snapped
+        // BEFORE the staging copy below, so the bytes uploaded are the bytes the copy claims.
+        var g = _ctx.MinImageTransferGranularity;
+        var rect = ImageTransferGranularity.Snap(
+            new CopyRect(r.X0, r.Y0, r.Width, r.Height), g.width, g.height, pageDim, pageDim);
+
+        var regionX = rect.X;
+        var regionY = rect.Y;
+        var regionW = rect.Width;
+        var regionH = rect.Height;
         var pixelCount = regionW * regionH;
         var rowBytes = regionW * SdfFontAtlas.BytesPerTexel;
 
@@ -185,7 +195,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
         {
             for (var row = 0; row < regionH; row++)
             {
-                var srcOffset = ((r.Y0 + row) * pageDim + r.X0) * SdfFontAtlas.BytesPerTexel;
+                var srcOffset = ((regionY + row) * pageDim + regionX) * SdfFontAtlas.BytesPerTexel;
                 Buffer.MemoryCopy(pStaging + srcOffset, dst + row * rowBytes, rowBytes, rowBytes);
             }
         }
@@ -202,7 +212,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
             bufferRowLength = 0,
             bufferImageHeight = 0,
             imageSubresource = new VkImageSubresourceLayers(VkImageAspectFlags.Color, 0, 0, 1),
-            imageOffset = new VkOffset3D(r.X0, r.Y0, 0),
+            imageOffset = new VkOffset3D(regionX, regionY, 0),
             imageExtent = new VkExtent3D((uint)regionW, (uint)regionH, 1)
         };
         _ctx.DeviceApi.vkCmdCopyBufferToImage(cmd, page.UploadBuffers[slot], page.Image, VkImageLayout.TransferDstOptimal, 1, &region);
