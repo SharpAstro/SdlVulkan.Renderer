@@ -7,6 +7,23 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.45
+
+**Atlas uploads obey the queue's `minImageTransferGranularity`.** Both font atlases flushed their
+dirty rectangle with `vkCmdCopyBufferToImage` whatever the queue family allows, which is legal only
+at granularity (1,1,1) — every desktop driver, hence no symptom until now. A queue reporting
+**(0,0,0)** takes whole subresources only, and Mesa's `dzn` (Vulkan over D3D12, the hardware Vulkan
+a WSL guest gets) reports exactly that: Khronos validation flagged every glyph flush as
+`VUID-vkCmdCopyBufferToImage-imageOffset-07738`, and the undefined behaviour surfaced as
+intermittent heap corruption at teardown. `VulkanDevice` now reads the granularity once at device
+creation (`MinImageTransferGranularity`, forwarded by `VulkanContext`), and
+`ImageTransferGranularity.Snap` widens a dirty rect to something the queue accepts: untouched at
+(1,1,1), the whole subresource at (0,0,0), otherwise rounded out to a multiple and clamped at the
+image edge, which the spec permits. The snap happens before the staging copy, so the bytes uploaded
+are the bytes the copy claims, and the snapped rect always contains the dirty one — a narrower one
+would leave stale texels and draw the previous glyph. `VkTexture` already copied whole images and is
+unchanged. Measured on an Adreno X1-85 through dzn: seven validation errors a run before, none after.
+
 ## 7.44
 
 **Rebuilt against DIR.Lib 10.2**, which is additive: popover triggers and groups, presses declared on a

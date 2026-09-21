@@ -198,8 +198,19 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         if (_dirtyX0 >= _dirtyX1 || _dirtyY0 >= _dirtyY1)
             return;
 
-        var regionW = _dirtyX1 - _dirtyX0;
-        var regionH = _dirtyY1 - _dirtyY0;
+        // What this queue will actually accept — see ImageTransferGranularity. (1,1,1) leaves the
+        // dirty rect alone; a queue that reports (0,0,0) takes whole subresources only, so the rect
+        // becomes the whole atlas. Snapped before the staging copy, so the bytes uploaded are the
+        // bytes the copy claims.
+        var g = _ctx.MinImageTransferGranularity;
+        var rect = ImageTransferGranularity.Snap(
+            new CopyRect(_dirtyX0, _dirtyY0, _dirtyX1 - _dirtyX0, _dirtyY1 - _dirtyY0),
+            g.width, g.height, _atlasWidth, _atlasHeight);
+
+        var regionX = rect.X;
+        var regionY = rect.Y;
+        var regionW = rect.Width;
+        var regionH = rect.Height;
         var pixelCount = regionW * regionH;
 
         var bufferSize = (ulong)(pixelCount * 4);
@@ -217,7 +228,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         {
             for (var row = 0; row < regionH; row++)
             {
-                var srcOffset = ((_dirtyY0 + row) * _atlasWidth + _dirtyX0) * 4;
+                var srcOffset = ((regionY + row) * _atlasWidth + regionX) * 4;
                 var rowBytes = regionW * 4;
                 Buffer.MemoryCopy(pStaging + srcOffset, dst + row * rowBytes, rowBytes, rowBytes);
             }
@@ -236,7 +247,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
             bufferRowLength = 0,
             bufferImageHeight = 0,
             imageSubresource = new VkImageSubresourceLayers(VkImageAspectFlags.Color, 0, 0, 1),
-            imageOffset = new VkOffset3D(_dirtyX0, _dirtyY0, 0),
+            imageOffset = new VkOffset3D(regionX, regionY, 0),
             imageExtent = new VkExtent3D((uint)regionW, (uint)regionH, 1)
         };
         _ctx.DeviceApi.vkCmdCopyBufferToImage(cmd, _uploadBuffers[slot], _image, VkImageLayout.TransferDstOptimal, 1, &region);
