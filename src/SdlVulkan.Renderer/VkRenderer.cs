@@ -2135,9 +2135,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <param name="c10">Image of local (+1,-1).</param>
     /// <param name="c11">Image of local (+1,+1).</param>
     /// <param name="c01">Image of local (-1,+1).</param>
-    public void FillEllipse((float X, float Y) c00, (float X, float Y) c10,
-                            (float X, float Y) c11, (float X, float Y) c01,
-                            DIR.Lib.RGBAColor32 fillColor)
+    public override void FillEllipse((float X, float Y) c00, (float X, float Y) c10,
+                                     (float X, float Y) c11, (float X, float Y) c01,
+                                     DIR.Lib.RGBAColor32 fillColor)
         => EllipseQuad(c00, c10, c11, c01, fillColor, innerRadius: 0f);
 
     /// <summary>
@@ -2259,74 +2259,26 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var radiusPixels = Math.Max(Math.Abs(x1 - x0), Math.Abs(y1 - y0)) / 2f;
         var innerRadius = radiusPixels > 0 ? Math.Max(0f, (radiusPixels - strokeWidth) / radiusPixels) : 0f;
 
-        DrawEllipseOutline((x0, y0), (x1, y0), (x1, y1), (x0, y1), strokeColor, innerRadius);
+        DrawEllipse((x0, y0), (x1, y0), (x1, y1), (x0, y1), strokeColor, innerRadius);
     }
 
-    /// <summary>
-    /// Draws a ring inside an arbitrary parallelogram — the rotated/sheared counterpart of the
-    /// <see cref="RectInt"/> overload, with the hole given in LOCAL units rather than pixels.
-    /// </summary>
+    /// <inheritdoc/>
     /// <remarks>
-    /// Corners are the images of the unit square's, exactly as for the four-corner <c>FillEllipse</c>
-    /// above, and the same parallelogram requirement applies. (Named in prose rather than with a
-    /// cref: a cref cannot spell a tuple parameter, and one that tries parses as far as the first
-    /// comma and warns CS1658 — visible only on the android target framework, where this repo turns
-    /// documentation generation on.)
-    /// <para>
-    /// The hole is a fraction of the semi-diameter, so the quad must span the stroke's OUTER edge: an
-    /// ellipse of semi-axis <c>a</c> stroked with width <c>w</c> centred on its own boundary is a quad
-    /// of semi-axis <c>a + w/2</c> with <c>innerRadius = (a - w/2) / (a + w/2)</c>.
-    /// </para>
-    /// <para>
-    /// One scalar can only describe a ring of constant thickness in local space, which is a constant
-    /// stroke width exactly when the pre-transform shape is a CIRCLE — that covers a circle placed
-    /// under any rotation, scale or shear, because the transform is what the quad carries. A shape
-    /// that is already an ellipse before the transform, stroked with a constant width, has a ring
-    /// that is thinner across its long axis than its short one, and this draws that as uniform.
-    /// </para>
+    /// One <c>vkCmdDraw</c> of six vertices through the EllipsePipeline, in place of the base
+    /// scanline default. What <paramref name="innerRadius"/> can and cannot express is stated once
+    /// on the base declaration, not repeated here.
     /// </remarks>
-    /// <param name="innerRadius">Hole radius in local units. Clamped to [0,1]; 0 fills the ellipse
-    /// and 1 draws nothing.</param>
-    public void DrawEllipseOutline((float X, float Y) c00, (float X, float Y) c10,
-                                   (float X, float Y) c11, (float X, float Y) c01,
-                                   DIR.Lib.RGBAColor32 strokeColor, float innerRadius)
+    public override void DrawEllipse((float X, float Y) c00, (float X, float Y) c10,
+                                     (float X, float Y) c11, (float X, float Y) c01,
+                                     DIR.Lib.RGBAColor32 strokeColor, float innerRadius)
         => EllipseQuad(c00, c10, c11, c01, strokeColor, Math.Clamp(innerRadius, 0f, 1f));
 
-    /// <summary>
-    /// Fills an ellipse given as a centre and its two semi-axis VECTORS — the images of local (1,0)
-    /// and (0,1). Equivalent to the corner overload, and the form that cannot be malformed: four
-    /// corners must satisfy <c>c01 == c00 + c11 - c10</c>, where two axes describe a parallelogram
-    /// by construction.
-    /// </summary>
-    /// <remarks>
-    /// Prefer this when the caller already has screen-space axes, which is what a rotation or a
-    /// projection naturally produces — e.g. a major/minor direction plus lengths. It is also the
-    /// per-instance form <see cref="DrawEllipseInstances"/> takes, so a caller that may later move
-    /// to the bulk path is already speaking its language.
-    /// </remarks>
-    public void FillEllipse((float X, float Y) centre, (float X, float Y) semiAxisU,
-                            (float X, float Y) semiAxisV, DIR.Lib.RGBAColor32 fillColor)
-        => EllipseQuad(
-            (centre.X - semiAxisU.X - semiAxisV.X, centre.Y - semiAxisU.Y - semiAxisV.Y),
-            (centre.X + semiAxisU.X - semiAxisV.X, centre.Y + semiAxisU.Y - semiAxisV.Y),
-            (centre.X + semiAxisU.X + semiAxisV.X, centre.Y + semiAxisU.Y + semiAxisV.Y),
-            (centre.X - semiAxisU.X + semiAxisV.X, centre.Y - semiAxisU.Y + semiAxisV.Y),
-            fillColor, innerRadius: 0f);
-
-    /// <summary>
-    /// Draws a ring given as a centre and its two semi-axis vectors, with the hole in local units.
-    /// The axes counterpart of the corner overload — see it for what <paramref name="innerRadius"/>
-    /// can and cannot express.
-    /// </summary>
-    public void DrawEllipseOutline((float X, float Y) centre, (float X, float Y) semiAxisU,
-                                   (float X, float Y) semiAxisV, DIR.Lib.RGBAColor32 strokeColor,
-                                   float innerRadius)
-        => EllipseQuad(
-            (centre.X - semiAxisU.X - semiAxisV.X, centre.Y - semiAxisU.Y - semiAxisV.Y),
-            (centre.X + semiAxisU.X - semiAxisV.X, centre.Y + semiAxisU.Y - semiAxisV.Y),
-            (centre.X + semiAxisU.X + semiAxisV.X, centre.Y + semiAxisU.Y + semiAxisV.Y),
-            (centre.X - semiAxisU.X + semiAxisV.X, centre.Y - semiAxisU.Y + semiAxisV.Y),
-            strokeColor, Math.Clamp(innerRadius, 0f, 1f));
+    // The centre-plus-semi-axes forms are NOT repeated here. They are non-virtual on
+    // Renderer<TSurface>, which expands them to their own corners and reaches the two overrides
+    // above, so every backend speaks that form and this one overrides one method per shape. They
+    // were a second pair of entry points into EllipseQuad while the API was Vulkan-only; once the
+    // shape is declared on the abstraction, a copy here would be the drift the quad refactor
+    // removed in the first place.
 
     /// <summary>
     /// Floats per instance for <see cref="DrawEllipseInstances"/>: <c>centre(2), axisU(2), axisV(2),

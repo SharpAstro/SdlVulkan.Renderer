@@ -5,9 +5,10 @@ using Xunit;
 namespace SdlVulkan.Renderer.Tests;
 
 /// <summary>
-/// Render coverage for the quad overloads of <see cref="VkRenderer.FillEllipse"/> and
-/// <see cref="VkRenderer.DrawEllipseOutline"/>, which take the four corners of a parallelogram
-/// instead of an axis-aligned <see cref="RectInt"/> and so can express a rotated or sheared ellipse.
+/// Render coverage for the quad overrides of <c>FillEllipse</c> and <c>DrawEllipse</c>, which take
+/// the four corners of a parallelogram instead of an axis-aligned <see cref="RectInt"/> and so can
+/// express a rotated or sheared ellipse. Both are declared on <c>Renderer</c> with a CPU default
+/// (see DIR.Lib's own AffineEllipseTests); what these cover is the Vulkan override of them.
 /// <para>
 /// The discriminating test is the 45° one. A rotation by a right angle is only a swap of width and
 /// height, so an implementation that quietly took the bounding box of the corners would still pass
@@ -146,9 +147,9 @@ public sealed class EllipseQuadRenderTests(OffscreenGpuFixture gpu)
     }
 
     [Fact]
-    public void DrawEllipseOutline_ByQuad_LeavesTheCentreHollow()
+    public void DrawEllipse_ByQuad_LeavesTheCentreHollow()
     {
-        var rgba = RenderToPixels(r => r.DrawEllipseOutline(C00, C10, C11, C01, Ink, innerRadius: 0.5f));
+        var rgba = RenderToPixels(r => r.DrawEllipse(C00, C10, C11, C01, Ink, innerRadius: 0.5f));
         if (rgba is null)
         {
             Assert.Skip("Vulkan runtime not available on this host");
@@ -162,7 +163,7 @@ public sealed class EllipseQuadRenderTests(OffscreenGpuFixture gpu)
 
     /// <summary>An innerRadius of 0 is the fill, which is what lets the two entry points share one draw.</summary>
     [Fact]
-    public void DrawEllipseOutline_ByQuad_WithNoHoleMatchesTheFill()
+    public void DrawEllipse_ByQuad_WithNoHoleMatchesTheFill()
     {
         var filled = RenderToPixels(r => r.FillEllipse(C00, C10, C11, C01, Ink));
         if (filled is null)
@@ -171,7 +172,7 @@ public sealed class EllipseQuadRenderTests(OffscreenGpuFixture gpu)
             return;
         }
 
-        var ring = RenderToPixels(r => r.DrawEllipseOutline(C00, C10, C11, C01, Ink, innerRadius: 0f));
+        var ring = RenderToPixels(r => r.DrawEllipse(C00, C10, C11, C01, Ink, innerRadius: 0f));
         ring.ShouldNotBeNull();
         ring.ShouldBe(filled);
     }
