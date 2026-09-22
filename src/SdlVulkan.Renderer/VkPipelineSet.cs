@@ -16,6 +16,20 @@ public sealed unsafe class VkPipelineSet : IDisposable
     public VkPipeline FlatPipeline { get; }
     public VkPipeline TexturedPipeline { get; }
     public VkPipeline EllipsePipeline { get; }
+
+    /// <summary>
+    /// <see cref="EllipsePipeline"/>'s bulk form: ONE INSTANCE per ellipse (centre, two semi-axis
+    /// vectors, hole, colour), so a whole page or chart of them is a single draw. Backs
+    /// <c>VkRenderer.DrawEllipseInstances</c>.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="EllipsePipeline"/> rather than replacing it because the colour moves
+    /// from the push block to the instance, which the fragment shader has to be built for. The two
+    /// share their geometry exactly — the same six corners, the same unit-disc predicate — so a
+    /// single ellipse looks identical whichever one draws it, which is a test rather than a hope.
+    /// </remarks>
+    public VkPipeline EllipseInstancedPipeline { get; }
+
     public VkPipeline PagePipeline { get; }
 
     /// <summary>
@@ -58,12 +72,13 @@ public sealed unsafe class VkPipelineSet : IDisposable
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
         VkPipeline sdf, VkPipeline roundRect,
         VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten,
-        VkPipeline masked, VkMeshPipeline mesh)
+        VkPipeline masked, VkMeshPipeline mesh, VkPipeline ellipseInstanced)
     {
         _deviceApi = deviceApi;
         FlatPipeline = flat;
         TexturedPipeline = textured;
         EllipsePipeline = ellipse;
+        EllipseInstancedPipeline = ellipseInstanced;
         PagePipeline = page;
         StrokePipeline = stroke;
         SdfPipeline = sdf;
@@ -89,6 +104,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
         var maskedFrag = LoadEmbeddedModule(deviceApi, "masked.frag");
         var ellipseVert = LoadEmbeddedModule(deviceApi, "ellipse.vert");
         var ellipseFrag = LoadEmbeddedModule(deviceApi, "ellipse.frag");
+        var ellipseInstVert = LoadEmbeddedModule(deviceApi, "ellipseinst.vert");
+        var ellipseInstFrag = LoadEmbeddedModule(deviceApi, "ellipseinst.frag");
         var strokeVert = LoadEmbeddedModule(deviceApi, "stroke.vert");
         var strokeFrag = LoadEmbeddedModule(deviceApi, "stroke.frag");
         var sdfFrag = LoadEmbeddedModule(deviceApi, "sdf.frag");
@@ -123,6 +140,23 @@ public sealed unsafe class VkPipelineSet : IDisposable
             ellipseAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));
             var ellipse = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, ellipseVert, ellipseFrag,
                 &ellipseBinding, 1, ellipseAttrs, 2, msaaSamples: msaa);
+
+            // Instanced ellipse pipeline: ONE INSTANCE per ellipse = vec2 centre + vec2 axisU +
+            // vec2 axisV + float innerRadius + vec4 color (44B). The quad's six vertices come from
+            // gl_VertexIndex in ellipseinst.vert, exactly as the stroke pipeline below does it, so
+            // there is no per-vertex binding at all and an ellipse costs 44 bytes rather than six
+            // vertices of it. The two axis VECTORS are what make rotation and shear free: they are
+            // the images of local (1,0) and (0,1), so no angle is passed and none is recovered.
+            VkVertexInputBindingDescription ellipseInstBinding = new(11 * sizeof(float), VkVertexInputRate.Instance);
+            var ellipseInstAttrs = stackalloc VkVertexInputAttributeDescription[5];
+            ellipseInstAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                       // aCentre
+            ellipseInstAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));       // aAxisU
+            ellipseInstAttrs[2] = new(2, VkFormat.R32G32Sfloat, 4 * sizeof(float));       // aAxisV
+            ellipseInstAttrs[3] = new(3, VkFormat.R32Sfloat, 6 * sizeof(float));          // aInnerRadius
+            ellipseInstAttrs[4] = new(4, VkFormat.R32G32B32A32Sfloat, 7 * sizeof(float)); // aColor
+            var ellipseInstanced = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout,
+                ellipseInstVert, ellipseInstFrag,
+                &ellipseInstBinding, 1, ellipseInstAttrs, 5, msaaSamples: msaa);
 
             // Stroke pipeline: ONE INSTANCE per segment = vec2 P0 + vec2 P1 (16B). The quad's six
             // vertices come from gl_VertexIndex in stroke.vert, so the segment's side/end selectors
@@ -171,7 +205,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var mesh = VkMeshPipeline.Create(deviceApi, ctx.RenderPass, msaa);
 
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, roundRect,
-                flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh);
+                flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced);
         }
         finally
         {
@@ -183,6 +217,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
             deviceApi.vkDestroyShaderModule(maskedFrag);
             deviceApi.vkDestroyShaderModule(ellipseVert);
             deviceApi.vkDestroyShaderModule(ellipseFrag);
+            deviceApi.vkDestroyShaderModule(ellipseInstVert);
+            deviceApi.vkDestroyShaderModule(ellipseInstFrag);
             deviceApi.vkDestroyShaderModule(strokeVert);
             deviceApi.vkDestroyShaderModule(strokeFrag);
             deviceApi.vkDestroyShaderModule(sdfFrag);
@@ -200,6 +236,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(FlatLightenPipeline);
         _deviceApi.vkDestroyPipeline(TexturedPipeline);
         _deviceApi.vkDestroyPipeline(EllipsePipeline);
+        _deviceApi.vkDestroyPipeline(EllipseInstancedPipeline);
         _deviceApi.vkDestroyPipeline(RoundRectPipeline);
         _deviceApi.vkDestroyPipeline(PagePipeline);
         _deviceApi.vkDestroyPipeline(MaskedPipeline);
