@@ -190,6 +190,32 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private long _submitsTotal, _submitsRejected;
     private volatile bool _deviceLost;
 
+    // Consecutive vkQueueSubmit rejections, reset by a successful submit. One or two are the transient
+    // the dropped-frame path in SubmitFrame absorbs; a streak is a device that is not taking work at
+    // all, which the event loop has to be TOLD about -- see RejectedSubmitStreakLimit.
+    private int _rejectedSubmitStreak;
+
+    /// <summary>
+    /// How many consecutive rejected submits are absorbed as dropped frames before
+    /// <see cref="SubmitFrame"/> throws the driver's result, handing the device to the event loop's
+    /// mid-frame recovery.
+    /// </summary>
+    /// <remarks>
+    /// Measured 2026-08-04: after a recovery the Adreno driver rejected exactly two frames and took
+    /// the third, which is the transient the silent drop exists for. Measured 2026-09-22: it rejected
+    /// EVERY frame for minutes, and because a dropped frame threw nothing and the loop counted each
+    /// as clean, no recovery was ever attempted, the window stayed blank and the process stayed alive
+    /// with a session it could no longer show. Three: past the measured transient, short enough that
+    /// a dead device is noticed in tens of milliseconds.
+    /// </remarks>
+    public const int RejectedSubmitStreakLimit = 3;
+
+    /// <summary>
+    /// Whether the last <see cref="EndFrame"/> put work on the queue. False for a frame the driver
+    /// rejected, which was dropped, not drawn, and must not count as a clean frame to the event loop.
+    /// </summary>
+    public bool LastFrameSubmitted { get; private set; } = true;
+
     /// <summary>True once any queue/fence/present call has reported VK_ERROR_DEVICE_LOST.</summary>
     public bool DeviceLost => _deviceLost;
 
@@ -906,6 +932,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
             Volatile.Write(ref _submitOrdinal[_currentFrame], _frameOrdinal);
             Volatile.Write(ref _submitPending[_currentFrame], 1);
             Interlocked.Increment(ref _submitsTotal);
+            _rejectedSubmitStreak = 0;
+            LastFrameSubmitted = true;
         }
         else if (submitResult == VkResult.ErrorInitializationFailed)
         {
@@ -926,6 +954,21 @@ public sealed unsafe partial class VulkanContext : IDisposable
             CancelPresentCaptureOnRejectedSubmit();
             _frameBegun = false;
             _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
+            LastFrameSubmitted = false;
+
+            // A streak is not a dropped frame, it is a device that is not taking work, and a loop that
+            // is told nothing goes on counting blank frames as clean forever. Throw the result the
+            // driver gave, so the event loop's mid-frame recovery rebuilds sync and swapchain, backs
+            // off, and asks the host to shed load when that does not stick. The frame index has
+            // already advanced and nothing is in flight under it, so the recovery finds the same
+            // state every other mid-frame throw leaves.
+            if (++_rejectedSubmitStreak >= RejectedSubmitStreakLimit)
+            {
+                SdlVulkanLog.Logger.SubmitRejectedStreak(_rejectedSubmitStreak);
+                _rejectedSubmitStreak = 0;
+                throw new VkException(submitResult,
+                    $"{RejectedSubmitStreakLimit} consecutive vkQueueSubmit rejections: the device is not taking work");
+            }
             return;
         }
         else

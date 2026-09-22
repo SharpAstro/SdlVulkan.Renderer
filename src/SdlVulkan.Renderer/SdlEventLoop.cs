@@ -437,6 +437,18 @@ public sealed class SdlEventLoop
             }
 #endif
 
+            // A frame the driver rejected was DROPPED, not drawn: nothing reached the GPU and nothing
+            // was presented. It must not count as the clean frame that ends a recovery storm, or a
+            // device rejecting every submit reads as perfectly healthy -- which is what a blank window
+            // over a live process was on 2026-09-22. Ask for another frame and leave the storm
+            // accounting alone; the context turns a streak of these into the throw the catch below
+            // handles (VulkanContext.RejectedSubmitStreakLimit).
+            if (!renderer.LastFrameSubmitted)
+            {
+                v.NeedsRedraw = true;
+                return false;
+            }
+
             if (renderer.FontAtlasDirty)
                 v.NeedsRedraw = true;
 

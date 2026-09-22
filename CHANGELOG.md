@@ -52,6 +52,19 @@ single-draw path to one level of one channel, for a fill and for a stroke. The r
 implementation would pass it, while at 45 degrees that bounding box is a circle covering two
 probes the real ellipse rejects, and a second test asserts the circle does cover them.
 
+**A device that rejects every submit is reported, not counted as healthy.** A rejected
+`vkQueueSubmit` (`ErrorInitializationFailed`, the Adreno driver's answer) was absorbed as one dropped
+frame, which is right for the two-frame transient it was measured on in August, and wrong for what
+happened on 2026-09-22: every frame rejected for minutes, no exception, each one counted by the event
+loop as a clean frame, so no recovery was ever attempted and the window stayed blank over a process
+that was otherwise alive and running a session. Now `VulkanContext.LastFrameSubmitted` tells the loop
+a dropped frame apart from a drawn one, so it neither ends a recovery storm nor stops asking for a
+frame, and `RejectedSubmitStreakLimit` (three) consecutive rejections throw the driver's own result,
+which puts the device through the mid-frame recovery, the backoff and the host's load-shed callback
+like any other mid-frame failure. What it does not do, and what remains open, is recreate the device:
+a device that stays dead across recoveries leaves the window blank and the process alive, which is
+the least bad outcome available to a renderer that does not own the host's GPU resources.
+
 ## 7.45
 
 **Atlas uploads obey the queue's `minImageTransferGranularity`.** Both font atlases flushed their
