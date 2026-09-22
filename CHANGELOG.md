@@ -7,6 +7,42 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.46
+
+**An ellipse can be drawn at any affine placement, and a page of them in one call.** The primitive
+could only be drawn upright, and only one at a time; both limits are gone, and the placement half
+lives on the abstraction rather than here.
+
+- **Rotated and sheared ellipses are DIR.Lib 10.3's shape, overridden here.** `FillEllipse` and
+  `DrawEllipse` now take the four corners of a parallelogram, the images of local `(-1,-1)`,
+  `(+1,-1)`, `(+1,+1)`, `(-1,+1)`, or a centre plus two semi-axis vectors. Declaring them on
+  `Renderer<TSurface>` rather than on `VkRenderer` is what makes them reachable from a CPU surface
+  and a browser too, for the reason `DrawTriangles` already records in its own documentation; this
+  repo supplies the one-draw override of the two virtuals and inherits the convenience forms.
+  **No shader change was required.** `ellipse.vert` already passed the local coordinate through as
+  a plain varying and `ellipse.frag` already tested `dot(vLocal, vLocal)` against the unit disc, so
+  interpolating that varying across a parallelogram inverts the affine map exactly. Only the entry
+  point was ever axis-aligned. The `RectInt` overloads became thin wrappers onto the same shared
+  draw, replacing two near-identical copies of the same six-vertex write.
+- **`EllipseInstancedPipeline` is the bulk form.** One draw per ellipse is right for chrome, a few
+  dots and swatches a frame, and wrong for a drawing full of circles, a chart or a marker overlay.
+  One instance carries its centre, both semi-axis vectors, its hole and its colour in 44 bytes, and
+  the quad's six vertices come from `gl_VertexIndex` exactly as the stroke pipeline already does it,
+  so there is no per-vertex binding at all; `DrawEllipseInstances` issues one `vkCmdDraw` for the
+  lot. Colour moving from the push block to the instance is what makes this a second pipeline rather
+  than a second entry point on the first, since the fragment shader has to be built for it.
+  Everything else is shared deliberately: the same six corners and the same single-discard unit-disc
+  predicate, folded into one statement for the same llvmpipe reason `ellipse.frag` records.
+
+**Requires DIR.Lib 10.3**, the release that declares the shape. The pin moves with it.
+
+Eleven tests, all running on the GPU rather than skipping. One instance renders byte-identically to
+the single-draw path, which is the only thing that would notice two pipelines drifting apart, and
+the rotation case is at 45 degrees on purpose: a right-angle turn is only a swap of width and
+height, so a bounding-box implementation would pass it, while at 45 degrees that bounding box is a
+circle covering two probes the real ellipse rejects. A second test asserts the circle does cover
+them, so the discrimination is demonstrated rather than assumed.
+
 ## 7.45
 
 **Atlas uploads obey the queue's `minImageTransferGranularity`.** Both font atlases flushed their
