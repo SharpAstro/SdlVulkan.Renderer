@@ -8,12 +8,17 @@ namespace SdlVulkan.Renderer.Tests;
 /// Render coverage for the quad overrides of <c>FillEllipse</c> and <c>DrawEllipse</c>, which take
 /// the four corners of a parallelogram instead of an axis-aligned <see cref="RectInt"/> and so can
 /// express a rotated or sheared ellipse. Both are declared on <c>Renderer</c> with a CPU default
-/// (see DIR.Lib's own AffineEllipseTests); what these cover is the Vulkan override of them.
+/// (see DIR.Lib's own AffineEllipseTests); what these cover is the Vulkan override of them, which
+/// evaluates the same pixel-distance rule with the GPU's own gradient.
 /// <para>
 /// The discriminating test is the 45° one. A rotation by a right angle is only a swap of width and
 /// height, so an implementation that quietly took the bounding box of the corners would still pass
 /// it; at 45° the bounding box is a circle enclosing the ellipse, and the four diagonal probes below
 /// separate them — the two on the minor axis lie inside that circle and outside the real shape.
+/// </para>
+/// <para>
+/// Ink is opaque white over opaque black, so a pixel's red channel IS its coverage in 255ths, which
+/// is what lets a stroke's width be measured as a sum along a row rather than counted.
 /// </para>
 /// Tests skip when Vulkan isn't loadable on the host.
 /// </summary>
@@ -42,6 +47,22 @@ public sealed class EllipseQuadRenderTests(OffscreenGpuFixture gpu)
     {
         var at = (y * (int)Width + x) * 4;
         return (rgba[at], rgba[at + 1], rgba[at + 2]);
+    }
+
+    private static int Red(byte[] rgba, int x, int y) => rgba[((y * (int)Width) + x) * 4];
+
+    private static double RowCoverage(byte[] rgba, int y, int x0)
+    {
+        var sum = 0.0;
+        for (var x = x0; x < (int)Width; x++) sum += Red(rgba, x, y) / 255.0;
+        return sum;
+    }
+
+    private static double ColumnCoverage(byte[] rgba, int x, int y0)
+    {
+        var sum = 0.0;
+        for (var y = y0; y < (int)Height; y++) sum += Red(rgba, x, y) / 255.0;
+        return sum;
     }
 
     private static void ShouldBeInk(byte[] rgba, int x, int y, string because)
@@ -87,9 +108,10 @@ public sealed class EllipseQuadRenderTests(OffscreenGpuFixture gpu)
     }
 
     /// <summary>
-    /// The rect overload is now a thin wrapper that expands the rect to its four corners, so the two
-    /// entry points must agree to the byte. This is the guard on that delegation: any divergence in
-    /// vertex order, local coordinates or push constants shows up as a whole-framebuffer difference.
+    /// The rect overload is a thin wrapper that expands the rect through DIR.Lib's one
+    /// <c>EllipseCorners</c>, so the two entry points must agree to the byte. This is the guard on
+    /// that delegation: any divergence in vertex order, local coordinates or push constants shows
+    /// up as a whole-framebuffer difference.
     /// </summary>
     [Fact]
     public void FillEllipse_RectAndItsOwnCornersRenderIdentically()
@@ -146,34 +168,84 @@ public sealed class EllipseQuadRenderTests(OffscreenGpuFixture gpu)
         ShouldBeInk(rgba, 16, 48, "inside the corners' bounding circle");
     }
 
+    /// <summary>
+    /// The edge is a coverage ramp, read off the GPU's own gradient. A circle of radius 20.3 puts
+    /// its boundary 0.2 px past the centre of pixel 52 on the row through its centre, so that pixel
+    /// reads about 0.3 covered, its neighbour inward is solid and its neighbour outward untouched.
+    /// The single-discard shader this replaces read 0 or 255 there and nothing between.
+    /// </summary>
     [Fact]
-    public void DrawEllipse_ByQuad_LeavesTheCentreHollow()
+    public void FillEllipse_ByQuad_EdgeIsAntiAliasedByCoverage()
     {
-        var rgba = RenderToPixels(r => r.DrawEllipse(C00, C10, C11, C01, Ink, innerRadius: 0.5f));
+        var rgba = RenderToPixels(r => r.FillEllipse((32f, 32f), (20.3f, 0f), (0f, 20.3f), Ink));
         if (rgba is null)
         {
             Assert.Skip("Vulkan runtime not available on this host");
             return;
         }
 
-        ShouldBeBackdrop(rgba, 32, 32, "the centre is inside the hole");
-        ShouldBeInk(rgba, 48, 48, "0.8 along the major axis is between the hole and the rim");
-        ShouldBeBackdrop(rgba, 48, 16, "the ring is still an ellipse, not its bounding box");
+        Red(rgba, 51, 32).ShouldBe(255, "inside the boundary");
+        Red(rgba, 52, 32).ShouldBeInRange(40, 120, "the boundary crosses this pixel 0.2 px past its centre");
+        Red(rgba, 53, 32).ShouldBe(0, "outside the boundary");
     }
 
-    /// <summary>An innerRadius of 0 is the fill, which is what lets the two entry points share one draw.</summary>
+    /// <summary>
+    /// The point of a pixel stroke: a 2:1 ellipse stroked 3 px wide crosses its major axis AND its
+    /// minor axis in 3 px of ink. Dividing by the screen-space gradient is what makes both true;
+    /// the hole fraction this replaced could only make one of them true and read 1.5 px across the
+    /// minor axis when 3 px across the major.
+    /// </summary>
     [Fact]
-    public void DrawEllipse_ByQuad_WithNoHoleMatchesTheFill()
+    public void DrawEllipse_ByQuad_StrokeIsThePixelWidthAcrossBothAxes()
     {
-        var filled = RenderToPixels(r => r.FillEllipse(C00, C10, C11, C01, Ink));
-        if (filled is null)
+        var rgba = RenderToPixels(r => r.DrawEllipse((32f, 32f), (24f, 0f), (0f, 12f), Ink, strokeWidth: 3f));
+        if (rgba is null)
         {
             Assert.Skip("Vulkan runtime not available on this host");
             return;
         }
 
-        var ring = RenderToPixels(r => r.DrawEllipse(C00, C10, C11, C01, Ink, innerRadius: 0f));
-        ring.ShouldNotBeNull();
-        ring.ShouldBe(filled);
+        var acrossMajor = RowCoverage(rgba, 32, 32);
+        var acrossMinor = ColumnCoverage(rgba, 32, 32);
+
+        acrossMajor.ShouldBeInRange(2.6, 3.4);
+        acrossMinor.ShouldBeInRange(2.6, 3.4);
+        System.Math.Abs(acrossMajor - acrossMinor).ShouldBeLessThan(0.3);
+    }
+
+    /// <summary>A stroke is a ring on the boundary; the interior it encloses is left alone.</summary>
+    [Fact]
+    public void DrawEllipse_ByQuad_LeavesTheInteriorEmpty()
+    {
+        var rgba = RenderToPixels(r => r.DrawEllipse(C00, C10, C11, C01, Ink, strokeWidth: 3f));
+        if (rgba is null)
+        {
+            Assert.Skip("Vulkan runtime not available on this host");
+            return;
+        }
+
+        ShouldBeBackdrop(rgba, 32, 32, "the centre is inside the ring");
+        ShouldBeBackdrop(rgba, 48, 48, "0.8 along the major axis is still inside the ring");
+        ShouldBeInk(rgba, 51, 51, "the end of the semi-major axis is on the stroke");
+        ShouldBeBackdrop(rgba, 48, 16, "the ring is still an ellipse, not its bounding box");
+    }
+
+    /// <summary>A width of zero or less is no stroke: not a fill, not a hairline.</summary>
+    [Fact]
+    public void DrawEllipse_ByQuad_NonPositiveWidthDrawsNothing()
+    {
+        var rgba = RenderToPixels(r =>
+        {
+            r.DrawEllipse(C00, C10, C11, C01, Ink, strokeWidth: 0f);
+            r.DrawEllipse(C00, C10, C11, C01, Ink, strokeWidth: -1f);
+        });
+        if (rgba is null)
+        {
+            Assert.Skip("Vulkan runtime not available on this host");
+            return;
+        }
+
+        RowCoverage(rgba, 32, 0).ShouldBe(0.0);
+        RowCoverage(rgba, 51, 0).ShouldBe(0.0);
     }
 }

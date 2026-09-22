@@ -382,7 +382,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkDescriptorSet descriptorSet;
         deviceApi.vkAllocateDescriptorSets(&dsAI, &descriptorSet).CheckResult();
 
-        // Pipeline layout with push constants (84 bytes: mat4 + vec4 + float innerRadius) + 1 descriptor set
+        // Pipeline layout with push constants (84 bytes: mat4 + vec4 + one float, the ellipse strokeWidth) + 1 descriptor set
         VkPushConstantRange pushRange = new()
         {
             stageFlags = VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment,

@@ -142,7 +142,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
                 &ellipseBinding, 1, ellipseAttrs, 2, msaaSamples: msaa);
 
             // Instanced ellipse pipeline: ONE INSTANCE per ellipse = vec2 centre + vec2 axisU +
-            // vec2 axisV + float innerRadius + vec4 color (44B). The quad's six vertices come from
+            // vec2 axisV + float strokeWidth + vec4 color (44B). The quad's six vertices come from
             // gl_VertexIndex in ellipseinst.vert, exactly as the stroke pipeline below does it, so
             // there is no per-vertex binding at all and an ellipse costs 44 bytes rather than six
             // vertices of it. The two axis VECTORS are what make rotation and shear free: they are
@@ -152,7 +152,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             ellipseInstAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                       // aCentre
             ellipseInstAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));       // aAxisU
             ellipseInstAttrs[2] = new(2, VkFormat.R32G32Sfloat, 4 * sizeof(float));       // aAxisV
-            ellipseInstAttrs[3] = new(3, VkFormat.R32Sfloat, 6 * sizeof(float));          // aInnerRadius
+            ellipseInstAttrs[3] = new(3, VkFormat.R32Sfloat, 6 * sizeof(float));          // aStrokeWidth
             ellipseInstAttrs[4] = new(4, VkFormat.R32G32B32A32Sfloat, 7 * sizeof(float)); // aColor
             var ellipseInstanced = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout,
                 ellipseInstVert, ellipseInstFrag,
