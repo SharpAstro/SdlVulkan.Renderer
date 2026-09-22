@@ -2107,27 +2107,64 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     public override void FillEllipse(in RectInt rect, DIR.Lib.RGBAColor32 fillColor)
+        => FillEllipse(
+            ((float)rect.UpperLeft.X, (float)rect.UpperLeft.Y),
+            ((float)rect.LowerRight.X, (float)rect.UpperLeft.Y),
+            ((float)rect.LowerRight.X, (float)rect.LowerRight.Y),
+            ((float)rect.UpperLeft.X, (float)rect.LowerRight.Y),
+            fillColor);
+
+    /// <summary>
+    /// Fills the ellipse inscribed in an arbitrary parallelogram — so a rotated or sheared ellipse,
+    /// which the <see cref="RectInt"/> overload cannot express.
+    /// </summary>
+    /// <remarks>
+    /// The corners are the images of the unit square's, in the order (-1,-1), (+1,-1), (+1,+1),
+    /// (-1,+1), and the shape drawn is the image of the unit DISC under that same map. Any affine
+    /// transform of a circle is an ellipse, so passing a CTM's transformed corners is all that
+    /// rotation and shear require — no shader change, because the local coordinate is a plain
+    /// varying and interpolating it across a parallelogram inverts the map exactly.
+    /// <para>
+    /// Pass a genuine parallelogram: <paramref name="c01"/> is not free, it must be
+    /// <c>c00 + c11 - c10</c>. A quad that is not one is not the image of a square under any affine
+    /// map, so the two triangles disagree about where the centre is and the result is two clipped
+    /// half-discs meeting at a seam rather than one ellipse.
+    /// </para>
+    /// </remarks>
+    /// <param name="c00">Image of local (-1,-1).</param>
+    /// <param name="c10">Image of local (+1,-1).</param>
+    /// <param name="c11">Image of local (+1,+1).</param>
+    /// <param name="c01">Image of local (-1,+1).</param>
+    public void FillEllipse((float X, float Y) c00, (float X, float Y) c10,
+                            (float X, float Y) c11, (float X, float Y) c01,
+                            DIR.Lib.RGBAColor32 fillColor)
+        => EllipseQuad(c00, c10, c11, c01, fillColor, innerRadius: 0f);
+
+    /// <summary>
+    /// The one draw behind every ellipse entry point: six vertices of <c>pos + local</c> through the
+    /// EllipsePipeline, with <paramref name="innerRadius"/> in LOCAL units — 0 fills, and anything in
+    /// (0,1) leaves a ring whose hole is that fraction of the semi-diameter.
+    /// </summary>
+    private void EllipseQuad((float X, float Y) c00, (float X, float Y) c10,
+                             (float X, float Y) c11, (float X, float Y) c01,
+                             DIR.Lib.RGBAColor32 color, float innerRadius)
     {
         if (_pipelines is null) return;
 
         var api = Surface.DeviceApi;
-        var x0 = (float)rect.UpperLeft.X;
-        var y0 = (float)rect.UpperLeft.Y;
-        var x1 = (float)rect.LowerRight.X;
-        var y1 = (float)rect.LowerRight.Y;
 
         ReadOnlySpan<float> vertices =
         [
-            x0, y0, -1f, -1f,
-            x1, y0,  1f, -1f,
-            x1, y1,  1f,  1f,
-            x0, y0, -1f, -1f,
-            x1, y1,  1f,  1f,
-            x0, y1, -1f,  1f
+            c00.X, c00.Y, -1f, -1f,
+            c10.X, c10.Y,  1f, -1f,
+            c11.X, c11.Y,  1f,  1f,
+            c00.X, c00.Y, -1f, -1f,
+            c11.X, c11.Y,  1f,  1f,
+            c01.X, c01.Y, -1f,  1f
         ];
 
-        SetColor(fillColor);
-        _pushConstants[20] = 0f; // innerRadius = 0 → filled
+        SetColor(color);
+        _pushConstants[20] = innerRadius;
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
@@ -2213,9 +2250,6 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public void DrawEllipseOutline(in RectInt rect, DIR.Lib.RGBAColor32 strokeColor, float strokeWidth)
     {
-        if (_pipelines is null) return;
-
-        var api = Surface.DeviceApi;
         var x0 = (float)rect.UpperLeft.X;
         var y0 = (float)rect.UpperLeft.Y;
         var x1 = (float)rect.LowerRight.X;
@@ -2225,31 +2259,36 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var radiusPixels = Math.Max(Math.Abs(x1 - x0), Math.Abs(y1 - y0)) / 2f;
         var innerRadius = radiusPixels > 0 ? Math.Max(0f, (radiusPixels - strokeWidth) / radiusPixels) : 0f;
 
-        ReadOnlySpan<float> vertices =
-        [
-            x0, y0, -1f, -1f,
-            x1, y0,  1f, -1f,
-            x1, y1,  1f,  1f,
-            x0, y0, -1f, -1f,
-            x1, y1,  1f,  1f,
-            x0, y1, -1f,  1f
-        ];
-
-        SetColor(strokeColor);
-        _pushConstants[20] = innerRadius; // ring mode
-        var offset = Surface.WriteVertices(vertices);
-        if (offset == uint.MaxValue) return;
-
-        BindPipeline(_pipelines.EllipsePipeline);
-        fixed (float* pPC = _pushConstants)
-            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
-                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
-
-        var buffer = Surface.VertexBuffer;
-        var vkOffset = (ulong)offset;
-        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
-        api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
+        DrawEllipseOutline((x0, y0), (x1, y0), (x1, y1), (x0, y1), strokeColor, innerRadius);
     }
+
+    /// <summary>
+    /// Draws a ring inside an arbitrary parallelogram — the rotated/sheared counterpart of the
+    /// <see cref="RectInt"/> overload, with the hole given in LOCAL units rather than pixels.
+    /// </summary>
+    /// <remarks>
+    /// Corners are the images of the unit square's, exactly as for
+    /// <see cref="FillEllipse((float, float), (float, float), (float, float), (float, float), DIR.Lib.RGBAColor32)"/>,
+    /// and the same parallelogram requirement applies.
+    /// <para>
+    /// The hole is a fraction of the semi-diameter, so the quad must span the stroke's OUTER edge: an
+    /// ellipse of semi-axis <c>a</c> stroked with width <c>w</c> centred on its own boundary is a quad
+    /// of semi-axis <c>a + w/2</c> with <c>innerRadius = (a - w/2) / (a + w/2)</c>.
+    /// </para>
+    /// <para>
+    /// One scalar can only describe a ring of constant thickness in local space, which is a constant
+    /// stroke width exactly when the pre-transform shape is a CIRCLE — that covers a circle placed
+    /// under any rotation, scale or shear, because the transform is what the quad carries. A shape
+    /// that is already an ellipse before the transform, stroked with a constant width, has a ring
+    /// that is thinner across its long axis than its short one, and this draws that as uniform.
+    /// </para>
+    /// </remarks>
+    /// <param name="innerRadius">Hole radius in local units. Clamped to [0,1]; 0 fills the ellipse
+    /// and 1 draws nothing.</param>
+    public void DrawEllipseOutline((float X, float Y) c00, (float X, float Y) c10,
+                                   (float X, float Y) c11, (float X, float Y) c01,
+                                   DIR.Lib.RGBAColor32 strokeColor, float innerRadius)
+        => EllipseQuad(c00, c10, c11, c01, strokeColor, Math.Clamp(innerRadius, 0f, 1f));
 
     public override void DrawText(ReadOnlySpan<char> text, string fontFamily, float fontSize,
         DIR.Lib.RGBAColor32 fontColor, in RectInt layout, TextAlign horizAlignment = TextAlign.Center,
