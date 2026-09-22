@@ -28,7 +28,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     private uint _savedHeight;
     private bool _inThumbnailCapture;
 
-    // Push constant data: mat4 (16 floats) + vec4 color (4 floats) + float innerRadius (1 float) = 84 bytes
+    // Push constant data: mat4 (16 floats) + vec4 color (4 floats) + one float (the ellipse pipeline's
+    // strokeWidth in pixels, unread by every other pipeline) = 84 bytes
     private readonly float[] _pushConstants = new float[21];
 
     // Content→device transform folded into the projection (see UpdateProjection). Identity by default,
@@ -2107,12 +2108,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     }
 
     public override void FillEllipse(in RectInt rect, DIR.Lib.RGBAColor32 fillColor)
-        => FillEllipse(
-            ((float)rect.UpperLeft.X, (float)rect.UpperLeft.Y),
-            ((float)rect.LowerRight.X, (float)rect.UpperLeft.Y),
-            ((float)rect.LowerRight.X, (float)rect.LowerRight.Y),
-            ((float)rect.UpperLeft.X, (float)rect.LowerRight.Y),
-            fillColor);
+    {
+        // DIR.Lib's one rect-to-corners expansion, so this backend and WebGL cannot each pick their own.
+        var (c00, c10, c11, c01) = EllipseCorners(rect);
+        FillEllipse(c00, c10, c11, c01, fillColor);
+    }
 
     /// <summary>
     /// Fills the ellipse inscribed in an arbitrary parallelogram — so a rotated or sheared ellipse,
@@ -2122,8 +2122,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// The corners are the images of the unit square's, in the order (-1,-1), (+1,-1), (+1,+1),
     /// (-1,+1), and the shape drawn is the image of the unit DISC under that same map. Any affine
     /// transform of a circle is an ellipse, so passing a CTM's transformed corners is all that
-    /// rotation and shear require — no shader change, because the local coordinate is a plain
-    /// varying and interpolating it across a parallelogram inverts the map exactly.
+    /// rotation and shear require: the local coordinate is a plain varying, interpolating it across
+    /// a parallelogram inverts the map exactly, and its screen-space derivative is the gradient the
+    /// pixel-distance rule on the base declaration divides by, so the edge is anti-aliased too.
     /// <para>
     /// Pass a genuine parallelogram: <paramref name="c01"/> is not free, it must be
     /// <c>c00 + c11 - c10</c>. A quad that is not one is not the image of a square under any affine
@@ -2138,33 +2139,48 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public override void FillEllipse((float X, float Y) c00, (float X, float Y) c10,
                                      (float X, float Y) c11, (float X, float Y) c01,
                                      DIR.Lib.RGBAColor32 fillColor)
-        => EllipseQuad(c00, c10, c11, c01, fillColor, innerRadius: 0f);
+        => EllipseQuad(c00, c10, c11, c01, fillColor, strokeWidth: 0f);
 
     /// <summary>
     /// The one draw behind every ellipse entry point: six vertices of <c>pos + local</c> through the
-    /// EllipsePipeline, with <paramref name="innerRadius"/> in LOCAL units — 0 fills, and anything in
-    /// (0,1) leaves a ring whose hole is that fraction of the semi-diameter.
+    /// EllipsePipeline, with <paramref name="strokeWidth"/> in PIXELS, 0 being the fill. The rule the
+    /// shader evaluates is the one on the base's corner <c>DrawEllipse(c00, c10, c11, c01, colour, strokeWidth)</c>,
+    /// and so is the footprint: the corners grown by <c>w/2 + 1</c> px along each axis, which is
+    /// where the anti-aliased rim lands. <c>ellipseinst.vert</c> pads its instances the same way.
     /// </summary>
     private void EllipseQuad((float X, float Y) c00, (float X, float Y) c10,
                              (float X, float Y) c11, (float X, float Y) c01,
-                             DIR.Lib.RGBAColor32 color, float innerRadius)
+                             DIR.Lib.RGBAColor32 color, float strokeWidth)
     {
         if (_pipelines is null) return;
 
         var api = Surface.DeviceApi;
 
+        // The corners imply the axes, as in the base default: c10 - c00 spans 2u, c01 - c00 spans 2v.
+        // c11 is implied by the other three and is not read.
+        var ux = (c10.X - c00.X) * 0.5f;
+        var uy = (c10.Y - c00.Y) * 0.5f;
+        var vx = (c01.X - c00.X) * 0.5f;
+        var vy = (c01.Y - c00.Y) * 0.5f;
+        var cx = c00.X + ux + vx;
+        var cy = c00.Y + uy + vy;
+
+        var pad = (strokeWidth * 0.5f) + 1f;
+        var eu = 1f + (pad / MathF.Max(MathF.Sqrt((ux * ux) + (uy * uy)), 1e-6f));
+        var ev = 1f + (pad / MathF.Max(MathF.Sqrt((vx * vx) + (vy * vy)), 1e-6f));
+
         ReadOnlySpan<float> vertices =
         [
-            c00.X, c00.Y, -1f, -1f,
-            c10.X, c10.Y,  1f, -1f,
-            c11.X, c11.Y,  1f,  1f,
-            c00.X, c00.Y, -1f, -1f,
-            c11.X, c11.Y,  1f,  1f,
-            c01.X, c01.Y, -1f,  1f
+            cx - (eu * ux) - (ev * vx), cy - (eu * uy) - (ev * vy), -eu, -ev,
+            cx + (eu * ux) - (ev * vx), cy + (eu * uy) - (ev * vy),  eu, -ev,
+            cx + (eu * ux) + (ev * vx), cy + (eu * uy) + (ev * vy),  eu,  ev,
+            cx - (eu * ux) - (ev * vx), cy - (eu * uy) - (ev * vy), -eu, -ev,
+            cx + (eu * ux) + (ev * vx), cy + (eu * uy) + (ev * vy),  eu,  ev,
+            cx - (eu * ux) + (ev * vx), cy - (eu * uy) + (ev * vy), -eu,  ev
         ];
 
         SetColor(color);
-        _pushConstants[20] = innerRadius;
+        _pushConstants[20] = strokeWidth;
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
@@ -2224,7 +2240,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         ];
 
         SetColor(fillColor);
-        _pushConstants[20] = 0f; // innerRadius is unused by this shader; keep the shared block well-defined
+        _pushConstants[20] = 0f; // the ellipse strokeWidth slot is unused by this shader; keep the shared block well-defined
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
@@ -2246,32 +2262,30 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         => DrawEllipseOutline(rect, strokeColor, strokeWidth);
 
     /// <summary>
-    /// Draws an ellipse outline (ring) with the given stroke width in pixels.
+    /// Draws an ellipse outline (ring) with the given stroke width in pixels. Nothing is converted
+    /// here: the rect expands through DIR.Lib's one <c>EllipseCorners</c> and the stroke goes to the
+    /// shader as the pixel width it is. This used to derive a local hole fraction from the LONGER
+    /// semi-axis while WebGL derived its own from the SHORTER, so the same call drew two different
+    /// rings; with the rule on the abstraction there is nothing left to derive.
     /// </summary>
     public void DrawEllipseOutline(in RectInt rect, DIR.Lib.RGBAColor32 strokeColor, float strokeWidth)
     {
-        var x0 = (float)rect.UpperLeft.X;
-        var y0 = (float)rect.UpperLeft.Y;
-        var x1 = (float)rect.LowerRight.X;
-        var y1 = (float)rect.LowerRight.Y;
-
-        // Compute inner radius in normalized [-1,1] space
-        var radiusPixels = Math.Max(Math.Abs(x1 - x0), Math.Abs(y1 - y0)) / 2f;
-        var innerRadius = radiusPixels > 0 ? Math.Max(0f, (radiusPixels - strokeWidth) / radiusPixels) : 0f;
-
-        DrawEllipse((x0, y0), (x1, y0), (x1, y1), (x0, y1), strokeColor, innerRadius);
+        var (c00, c10, c11, c01) = EllipseCorners(rect);
+        DrawEllipse(c00, c10, c11, c01, strokeColor, strokeWidth);
     }
 
     /// <inheritdoc/>
     /// <remarks>
     /// One <c>vkCmdDraw</c> of six vertices through the EllipsePipeline, in place of the base
-    /// scanline default. What <paramref name="innerRadius"/> can and cannot express is stated once
-    /// on the base declaration, not repeated here.
+    /// coverage default; the rule both implement is stated once on the base declaration.
     /// </remarks>
     public override void DrawEllipse((float X, float Y) c00, (float X, float Y) c10,
                                      (float X, float Y) c11, (float X, float Y) c01,
-                                     DIR.Lib.RGBAColor32 strokeColor, float innerRadius)
-        => EllipseQuad(c00, c10, c11, c01, strokeColor, Math.Clamp(innerRadius, 0f, 1f));
+                                     DIR.Lib.RGBAColor32 strokeColor, float strokeWidth)
+    {
+        if (strokeWidth <= 0f) return;
+        EllipseQuad(c00, c10, c11, c01, strokeColor, strokeWidth);
+    }
 
     // The centre-plus-semi-axes forms are NOT repeated here. They are non-virtual on
     // Renderer<TSurface>, which expands them to their own corners and reaches the two overrides
@@ -2282,7 +2296,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     /// <summary>
     /// Floats per instance for <see cref="DrawEllipseInstances"/>: <c>centre(2), axisU(2), axisV(2),
-    /// innerRadius(1), colour(4)</c> = 11, matching the attribute layout the pipeline declares.
+    /// strokeWidth(1), colour(4)</c> = 11, matching the attribute layout the pipeline declares.
     /// </summary>
     public const int EllipseInstanceFloats = 11;
 
@@ -2293,12 +2307,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public static void WriteEllipseInstance(Span<float> dst, (float X, float Y) centre,
                                             (float X, float Y) semiAxisU, (float X, float Y) semiAxisV,
-                                            float innerRadius, DIR.Lib.RGBAColor32 color)
+                                            float strokeWidth, DIR.Lib.RGBAColor32 color)
     {
         dst[0] = centre.X;      dst[1] = centre.Y;
         dst[2] = semiAxisU.X;   dst[3] = semiAxisU.Y;
         dst[4] = semiAxisV.X;   dst[5] = semiAxisV.Y;
-        dst[6] = Math.Clamp(innerRadius, 0f, 1f);
+        dst[6] = MathF.Max(strokeWidth, 0f); // pixels; 0 fills
         dst[7] = color.RedF;    dst[8] = color.GreenF;
         dst[9] = color.BlueF;   dst[10] = color.AlphaF;
     }
@@ -2309,7 +2323,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// thousands of them and a call apiece would be the cost rather than the shading.
     /// </summary>
     /// <remarks>
-    /// Each instance carries its own hole and its own colour, so one call covers fills and rings in
+    /// Each instance carries its own stroke width in pixels (0 fills) and its own colour, so one call
+    /// covers fills and rings in
     /// mixed colours; nothing per-draw is read from the push block but the projection. Build the
     /// buffer with <see cref="WriteEllipseInstance"/>, <see cref="EllipseInstanceFloats"/> apiece.
     /// <para>

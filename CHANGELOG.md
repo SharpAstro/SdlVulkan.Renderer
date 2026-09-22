@@ -9,39 +9,48 @@ this file disagrees with. Bump it there and add the entry here, in the same comm
 
 ## 7.46
 
-**An ellipse can be drawn at any affine placement, and a page of them in one call.** The primitive
-could only be drawn upright, and only one at a time; both limits are gone, and the placement half
-lives on the abstraction rather than here.
+**An ellipse can be drawn at any affine placement, anti-aliased, with a pixel-width stroke, and a
+page of them in one call.** The primitive could only be drawn upright, one at a time, with a hard
+edge; all three limits are gone, and the shape itself now lives on the abstraction.
 
-- **Rotated and sheared ellipses are DIR.Lib 10.3's shape, overridden here.** `FillEllipse` and
-  `DrawEllipse` now take the four corners of a parallelogram, the images of local `(-1,-1)`,
+- **Rotated and sheared ellipses are DIR.Lib 10.4's shape, overridden here.** `FillEllipse` and
+  `DrawEllipse` take the four corners of a parallelogram, the images of local `(-1,-1)`,
   `(+1,-1)`, `(+1,+1)`, `(-1,+1)`, or a centre plus two semi-axis vectors. Declaring them on
   `Renderer<TSurface>` rather than on `VkRenderer` is what makes them reachable from a CPU surface
   and a browser too, for the reason `DrawTriangles` already records in its own documentation; this
   repo supplies the one-draw override of the two virtuals and inherits the convenience forms.
-  **No shader change was required.** `ellipse.vert` already passed the local coordinate through as
-  a plain varying and `ellipse.frag` already tested `dot(vLocal, vLocal)` against the unit disc, so
-  interpolating that varying across a parallelogram inverts the affine map exactly. Only the entry
-  point was ever axis-aligned. The `RectInt` overloads became thin wrappers onto the same shared
-  draw, replacing two near-identical copies of the same six-vertex write.
+- **The shader is the pixel-distance rule the base declares, evaluated with the GPU's gradient.**
+  `ellipse.frag` and `ellipseinst.frag` take `r = |local|`, divide `r - 1` by the length of
+  `(dFdx(r), dFdy(r))` to get a signed distance in PIXELS for any rotation, scale or shear, and
+  cover a fill as `clamp(0.5 - d, 0, 1)` and a stroke of width `w` as `clamp(0.5 + w/2 - |d|, 0, 1)`.
+  So the edge is anti-aliased, and a stroke is the same pixel width at every point of every
+  ellipse. The quad is padded by `w/2 + 1` px along each axis so the rim has somewhere to land,
+  and the single-discard shape is kept for the llvmpipe reason `ellipse.frag` records.
+- **The rect ring converts nothing any more.** `DrawEllipseOutline(rect, ..)` used to derive a
+  local hole fraction from the LONGER semi-axis while WebGL derived its own from the SHORTER, so
+  the same call drew two different rings; both now expand the rect through DIR.Lib's one
+  `Renderer.EllipseCorners` and hand the stroke to the shader as the pixel width it is.
 - **`EllipseInstancedPipeline` is the bulk form.** One draw per ellipse is right for chrome, a few
   dots and swatches a frame, and wrong for a drawing full of circles, a chart or a marker overlay.
-  One instance carries its centre, both semi-axis vectors, its hole and its colour in 44 bytes, and
-  the quad's six vertices come from `gl_VertexIndex` exactly as the stroke pipeline already does it,
-  so there is no per-vertex binding at all; `DrawEllipseInstances` issues one `vkCmdDraw` for the
-  lot. Colour moving from the push block to the instance is what makes this a second pipeline rather
-  than a second entry point on the first, since the fragment shader has to be built for it.
-  Everything else is shared deliberately: the same six corners and the same single-discard unit-disc
-  predicate, folded into one statement for the same llvmpipe reason `ellipse.frag` records.
+  One instance carries its centre, both semi-axis vectors, its stroke width in pixels (0 fills) and
+  its colour in 44 bytes, and the quad's six vertices come from `gl_VertexIndex` exactly as the
+  stroke pipeline already does it, so there is no per-vertex binding at all; `DrawEllipseInstances`
+  issues one `vkCmdDraw` for the lot. Colour and stroke moving from the push block to the instance
+  is what makes this a second pipeline rather than a second entry point on the first, since the
+  fragment shader has to be built for it; the rule it evaluates is the same one.
 
-**Requires DIR.Lib 10.3**, the release that declares the shape. The pin moves with it.
+**Requires DIR.Lib 10.4**, the release that declares the shape and states the rule. The pin moves
+with it.
 
-Eleven tests, all running on the GPU rather than skipping. One instance renders byte-identically to
-the single-draw path, which is the only thing that would notice two pipelines drifting apart, and
-the rotation case is at 45 degrees on purpose: a right-angle turn is only a swap of width and
-height, so a bounding-box implementation would pass it, while at 45 degrees that bounding box is a
-circle covering two probes the real ellipse rejects. A second test asserts the circle does cover
-them, so the discrimination is demonstrated rather than assumed.
+Fourteen tests, all running on the GPU rather than skipping, and the ones that matter measure
+rather than probe: ink is white over black so a pixel's red channel is its coverage, a 2:1 ellipse
+stroked 3 px reads 3 px across the major axis AND the minor (the hole fraction this replaces read
+1.5 across the minor), an edge pixel the boundary crosses 0.2 px past its centre reads a fraction
+(the single-discard shader read 0 or 255 there and nothing between), and one instance matches the
+single-draw path to one level of one channel, for a fill and for a stroke. The rotation case is at
+45 degrees on purpose: a right-angle turn is only a swap of width and height, so a bounding-box
+implementation would pass it, while at 45 degrees that bounding box is a circle covering two
+probes the real ellipse rejects, and a second test asserts the circle does cover them.
 
 ## 7.45
 
