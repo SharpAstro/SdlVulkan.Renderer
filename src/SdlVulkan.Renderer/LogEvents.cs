@@ -67,6 +67,9 @@ internal static partial class LogEvents
     [LoggerMessage(115, LogLevel.Critical, "[SdlEventLoop] device lost mid-frame (window {WindowId}); terminal by spec, abandoning the device without attempting swapchain recovery.")]
     public static partial void DeviceLostTerminal(this ILogger logger, uint windowId);
 
+    [LoggerMessage(207, LogLevel.Error, "[VulkanContext] {Streak} consecutive vkQueueSubmit rejections (ErrorInitializationFailed): the device is not taking work; escalating to mid-frame recovery.")]
+    public static partial void SubmitRejectedStreak(this ILogger logger, int streak);
+
     [LoggerMessage(201, LogLevel.Error, "[VulkanContext] vkQueueSubmit rejected frame {FrameIndex} (ErrorInitializationFailed); dropped the frame and replaced its acquire semaphore.")]
     public static partial void SubmitRejectedFrameDropped(this ILogger logger, int frameIndex);
 
