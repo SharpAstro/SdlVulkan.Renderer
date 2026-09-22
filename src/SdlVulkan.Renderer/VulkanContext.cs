@@ -204,8 +204,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// Measured 2026-08-04: after a recovery the Adreno driver rejected exactly two frames and took
     /// the third, which is the transient the silent drop exists for. Measured 2026-09-22: it rejected
     /// EVERY frame for minutes, and because a dropped frame threw nothing and the loop counted each
-    /// as clean, no recovery was ever attempted, the window stayed blank and the process stayed alive
-    /// with a session it could no longer show. Three: past the measured transient, short enough that
+    /// as clean, no recovery was ever attempted, the window froze on its last frame (the state behind
+    /// it went on changing: a tab click still retitled the window) and the process stayed alive with a
+    /// session it could no longer show. Three: past the measured transient, short enough that
     /// a dead device is noticed in tens of milliseconds.
     /// </remarks>
     public const int RejectedSubmitStreakLimit = 3;
