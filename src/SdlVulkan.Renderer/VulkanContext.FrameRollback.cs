@@ -62,7 +62,13 @@ public sealed unsafe partial class VulkanContext
 
     /// <summary>A frame starts recording into <paramref name="cmd"/>: what it records from here on is
     /// provisional until it reaches the queue.</summary>
-    private void BeginFrameRecording(VkCommandBuffer cmd) => _recordingFrameCmd = cmd;
+    private void BeginFrameRecording(VkCommandBuffer cmd)
+    {
+        _recordingFrameCmd = cmd;
+        // A fresh command buffer has no pass open. A cached-layer pass left open by a frame that threw
+        // inside it would otherwise refuse every later layer pass for the life of the context.
+        _inLayerPass = false;
+    }
 
     /// <summary>The frame's submit was accepted: its work is on the queue, so nothing needs undoing.</summary>
     private void NoteFrameSubmitted()

@@ -107,6 +107,57 @@ public sealed class FrameRollbackContractTests(OffscreenGpuFixture gpu)
     }
 
     [Fact]
+    public void ACachedLayerLeftOpenByAFrameThatNeverEndedDoesNotOutliveIt()
+    {
+        if (Context() is not { } ctx)
+        {
+            Assert.Skip("No Vulkan ICD available on this host.");
+            return;
+        }
+
+        var black = new RGBAColor32(0, 0, 0, 255);
+        var ink = new RGBAColor32(255, 255, 0, 255);
+        using var renderer = new VkRenderer(ctx, 16, 16);
+        renderer.EnsureCachedLayerTargets(8, 8).ShouldBeTrue();
+        try
+        {
+            // The layer is opened where it must be, before the frame's own render pass (OnPreRenderPass), and
+            // the drawing inside it throws: the frame is left begun, with the layer's pass open, and nothing
+            // ends either.
+            renderer.OnPreRenderPass = _ =>
+            {
+                renderer.BeginCachedLayer(8, 8, black).ShouldBeTrue();
+                throw new InvalidOperationException("drawing into the layer failed");
+            };
+            Should.Throw<InvalidOperationException>(() => renderer.BeginOffscreenFrame(black));
+
+            // The next frame may open the layer again, and draws at ITS scale, not the 8 x 8 layer's: a fill of
+            // the whole frame reaches the far corner.
+            var reopened = false;
+            renderer.OnPreRenderPass = _ =>
+            {
+                reopened = renderer.BeginCachedLayer(8, 8, black);
+                renderer.EndCachedLayer();
+            };
+            renderer.BeginOffscreenFrame(black).ShouldBeTrue();
+            reopened.ShouldBeTrue();
+            renderer.FillRectangle(new RectInt(new PointInt(16, 16), new PointInt(0, 0)), ink);
+            renderer.EndOffscreenFrame();
+            ctx.WaitOffscreenFrameComplete();
+
+            var rgba = ctx.ReadbackOffscreenRgba();
+            var corner = (15 * 16 + 15) * 4;
+            new RGBAColor32(rgba[corner], rgba[corner + 1], rgba[corner + 2], rgba[corner + 3]).ShouldBe(ink);
+        }
+        finally
+        {
+            // The targets belong to the shared fixture's context and outlive this renderer: left at 8 x 8,
+            // a later test asking for a larger layer is refused (EnsureCachedLayerTargets answers false).
+            renderer.ReleaseCachedLayerTargets();
+        }
+    }
+
+    [Fact]
     public void AOneShotCommandBufferRegistersNothing()
     {
         if (Context() is not { } ctx)
