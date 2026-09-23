@@ -72,6 +72,41 @@ public sealed class FrameRollbackContractTests(OffscreenGpuFixture gpu)
     }
 
     [Fact]
+    public void AQueuedTextureUploadIsRecordedAtTheStartOfTheNextFrame()
+    {
+        if (Context() is not { } ctx)
+        {
+            Assert.Skip("No Vulkan ICD available on this host.");
+            return;
+        }
+
+        // Solid blue, B8G8R8A8.
+        var pixels = new byte[2 * 2 * 4];
+        for (var i = 0; i < pixels.Length; i += 4)
+        {
+            pixels[i] = 255; pixels[i + 1] = 0; pixels[i + 2] = 0; pixels[i + 3] = 255;
+        }
+        using var texture = VkTexture.CreateDeferred(ctx, pixels, 2, 2);
+        using var renderer = new VkRenderer(ctx, 16, 16);
+
+        // Queued from outside any frame, as a draw path's cache adopting a decoded picture would be.
+        ctx.QueueTextureUpload(texture);
+        texture.IsUploaded.ShouldBeFalse();
+
+        renderer.BeginOffscreenFrame(new RGBAColor32(0, 0, 0, 255)).ShouldBeTrue();
+        // Recorded by the frame's start, before this frame draws anything.
+        texture.IsUploaded.ShouldBeTrue();
+        renderer.DrawTexture(texture.DescriptorSet, 0, 0, 16, 16);
+        renderer.EndOffscreenFrame();
+        ctx.WaitOffscreenFrameComplete();
+
+        var rgba = ctx.ReadbackOffscreenRgba();
+        var centre = (8 * 16 + 8) * 4;
+        new RGBAColor32(rgba[centre], rgba[centre + 1], rgba[centre + 2], rgba[centre + 3])
+            .ShouldBe(new RGBAColor32(0, 0, 255, 255));
+    }
+
+    [Fact]
     public void AOneShotCommandBufferRegistersNothing()
     {
         if (Context() is not { } ctx)

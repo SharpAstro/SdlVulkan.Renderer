@@ -60,7 +60,9 @@ public sealed class SdlEventLoop
     // both bounds must be met: enough attempts that it is not one bad moment, over long enough that the
     // load-shed request (fired at the third quick recovery) has had its chance to make the frame cheap.
     // About 5 s at the measured rate; the driver's own transient (two rejections, then work resumes)
-    // never reaches a recovery at all.
+    // never reaches a recovery at all. Only a REFUSAL counts (VK_ERROR_INITIALIZATION_FAILED, what the
+    // rejected submits and a refused one-shot throw): an error the app causes every frame, an image too
+    // large to allocate say, is a bug to report, not a dead device, and must not end the process.
     private const int DeadDeviceRecoveryLimit = 8;
     private const long DeadDeviceWindowMs = 5000;
 
@@ -621,8 +623,11 @@ public sealed class SdlEventLoop
 
             // Declared dead, not recovered again: see DeadDeviceRecoveryLimit. The same terminal hand-off
             // as a device loss, which is what a device refusing all work is in every way that matters.
-            if (v.FailingSinceTick == 0) v.FailingSinceTick = now;
-            v.RecoveriesSinceCleanFrame++;
+            if (vk.Result == VkResult.ErrorInitializationFailed)
+            {
+                if (v.FailingSinceTick == 0) v.FailingSinceTick = now;
+                v.RecoveriesSinceCleanFrame++;
+            }
             if (v.RecoveriesSinceCleanFrame >= DeadDeviceRecoveryLimit && now - v.FailingSinceTick >= DeadDeviceWindowMs)
             {
                 SdlVulkanLog.Logger.DeviceNotTakingWork(v.RecoveriesSinceCleanFrame, now - v.FailingSinceTick, vk.Result, v.Window.WindowId);
