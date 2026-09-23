@@ -814,7 +814,7 @@ public sealed class SdlEventLoop
                     {
                         vmm.MouseX = newMx;
                         vmm.MouseY = newMy;
-                        if (vmm.DispatchPointerMove(vmm.MouseX, vmm.MouseY))
+                        if (vmm.DispatchPointerMove(vmm.MouseX, vmm.MouseY, GetModState().ToInputModifier))
                         {
                             // Throttle mouse-driven redraws to ~30fps (per window).
                             var now = GetPerformanceCounter();

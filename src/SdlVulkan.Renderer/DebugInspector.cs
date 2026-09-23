@@ -224,7 +224,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         "text" => ExecuteText(RequiredString(p, "text", "s")),
         "scroll" => ExecuteScroll(Coord(p, "x"), Coord(p, "y"), Coord(p, "scrollY"), Mods(p)),
         "drag" => ExecuteDrag(Coord(p, "x1"), Coord(p, "y1"), Coord(p, "x2"), Coord(p, "y2"), Mods(p), DragSteps(p)),
-        "move" => ExecuteMove(Coord(p, "x1"), Coord(p, "y1"), Coord(p, "x2"), Coord(p, "y2"), DragSteps(p)),
+        "move" => ExecuteMove(Coord(p, "x1"), Coord(p, "y1"), Coord(p, "x2"), Coord(p, "y2"), DragSteps(p), Mods(p)),
         "postSignal" => ExecutePostSignal(RequiredString(p, "name"), SignalArgs(p)),
         // Reachable only OUTSIDE a batch, where there are no frames to wait for -- inside one the core
         // handles it. A no-op rather than an error, so a driver can send a uniform step list either way.
@@ -662,13 +662,15 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// <para>Interpolated like a drag, because a handler that integrates per motion event (or counts
     /// them) sees a single jump as one event rather than as travel.</para>
     /// </remarks>
-    private string ExecuteMove(float x1, float y1, float x2, float y2, int steps)
+    private string ExecuteMove(float x1, float y1, float x2, float y2, int steps, InputModifier mods = InputModifier.None)
     {
-        _view.DispatchPointerMove(x1, y1);
+        // The modifiers ride on every motion event, as a held key does on real ones, so a hover that
+        // answers to a key (the atlas previewing a Ctrl+click) can be driven without a keyboard.
+        _view.DispatchPointerMove(x1, y1, mods);
         for (var i = 1; i <= steps; i++)
         {
             var t = (float)i / steps;
-            _view.DispatchPointerMove(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
+            _view.DispatchPointerMove(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, mods);
         }
         _view.RequestRedraw();
         return "\"ok\"";

@@ -97,10 +97,12 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     }
 
     /// <summary>Fan a pointer move out to <see cref="OnMouseMove"/> + <see cref="OnPointerInput"/>. Returns consumed.</summary>
-    internal bool DispatchPointerMove(float x, float y)
+    /// <param name="mods">The modifiers held while moving (DIR.Lib 11.0's <c>MouseMove.Modifiers</c>), read
+    /// from the keyboard state as a press reads them, so a hover can answer to a held key.</param>
+    internal bool DispatchPointerMove(float x, float y, InputModifier mods = InputModifier.None)
     {
         var consumed = OnMouseMove?.Invoke(x, y) == true;
-        if (OnPointerInput?.Invoke(new InputEvent.MouseMove(x, y)) == true)
+        if (OnPointerInput?.Invoke(new InputEvent.MouseMove(x, y, MouseButton.None, mods)) == true)
         {
             consumed = true;
         }
