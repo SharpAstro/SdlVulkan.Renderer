@@ -64,6 +64,9 @@ internal static partial class LogEvents
     [LoggerMessage(114, LogLevel.Error, "[SdlEventLoop] AbortFrame after a mid-frame exception threw: {ExceptionType}: {ExceptionMessage}")]
     public static partial void AbortFrameThrew(this ILogger logger, string exceptionType, string exceptionMessage);
 
+    [LoggerMessage(117, LogLevel.Critical, "[SdlEventLoop] device is not taking work: {Recoveries} recoveries over {ElapsedMs}ms with no clean frame ({Result}, window {WindowId}); treating it as lost and stopping.")]
+    public static partial void DeviceNotTakingWork(this ILogger logger, int recoveries, long elapsedMs, VkResult result, uint windowId);
+
     [LoggerMessage(115, LogLevel.Critical, "[SdlEventLoop] device lost mid-frame (window {WindowId}); terminal by spec, abandoning the device without attempting swapchain recovery.")]
     public static partial void DeviceLostTerminal(this ILogger logger, uint windowId);
 

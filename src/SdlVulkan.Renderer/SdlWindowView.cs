@@ -212,12 +212,15 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     public Action? OnRenderDegraded { get; set; }
 
     /// <summary>
-    /// Called (on the render thread, at most once) when this window's GPU is wedged beyond recovery:
-    /// the in-flight fence stayed stuck past the escalation window AND the sacrificial recovery
-    /// attempt did not complete within its deadline — i.e. the driver itself is blocking inside
-    /// teardown calls (the observed Adreno failure: vkFreeMemory never returns while the GPU spins
-    /// at 100% on a hung submission). The event loop stops after this fires. The consumer should
-    /// persist session state and exit/relaunch; there is no in-process way back from a hung device.
+    /// Called (on the render thread, at most once) when this window's GPU is wedged beyond recovery,
+    /// which is any of: the device reported VK_ERROR_DEVICE_LOST; the in-flight fence stayed stuck past
+    /// the escalation window AND the sacrificial recovery attempt did not complete within its deadline
+    /// (the driver blocking inside teardown: vkFreeMemory never returns while the GPU spins at 100% on
+    /// a hung submission); repeated stuck escalations with no clean frame between; or the device went on
+    /// refusing work through repeated mid-frame recoveries (the Adreno after an engine reset, which
+    /// rejects every submit with VK_ERROR_INITIALIZATION_FAILED rather than reporting the loss). The
+    /// event loop stops after this fires. The consumer should persist session state and exit or
+    /// relaunch; the same device does not come back, and this library does not yet build a new one.
     /// </summary>
     public Action? OnGpuWedged { get; set; }
 
@@ -284,6 +287,11 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     // Stuck-fence escalations since the last clean frame. Bounds the stuck→recover→stuck ping-pong:
     // at SdlEventLoop.GpuStuckEscalationLimit the device is declared wedged (OnGpuWedged + stop).
     internal int StuckEscalations;
+    // Mid-frame recoveries since the last clean frame, and when the first of them happened (0 = none).
+    // A clean frame resets both. At SdlEventLoop.DeadDeviceRecoveryLimit over DeadDeviceWindowMs the
+    // device is declared dead (OnGpuWedged + stop) instead of being rebuilt again.
+    internal int RecoveriesSinceCleanFrame;
+    internal long FailingSinceTick;
 
     /// <summary>Number of active touch fingers on this window. Use to suppress mouse drag during pinch.</summary>
     public int ActiveFingerCount => ActiveFingers.Count;
