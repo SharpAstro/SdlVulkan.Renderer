@@ -7,6 +7,30 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.47
+
+**Every frame's GPU time is measured, and a window renders at most once per display refresh.** Both
+came out of the same wedge: every GPU wedge on record (2026-08-19, 2026-09-22, an Adreno X1-85) was
+the OS resetting the process's GPU context after one submission ran past the Windows GPU timeout,
+2 s by default (LiveKernelEvent 141), and nothing logged could say what ran long.
+
+- **GPU frame timing.** Each frame is bracketed with timestamp queries outside the render pass and
+  read back once its fence has been waited, so the readback never stalls. `LastGpuFrameMs`,
+  `PeakGpuFrameMs`, `SlowGpuFrames`, and `LastGpuSections` from `BeginGpuSection`/`EndGpuSection`;
+  a frame over `SlowGpuFrameBudgetMs` (250 ms) is logged as event 208 with its sections. Sections
+  are accurate on an immediate-mode GPU and only a hint on a tiler, which may bin the whole pass.
+- **Frame pacing.** The loop drew a frame per redraw request, and the swapchain prefers Mailbox,
+  which never waits for vblank, so a surface asking for a redraw on every pointer move drew at the
+  mouse's report rate. Each clean frame now sets the window's next due time one display refresh
+  (read from SDL, re-read once a second) after the frame started; requests before then fold into
+  that frame, and the loop waits for exactly the time until it is due rather than spinning.
+- **Inspector.** `frame_stats` reports `framesBegun` (sample twice for a frame rate) and the GPU
+  timing; `move` takes `mods`, carried on every motion event.
+- **A pointer move carries the keyboard's modifiers** (DIR.Lib 11.0's `MouseMove.Modifiers`), read
+  as a press already read them.
+- On DIR.Lib 11.0.
+
+
 ## 7.46
 
 **An ellipse can be drawn at any affine placement, anti-aliased, with a pixel-width stroke, and a
