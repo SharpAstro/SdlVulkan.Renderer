@@ -194,6 +194,29 @@ public sealed class SdlEventLoop
     [Conditional("DEBUG"), Conditional("ANDROID")]
     private static void DebugLog(string message) => DiagnosticLog?.Invoke(message);
 
+    // Refresh rate assumed when the display does not report one (SDL answers 0 for "unspecified").
+    private const float FallbackRefreshHz = 60f;
+
+    /// <summary>
+    /// One refresh of the display the window is on, in Stopwatch ticks: the pacing interval. Read from
+    /// SDL, cached on the view and re-read once a second, so a window dragged to a display with a
+    /// different rate is paced at that display's rate within a second of arriving.
+    /// </summary>
+    private static long FrameIntervalTicks(SdlWindowView v)
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (v.FrameIntervalTicks != 0 && now - v.FrameIntervalReadTimestamp < Stopwatch.Frequency)
+            return v.FrameIntervalTicks;
+
+        var hz = FallbackRefreshHz;
+        var display = GetDisplayForWindow(v.Window.Handle);
+        if (display != 0 && GetCurrentDisplayMode(display) is { RefreshRate: > 0 } mode)
+            hz = mode.RefreshRate;
+        v.FrameIntervalTicks = (long)(Stopwatch.Frequency / hz);
+        v.FrameIntervalReadTimestamp = now;
+        return v.FrameIntervalTicks;
+    }
+
     /// <summary>
     /// Runs the event loop until <see cref="Stop"/> is called or the cancellation token is triggered.
     /// Blocks the calling thread.
@@ -209,18 +232,27 @@ public sealed class SdlEventLoop
             // Falling through to WaitEventTimeout(16) wakes the loop every ~16ms to re-check, which
             // both bounds the backoff granularity and keeps event dispatch prompt.
             var nowTick = Environment.TickCount64;
+            var nowStamp = Stopwatch.GetTimestamp();
             var anyNeedsRedraw = false;
+            // A window with a redraw pending but not yet due (frame pacing) must not force PollEvent
+            // either, or the loop busy-spins until it is due; it waits for exactly that long instead.
+            var waitMs = 16;
             // A minimized window is excluded here (and skipped in the render pass below) so it never
             // forces the non-blocking PollEvent path: its surface is 0x0, so rendering it would just
             // busy-spin through failed acquire/present + swapchain recreation for frames nobody sees.
             // Falling through to WaitEventTimeout lets the loop idle until a restore/expose event.
             foreach (var v in _viewList)
-                if (v.NeedsRedraw && nowTick >= v.NextRenderAttemptTick && !v.Window.IsMinimized) { anyNeedsRedraw = true; break; }
+            {
+                if (!v.NeedsRedraw || nowTick < v.NextRenderAttemptTick || v.Window.IsMinimized) continue;
+                if (nowStamp >= v.NextFrameDueTimestamp) { anyNeedsRedraw = true; break; }
+                var dueMs = (int)Math.Ceiling((v.NextFrameDueTimestamp - nowStamp) * 1000.0 / Stopwatch.Frequency);
+                waitMs = Math.Clamp(Math.Min(waitMs, dueMs), 1, 16);
+            }
 
             Event evt;
             var hadEvent = anyNeedsRedraw
                 ? PollEvent(out evt)
-                : WaitEventTimeout(out evt, 16);
+                : WaitEventTimeout(out evt, waitMs);
 
             if (hadEvent)
             {
@@ -251,12 +283,23 @@ public sealed class SdlEventLoop
                 // Inside a retry/recovery backoff: keep NeedsRedraw armed and skip this iteration —
                 // events were already dispatched above, so the window stays responsive while waiting.
                 if (Environment.TickCount64 < v.NextRenderAttemptTick) continue;
+                // Frame pacing: rendered less than a display refresh ago. Stay armed; every request
+                // until the due time folds into the one frame that renders at it. Without this the
+                // loop drew a frame per request, and the swapchain's Mailbox present mode never waits
+                // for vblank, so a pointer moving over a redraw-on-move surface drew at the mouse's
+                // report rate, hundreds of frames a second, on the GPU the 2 s OS timeout watches.
+                var frameStart = Stopwatch.GetTimestamp();
+                if (frameStart < v.NextFrameDueTimestamp) continue;
                 v.NeedsRedraw = false;
                 // Committed to a frame: let the app configure it before the pass opens.
                 v.OnBeforeFrame?.Invoke();
                 if (RenderView(v))
                 {
                     renderedAny = true;
+                    // Paced from the frame's START, so the rate is the display's and not the display's
+                    // less the time a frame takes; 95 percent of the interval, so a frame that is due
+                    // on the vblank is not pushed to the next one by a tick of scheduling jitter.
+                    v.NextFrameDueTimestamp = frameStart + FrameIntervalTicks(v) * 95 / 100;
                     // A frame that ran out of vertex ring dropped some of its draws. The ring grows at
                     // the next BeginFrame, so one more frame paints what this one could not; without
                     // this the hole stays until something else happens to ask for a redraw.

@@ -261,6 +261,17 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     // discriminating datum a report must carry.
     internal long LastCleanFrameTick;
 
+    // Frame pacing: the Stopwatch timestamp before which this window does not render again, however
+    // many redraws are asked for in between (they fold into the frame that renders at it). Set one
+    // display refresh after each clean frame. A Stopwatch timestamp rather than a TickCount64 tick
+    // like the fields above, because TickCount64 moves in ~15.6 ms steps on Windows, which is a whole
+    // frame of jitter at 60 Hz and would pace some frames to 30.
+    internal long NextFrameDueTimestamp;
+    // One display refresh in Stopwatch ticks, read from the window's display; 0 until first measured.
+    internal long FrameIntervalTicks;
+    // When FrameIntervalTicks was last read, so a window dragged to another display is re-read.
+    internal long FrameIntervalReadTimestamp;
+
     // Sacrificial GPU-error recovery, per window (see SdlEventLoop.RenderView). When the fence is
     // known stuck the recovery teardown runs on a background task instead of the render thread —
     // on a truly hung GPU the driver can block INSIDE vkDestroy*/vkFreeMemory indefinitely, and a
