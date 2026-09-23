@@ -73,6 +73,16 @@ internal static partial class LogEvents
     [LoggerMessage(209, LogLevel.Information, "[VulkanContext] GPU frame timing unavailable on this queue (timestampValidBits = 0); LastGpuFrameMs stays NaN.")]
     public static partial void GpuTimingUnsupported(this ILogger logger);
 
+#if DEBUG
+    // Warning, not Information: a log carrying a faked wedge must say so where anyone reading it for a
+    // real one will look, because the lines the renderer writes in reply (201, 202, 207) are the real ones.
+    [LoggerMessage(210, LogLevel.Warning, "[VulkanContext] GPU FAULT INJECTION armed (DEBUG): {Fault}. The submit failures that follow are faked; nothing is sent to the GPU while it is armed.")]
+    public static partial void GpuFaultArmed(this ILogger logger, string fault);
+
+    [LoggerMessage(211, LogLevel.Warning, "[VulkanContext] GPU FAULT INJECTION cleared (DEBUG) after {Faked} faked submit result(s) on this device.")]
+    public static partial void GpuFaultCleared(this ILogger logger, long faked);
+#endif
+
     [LoggerMessage(207, LogLevel.Error, "[VulkanContext] {Streak} consecutive vkQueueSubmit rejections (ErrorInitializationFailed): the device is not taking work; escalating to mid-frame recovery.")]
     public static partial void SubmitRejectedStreak(this ILogger logger, int streak);
 

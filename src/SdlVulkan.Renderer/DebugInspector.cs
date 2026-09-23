@@ -217,6 +217,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         "restore" => ExecuteWindowState(static w => w.Restore()),
         "validationReport" => ExecuteValidationReport(),
         "frameStats" => ExecuteFrameStats(),
+        "gpuFault" => ExecuteGpuFault(p),
         "click" => ExecuteClickAt(Coord(p, "x"), Coord(p, "y"), Mods(p), Clicks(p)),
         "clickLabel" => ExecuteClickLabel(RequiredString(p, "label"), Clicks(p)),
         "key" => ExecuteKey(ResolveInputKey(RequiredString(p, "key")), Mods(p)),
@@ -729,6 +730,65 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         w.WriteEndArray();
         w.WriteEndObject();
     });
+
+    /// <summary>
+    /// Arms, clears or reads the window's device fault (<see cref="GpuFaultInjection"/>): <c>mode</c> is
+    /// <c>reject</c> (with an optional positive <c>count</c>; without one, every submit until cleared),
+    /// <c>lost</c>, <c>clear</c>, or <c>status</c>, the default. Answers with the state after the change,
+    /// plus the context's own view of it, so one call both acts and shows what the renderer made of it.
+    /// </summary>
+    private string ExecuteGpuFault(JsonElement p)
+    {
+        var context = _view.Renderer.Context;
+        var fault = context.FaultInjection;
+        // No params at all arrives as an Undefined element, on which TryGetProperty throws.
+        var hasParams = p.ValueKind == JsonValueKind.Object;
+        var mode = hasParams && p.TryGetProperty("mode", out var m) && m.ValueKind == JsonValueKind.String
+            ? m.GetString() ?? "status"
+            : "status";
+        int? count = hasParams && p.TryGetProperty("count", out var c) && c.ValueKind == JsonValueKind.Number
+            ? c.GetInt32()
+            : null;
+
+        switch (mode.ToLowerInvariant())
+        {
+            case "reject":
+                fault.RejectSubmits(count);
+                break;
+            case "lost":
+                fault.LoseDevice();
+                break;
+            case "clear":
+                fault.Clear();
+                break;
+            case "status":
+                break;
+            default:
+                throw new ArgumentException(
+                    $"unknown gpuFault mode '{mode}'. Accepted: reject (optional positive count; none = until cleared), "
+                    + "lost, clear, status.");
+        }
+
+        // Nothing renders until something asks for a frame, and a fault that no frame meets has no effect.
+        if (fault.IsArmed) _view.RequestRedraw();
+
+        return ToJson(w =>
+        {
+            w.WriteStartObject();
+            w.WriteBoolean("armed", fault.IsArmed);
+            w.WriteBoolean("deviceLost", fault.DeviceLost);
+            if (fault.RejectsRemaining is { } remaining)
+                w.WriteNumber("rejectsRemaining", remaining);
+            else
+                w.WriteNull("rejectsRemaining"); // rejecting every submit until cleared
+            w.WriteNumber("fakedResults", fault.FakedResults);
+            // The context's own verdicts, which a faked loss makes permanent, as a real one does.
+            w.WriteBoolean("contextDeviceLost", context.DeviceLost);
+            w.WriteBoolean("lastFrameSubmitted", context.LastFrameSubmitted);
+            w.WriteString("ledger", context.SubmissionLedger);
+            w.WriteEndObject();
+        });
+    }
 
     private static string ExecuteValidationReport() => ToJson(w =>
     {

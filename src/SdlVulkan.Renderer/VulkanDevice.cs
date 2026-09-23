@@ -86,6 +86,29 @@ public sealed unsafe class VulkanDevice : IDisposable
     /// </summary>
     public bool IsGpuStuck { get; internal set; }
 
+#if DEBUG
+    /// <summary>
+    /// DEBUG-only: arms a faked submit failure on this device's queue (see <see cref="GpuFaultInjection"/>),
+    /// so the rejection streak, the mid-frame recovery and the device-loss hand-off can be driven on a
+    /// healthy GPU. Reached from a live app through the inspector's <c>gpuFault</c> verb.
+    /// </summary>
+    public GpuFaultInjection FaultInjection { get; } = new();
+#endif
+
+    /// <summary>
+    /// Every <c>vkQueueSubmit</c> on this device goes through here: the frame submit, the offscreen submit
+    /// and <see cref="ExecuteOneShot"/>. One seam, so a DEBUG fault reaches all of them, and a new submit
+    /// site that bypassed it would be the one path a faked wedge could not reach.
+    /// </summary>
+    internal VkResult QueueSubmit(VkSubmitInfo* submit, VkFence fence)
+    {
+#if DEBUG
+        // Answered INSTEAD of submitting: a rejected submit does not execute on the real driver either.
+        if (FaultInjection.TryFakeSubmit(out var faked)) return faked;
+#endif
+        return DeviceApi.vkQueueSubmit(GraphicsQueue, 1, submit, fence);
+    }
+
     /// <summary>MSAA sample count (Count1 = no MSAA). Uniform across all windows on this device —
     /// the render pass and the pre-baked pipelines bake it in, so every swapchain sharing this
     /// device renders at the same sample count.</summary>
@@ -846,7 +869,16 @@ public sealed unsafe class VulkanDevice : IDisposable
             commandBufferCount = 1,
             pCommandBuffers = &cmd
         };
-        DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &submitInfo, VkFence.Null).CheckResult();
+        var submitResult = QueueSubmit(&submitInfo, VkFence.Null);
+        if (submitResult != VkResult.Success)
+        {
+            // The submit did not take, so the command buffer was never consumed and nothing is pending on
+            // it: free it before failing. Throwing straight out of the submit leaked one per failed
+            // upload, which on the Adreno (whose driver rejects every submit after an engine reset) is
+            // one per immediate texture upload tried while the device is dead.
+            DeviceApi.vkFreeCommandBuffers(CommandPool, cmd);
+            submitResult.CheckResult();
+        }
         DeviceApi.vkQueueWaitIdle(GraphicsQueue).CheckResult();
         DeviceApi.vkFreeCommandBuffers(CommandPool, cmd);
     }

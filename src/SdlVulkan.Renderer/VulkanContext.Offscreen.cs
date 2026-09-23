@@ -164,7 +164,7 @@ public sealed unsafe partial class VulkanContext
     /// <summary>Submit attempts before an offscreen submit rejection is treated as terminal. Small on
     /// purpose: this exists to ride out a transient driver rejection, not to grind against a real
     /// failure, and every attempt after the first is already an anomaly worth surfacing.</summary>
-    private const int OffscreenSubmitAttempts = 4;
+    internal const int OffscreenSubmitAttempts = 4;
 
     /// <summary>
     /// Offscreen counterpart of <see cref="BeginFrame"/>. Waits on the frame fence, resets
@@ -305,7 +305,7 @@ public sealed unsafe partial class VulkanContext
     {
         for (var attempt = 1; ; attempt++)
         {
-            var result = DeviceApi.vkQueueSubmit(GraphicsQueue, 1, si, fence);
+            var result = _dev.QueueSubmit(si, fence);
             RenderDiag.Vk(what, result, $"attempt={attempt}/{OffscreenSubmitAttempts}");
             NoteDeviceLost(result, what);
             if (result != VkResult.ErrorInitializationFailed) return result;

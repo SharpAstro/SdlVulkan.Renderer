@@ -278,13 +278,24 @@ public sealed unsafe partial class VulkanContext : IDisposable
             var now = Volatile.Read(ref _frameOrdinal);
             var last = ord == 0 ? "NEVER" : $"frame {ord} ({now - ord} frame(s) ago)";
             var rejected = Interlocked.Read(ref _submitsRejected);
-            return $"ledger: waiting fence[{idx}], last submit under it {last}" +
+            var ledger = $"ledger: waiting fence[{idx}], last submit under it {last}" +
                    (Volatile.Read(ref _submitPending[idx]) == 0 ? " (NOTHING PENDING)" : "") +
                    $"; frames {now}, submits {Interlocked.Read(ref _submitsTotal)}" +
                    (rejected > 0 ? $", REJECTED {rejected}" : "") +
                    (_deviceLost ? "; DEVICE_LOST seen" : "");
+#if DEBUG
+            // The breadcrumb is what a wedge report is read from, so it has to say when the wedge is ours.
+            if (_dev.FaultInjection.Describe() is { } fault) ledger += $"; {fault}";
+#endif
+            return ledger;
         }
     }
+
+#if DEBUG
+    /// <summary>DEBUG-only: this context's device's fault switch (see <see cref="GpuFaultInjection"/>). The
+    /// fault belongs to the device, so under a shared device arming it here reaches every window.</summary>
+    public GpuFaultInjection FaultInjection => _dev.FaultInjection;
+#endif
 
     /// <summary>
     /// Replace one frame index's image-available semaphore after a submit the driver rejected. The acquire
@@ -905,7 +916,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // between the two halves of this frame's queue work.
         VkResult presentResult;
         _dev.AssertQueueThread(nameof(SubmitFrame));
-        var submitResult = DeviceApi.vkQueueSubmit(GraphicsQueue, 1, &submitInfo, frameFence);
+        var submitResult = _dev.QueueSubmit(&submitInfo, frameFence);
         RenderDiag.Vk("submit", submitResult, $"frame={_currentFrame} img={_currentImageIndex}");
         NoteDeviceLost(submitResult, "vkQueueSubmit");
 
