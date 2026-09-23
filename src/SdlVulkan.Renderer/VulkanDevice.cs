@@ -804,9 +804,8 @@ public sealed unsafe class VulkanDevice : IDisposable
     // device but all render on the SDL event-loop thread; every offscreen context (the viewer's
     // rasterizer, all test fixtures) is built by CreateOffscreen with its OWN device and therefore its
     // own private queue; live thumbnail capture rides the window's own frame; and ExecuteOneShot is
-    // reachable only from VkTexture.CreateFromBgra — the legacy eager-upload path that CreateDeferred
-    // superseded, whose only remaining caller is a single-threaded fork test. One owner needs no
-    // mutual exclusion.
+    // called on the render thread, by VkTexture.CreateFromBgra and by consumers (TianWen's FITS image
+    // pipeline and object pictures upload through it). One owner needs no mutual exclusion.
     //
     // That property is what makes the lock unnecessary, so it is asserted rather than left to prose:
     // if a future change submits from a second thread, this fails immediately with a name attached
@@ -845,11 +844,43 @@ public sealed unsafe class VulkanDevice : IDisposable
         }
     }
 
+    /// <summary>
+    /// Longest a one-shot waits for its work: past the Windows GPU timeout (2 s by default), so it never
+    /// gives up on work the OS would still let finish, and reaching it means the device is hung.
+    /// </summary>
+    internal const ulong OneShotTimeoutNs = 5_000_000_000UL;
+
+    // The one-shot's fence, reused: reset after each completed wait. Replaced (the old one leaked with its
+    // pending submit) when a wait times out, because a fence still in use by the queue cannot be reset.
+    private VkFence _oneShotFence;
+
+    /// <summary>
+    /// Records <paramref name="action"/> into a command buffer of its own, submits it and waits for it to
+    /// COMPLETE, so on return whatever it wrote is on the GPU and whatever it read may be reused. It
+    /// blocks the calling thread for that time, on the render thread usually: prefer recording into the
+    /// frame (<see cref="VkTexture.CreateDeferred"/> with <c>VkRenderer.OnPreRenderPass</c>).
+    /// </summary>
+    /// <remarks>
+    /// The wait is bounded (<see cref="OneShotTimeoutNs"/>). It used to be an unbounded
+    /// <c>vkQueueWaitIdle</c>, which on a hung GPU froze the render thread before the frame loop's
+    /// bounded fence wait could notice anything: no escalation, no breadcrumb, a window "Not Responding"
+    /// for good. Now a timeout throws <see cref="VkException"/> with <see cref="VkResult.Timeout"/> and
+    /// marks the device stuck, and the loop's stuck-GPU handling takes over. On a TIMEOUT the work is
+    /// still pending, so the command buffer is leaked, and the caller must treat anything the action
+    /// recorded a read of (a staging buffer) as still in use: leak it or defer its destruction, never
+    /// free or reuse it. Any other failure means the submit did not take, and nothing is pending.
+    /// While the device is known stuck, this throws the same timeout at once without submitting.
+    /// </remarks>
     public void ExecuteOneShot(Action<VkCommandBuffer> action)
     {
         // Touches both the queue and the shared command pool, each of which needs external
         // synchronization; this device provides it by single ownership (see AssertQueueThread).
         AssertQueueThread(nameof(ExecuteOneShot));
+
+        // Work queued behind a hung submission can only wait out the full timeout, on the render thread,
+        // once per upload: answer as the wait would, now.
+        if (IsGpuStuck)
+            throw new VkException(VkResult.Timeout, "one-shot not submitted: the GPU is known stuck");
 
         DeviceApi.vkAllocateCommandBuffer(CommandPool, out var cmd).CheckResult();
 
@@ -869,7 +900,13 @@ public sealed unsafe class VulkanDevice : IDisposable
             commandBufferCount = 1,
             pCommandBuffers = &cmd
         };
-        var submitResult = QueueSubmit(&submitInfo, VkFence.Null);
+        if (_oneShotFence == VkFence.Null)
+        {
+            VkFenceCreateInfo fenceCI = new();
+            DeviceApi.vkCreateFence(&fenceCI, null, out _oneShotFence).CheckResult();
+        }
+        var fence = _oneShotFence;
+        var submitResult = QueueSubmit(&submitInfo, fence);
         if (submitResult != VkResult.Success)
         {
             // The submit did not take, so the command buffer was never consumed and nothing is pending on
@@ -879,7 +916,25 @@ public sealed unsafe class VulkanDevice : IDisposable
             DeviceApi.vkFreeCommandBuffers(CommandPool, cmd);
             submitResult.CheckResult();
         }
-        DeviceApi.vkQueueWaitIdle(GraphicsQueue).CheckResult();
+
+        var waitResult = DeviceApi.vkWaitForFences(1, &fence, true, OneShotTimeoutNs);
+        if (waitResult == VkResult.Timeout)
+        {
+            // Still pending, so nothing it touches may be freed: leak the command buffer and the fence
+            // (the next one-shot creates a fresh fence), and say the device is stuck so the frame loop and
+            // the next one-shot stop feeding it.
+            _oneShotFence = VkFence.Null;
+            IsGpuStuck = true;
+            throw new VkException(VkResult.Timeout,
+                $"one-shot did not complete within {OneShotTimeoutNs / 1_000_000} ms: the GPU is hung");
+        }
+        if (waitResult != VkResult.Success)
+        {
+            // DEVICE_LOST: nothing will execute, so nothing is pending on the command buffer.
+            DeviceApi.vkFreeCommandBuffers(CommandPool, cmd);
+            waitResult.CheckResult();
+        }
+        DeviceApi.vkResetFences(1, &fence).CheckResult();
         DeviceApi.vkFreeCommandBuffers(CommandPool, cmd);
     }
 
@@ -977,6 +1032,8 @@ public sealed unsafe class VulkanDevice : IDisposable
             DeviceApi.vkDeviceWaitIdle();
         }
 
+        if (_oneShotFence != VkFence.Null)
+            DeviceApi.vkDestroyFence(_oneShotFence);
         DeviceApi.vkDestroySampler(LinearClampSampler);
         DeviceApi.vkDestroyPipelineLayout(PipelineLayout);
         DeviceApi.vkDestroyDescriptorSetLayout(DescriptorSetLayout);

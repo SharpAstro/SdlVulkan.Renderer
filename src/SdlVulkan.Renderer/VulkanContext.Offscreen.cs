@@ -173,6 +173,7 @@ public sealed unsafe partial class VulkanContext
     public VkCommandBuffer BeginOffscreenFrame()
     {
         if (!_isOffscreen) throw new InvalidOperationException("BeginOffscreenFrame requires CreateOffscreen");
+        NoteUnendedFrameDropped();
 
         var fence = _inFlightFences[_currentFrame];
         // Skip the wait when nothing is in flight under this index. A fence that was reset for a submit

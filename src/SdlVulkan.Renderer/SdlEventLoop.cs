@@ -539,6 +539,17 @@ public sealed class SdlEventLoop
             // tearing the swapchain down on the FIRST timeout is what used to sustain recovery storms.
             if (vk.Result == VkResult.Timeout)
             {
+                // A timeout from INSIDE a frame (a one-shot upload that gave up, see
+                // VulkanDevice.ExecuteOneShot) leaves the frame begun, with an image acquired: resolve it
+                // first, as the non-Vulkan catch below does, or the retry acquires again over a signalled
+                // semaphore. A no-op in the usual case, BeginFrame's own fence wait, which throws before it
+                // begins anything.
+                try { renderer.AbortFrame(); }
+                catch (Exception abort)
+                {
+                    SdlVulkanLog.Logger.AbortFrameThrew(abort.GetType().Name, abort.Message);
+                }
+
                 if (v.FenceStuckSinceTick == 0)
                 {
                     v.FenceStuckSinceTick = now;

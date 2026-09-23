@@ -235,16 +235,30 @@ public sealed unsafe class VkTexture : IDisposable
     }
 
     /// <summary>
-    /// Frees the staging buffer after the frame containing the upload has been submitted.
-    /// Safe to call multiple times.
+    /// Frees the staging buffer once no frame can still be copying from it. Safe to call multiple times.
+    /// A no-op while the upload is not recorded (<see cref="IsUploaded"/> false), which includes an upload
+    /// whose frame was dropped and is waiting to be recorded again: freeing its staging then would leave
+    /// the image unwritten for good. Such a buffer is freed with the texture instead.
     /// </summary>
     public void CleanupStaging()
     {
+        if (!IsUploaded) return;
+        ReleaseStaging();
+    }
+
+    /// <summary>
+    /// Deferred, never destroyed on the spot. "After the frame that uploads it was submitted" is not
+    /// "after the GPU finished reading it": a frame is in flight for a while after its submit, and an
+    /// upload re-recorded after a dropped frame rides a LATER frame than the one its owner saw, so a
+    /// consumer disposing the texture a frame after it made it (the planner chart does) freed the buffer
+    /// under a copy still running. The deferred-destroy schedule waits for every frame that could read it.
+    /// </summary>
+    private void ReleaseStaging()
+    {
         if (_stagingBuffer == VkBuffer.Null) return;
-        var api = _ctx.DeviceApi;
-        api.vkDestroyBuffer(_stagingBuffer);
-        api.vkFreeMemory(_stagingMemory);
-        _ctx.GraphicsDevice.NoteBufferDestroyed();
+        var device = _ctx.GraphicsDevice;
+        _ctx.DeferDestroy(buffer: _stagingBuffer, memory: _stagingMemory);
+        _ctx.DeferDestroy(device.NoteBufferDestroyed);
         _stagingBuffer = VkBuffer.Null;
         _stagingMemory = VkDeviceMemory.Null;
     }
@@ -256,7 +270,17 @@ public sealed unsafe class VkTexture : IDisposable
     public static VkTexture CreateFromBgra(VulkanContext ctx, ReadOnlySpan<byte> bgraData, int width, int height)
     {
         var tex = CreateDeferred(ctx, bgraData, width, height);
-        ctx.ExecuteOneShot(cmd => tex.RecordUpload(cmd));
+        try
+        {
+            ctx.ExecuteOneShot(cmd => tex.RecordUpload(cmd));
+        }
+        catch (VkException ex) when (ex.Result != VkResult.Timeout)
+        {
+            // The submit did not take, so nothing references the texture: free it rather than leak it
+            // per attempt. A timeout is left alone, since its copy is still pending on the staging buffer.
+            tex.Dispose();
+            throw;
+        }
         tex.CleanupStaging();
         return tex;
     }
@@ -267,7 +291,7 @@ public sealed unsafe class VkTexture : IDisposable
         _disposed = true;
 
         IsUploaded = false; // prevent use-after-free via stale references
-        CleanupStaging();
+        ReleaseStaging();
         // Deferred, not destroyed: a texture is routinely disposed in the same frame that drew it (a
         // consumer swaps an image and drops the old one), and the frame's command buffer already holds
         // its descriptor set. Destroying now would submit that frame against freed objects -- the GPU
