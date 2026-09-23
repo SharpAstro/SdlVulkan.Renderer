@@ -706,6 +706,8 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         // frame, the peak, how many exceeded the slow-frame budget, and the last frame's sections.
         // Null, not NaN, when nothing has been measured: JSON has no NaN, and a writer asked for one
         // throws.
+        // Frames begun so far: sample twice for the frame rate (see VulkanContext.FramesBegun).
+        w.WriteNumber("framesBegun", ring.FramesBegun);
         w.WriteBoolean("gpuTimingSupported", ring.GpuTimingSupported);
         if (double.IsFinite(ring.LastGpuFrameMs))
             w.WriteNumber("gpuFrameMs", Math.Round(ring.LastGpuFrameMs, 3));
