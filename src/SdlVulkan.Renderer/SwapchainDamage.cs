@@ -102,6 +102,19 @@ internal sealed class SwapchainDamage
     }
 
     /// <summary>
+    /// Declares one image's contents unknown, so it clears and repaints in full on its next turn. For a
+    /// frame that took this image's region (<see cref="TryTake"/> clears it) and then never reached the
+    /// GPU: the damage it owed was forgotten with nothing painted, and only a full repaint is certain.
+    /// </summary>
+    public void MarkImageFull(int imageIndex)
+    {
+        if ((uint)imageIndex < (uint)_images.Length)
+        {
+            _images[imageIndex].Full = true;
+        }
+    }
+
+    /// <summary>
     /// Takes the region that must be repainted into <paramref name="imageIndex"/> and marks it current.
     /// False means repaint everything -- either the contents are unknown, or nothing has been recorded
     /// and there is no region to give.

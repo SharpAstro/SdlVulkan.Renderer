@@ -58,6 +58,10 @@ public sealed unsafe partial class VulkanContext
     /// </summary>
     public void MarkFullFrameDamage() => _damage.MarkFull();
 
+    // The image whose damage this frame took, and the rollback that re-marks it if the frame is dropped.
+    private int _damageTakenImage;
+    private Action? _markTakenImageFull;
+
     /// <summary>
     /// Begins the frame's render pass, preserving the previous contents and confining painting to the
     /// accumulated damage when that is possible, and clearing the whole surface when it is not.
@@ -75,6 +79,13 @@ public sealed unsafe partial class VulkanContext
         // taken -- the image is about to be painted either way.
         var partial = _damage.TryTake(idx, out var dx, out var dy, out var dw, out var dh)
             && _loadRenderPass != VkRenderPass.Null;
+        // ...unless the frame never reaches the GPU, in which case nothing was painted and what the image
+        // owed is gone with the take: repaint it in full on its next turn (OnFrameDropped). A cached
+        // delegate over a field, because this runs every frame and a closure per frame is garbage per
+        // frame; the field still names this frame's image when the rollback runs, which is before the
+        // next frame takes one.
+        _damageTakenImage = idx;
+        OnFrameDropped(cmd, _markTakenImageFull ??= () => _damage.MarkImageFull(_damageTakenImage));
 
         if (!partial)
         {
