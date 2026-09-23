@@ -37,6 +37,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     // poll and rendering resumes with zero teardown.
     private const ulong FenceWaitTimeoutNs = 500_000_000UL;
     private const ulong FenceStuckPollTimeoutNs = 10_000_000UL;
+    // Set when a swapchain image acquire timed out; later attempts then poll with the short timeout, as a
+    // stuck fence's do, so the loop stays responsive. Cleared by the next acquire that succeeds.
+    private bool _acquireStuck;
     // Cap (ns) for the device drain on the UI-thread recovery/resize paths (see TryDrainDevice).
     // 1s is well past any legitimate frame; reaching it means the GPU is genuinely wedged, in
     // which case we force the teardown rather than block the UI thread on an unbounded wait.
@@ -776,6 +779,33 @@ public sealed unsafe partial class VulkanContext : IDisposable
         NoteDeviceLost(waitResult, "vkWaitForFences");
         waitResult.CheckResult();
         _fenceWaitStuck = false;
+
+        // Acquired HERE, before anything below advances frame state, and bounded. Unbounded (UINT64_MAX)
+        // it may block for good once every image is held, which is where rejected submits lead: a frame
+        // the driver refused skips its present, so its image is never handed back. A timeout is thrown
+        // like the fence wait's, for the same non-destructive retry and, if it persists, the escalation
+        // whose rebuild releases every image. It must precede the ordinal bump: a retry after the bump
+        // would count a frame that never ran, and the deferred destroys keyed on the ordinal would run
+        // under a frame still in flight.
+        var result = DeviceApi.vkAcquireNextImageKHR(Swapchain,
+            _acquireStuck ? FenceStuckPollTimeoutNs : FenceWaitTimeoutNs,
+            _imageAvailableSemaphores[_currentFrame], VkFence.Null, out _currentImageIndex);
+        NoteDeviceLost(result, "vkAcquireNextImageKHR");
+        if (result is VkResult.Timeout or VkResult.NotReady)
+        {
+            _acquireStuck = true;
+            throw new VkException(VkResult.Timeout, "swapchain image acquire timed out: every image is held");
+        }
+        _acquireStuck = false;
+        if (result == VkResult.ErrorOutOfDateKHR)
+        {
+            resized = true;
+            return VkCommandBuffer.Null;
+        }
+        // Any other failure (the surface lost, the device lost) must not reach a frame recorded against an
+        // image that was never acquired. Thrown before any state below moves.
+        if (result != VkResult.SuboptimalKHR) result.CheckResult();
+
         // The fence proves this slot's last submission finished, so what it measured is readable now.
         CollectGpuTiming(_currentFrame);
         _frameOrdinal++;
@@ -790,17 +820,6 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // Same contract for the DEBUG-only inspector screenshot capture (a partial method, so the
         // call compiles away in Release along with its implementation file).
         ConsumePresentCaptureReadback();
-
-        var result = DeviceApi.vkAcquireNextImageKHR(Swapchain, ulong.MaxValue,
-            _imageAvailableSemaphores[_currentFrame], VkFence.Null, out _currentImageIndex);
-
-        NoteDeviceLost(result, "vkAcquireNextImageKHR");
-
-        if (result == VkResult.ErrorOutOfDateKHR)
-        {
-            resized = true;
-            return VkCommandBuffer.Null;
-        }
 
         // NOTE: the fence is deliberately NOT reset here — see EndFrame, which resets it immediately
         // before the submit that signals it.
