@@ -46,6 +46,20 @@ then ("Displa recovered from a stall on the Home vie"), for the life of the proc
 - A texture's staging buffer is freed through the deferred-destroy schedule, and `CleanupStaging` is a
   no-op until the upload is recorded; a frame begun and never ended is noticed before the next begin
   reads its captures.
+- **Fix: the swapchain acquire is bounded.** It waited `UINT64_MAX`, the one wait left in a frame
+  begin with no bound; it now waits 500 ms (10 ms while the previous acquire timed out) and throws
+  `VkException(Timeout)` into the loop's existing stall handling. It runs before the frame ordinal
+  moves, so an acquire that fails leaves no ordinal pointing at a frame that never began.
+- **Fix: the mid-frame recovery runs on the sacrificial task.** It ran synchronously on the render
+  thread, where a teardown call that blocks on a hung driver (`vkFreeMemory` has been seen not to
+  return) froze the window for good. It now runs as the fence-stall recovery does, on a task the loop
+  only polls, with the same 4 s deadline.
+- **Fix: a cached layer left open by a frame that threw does not outlive it.** The next frame drew at
+  the layer's scale into the layer's target, and `AbortFrame` left the layer's render pass open. Every
+  begin forgets an open layer, and an abort closes its pass.
+- **Fix: a swapchain image whose frame was dropped repaints in full.** Taking an image's damage clears
+  it, so a dropped frame lost the region it owed with nothing painted; the image now clears and
+  repaints in full on its next turn (`SwapchainDamage.MarkImageFull`).
 - On DIR.Lib 11.2 (`SdfFontAtlas.RequeueUpload`).
 
 **A GPU wedge can be faked, on demand, on a healthy GPU (DEBUG).** Every path that answers a wedge
