@@ -575,6 +575,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             DeviceApi.vkDestroySemaphore(_imageAvailableSemaphores[i]);
         }
         CreateSyncObjects();
+        ForgetGpuTiming();
         _currentFrame = 0;
         _fenceWaitStuck = false; // fresh fences start signaled — leave stuck-mode polling
 
@@ -758,6 +759,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
         NoteDeviceLost(waitResult, "vkWaitForFences");
         waitResult.CheckResult();
         _fenceWaitStuck = false;
+        // The fence proves this slot's last submission finished, so what it measured is readable now.
+        CollectGpuTiming(_currentFrame);
         _frameOrdinal++;
         // The wait above is the proof that frame (ordinal - MaxFramesInFlight) and everything before it
         // has retired, so this is where deferred destroys scheduled against those frames become legal.
@@ -804,6 +807,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             flags = VkCommandBufferUsageFlags.OneTimeSubmit
         };
         DeviceApi.vkBeginCommandBuffer(cmd, &beginInfo);
+        BeginGpuFrameTiming(cmd);
         // From here until EndFrame there is an acquired swapchain image and a recording command
         // buffer that must be resolved by a submit. AbortFrame does that when the frame is abandoned.
         _frameBegun = true;
@@ -858,6 +862,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             // and which entitles a driver to park the queue (the stuck-fence wedge shape).
             RecordPresentCapture(cmd);
         }
+        EndGpuFrameTiming(cmd);
         DeviceApi.vkEndCommandBuffer(cmd);
 
         var waitSemaphore = _imageAvailableSemaphores[_currentFrame];
@@ -925,6 +930,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         //   - the acquire semaphore is replaced (see ReplaceImageAvailableSemaphore).
         // The frame index still advances, so this degrades to one visibly dropped frame, not a stall.
         var submitted = submitResult == VkResult.Success;
+        NoteGpuFrameSubmitted(submitted);
         if (submitted)
         {
             // Ledger: this index now has work in flight that will signal its fence. On a stuck fence the
@@ -1126,6 +1132,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
         // Everything a consumer deferred is destroyed here, before the objects it may depend on go.
         FlushAllDeferredDestroys();
+        DestroyGpuTiming();
 
         CleanupSwapchain();
         CleanupLoadRenderPass();

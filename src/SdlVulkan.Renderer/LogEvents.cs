@@ -67,6 +67,12 @@ internal static partial class LogEvents
     [LoggerMessage(115, LogLevel.Critical, "[SdlEventLoop] device lost mid-frame (window {WindowId}); terminal by spec, abandoning the device without attempting swapchain recovery.")]
     public static partial void DeviceLostTerminal(this ILogger logger, uint windowId);
 
+    [LoggerMessage(208, LogLevel.Warning, "[VulkanContext] GPU frame {FrameOrdinal} took {GpuMs:F0}ms on the GPU (budget {BudgetMs:F0}ms; the OS resets a context whose work runs past its GPU timeout, 2 s by default on Windows); sections: {Sections}.")]
+    public static partial void GpuFrameSlow(this ILogger logger, long frameOrdinal, double gpuMs, double budgetMs, string sections);
+
+    [LoggerMessage(209, LogLevel.Information, "[VulkanContext] GPU frame timing unavailable on this queue (timestampValidBits = 0); LastGpuFrameMs stays NaN.")]
+    public static partial void GpuTimingUnsupported(this ILogger logger);
+
     [LoggerMessage(207, LogLevel.Error, "[VulkanContext] {Streak} consecutive vkQueueSubmit rejections (ErrorInitializationFailed): the device is not taking work; escalating to mid-frame recovery.")]
     public static partial void SubmitRejectedStreak(this ILogger logger, int streak);
 
