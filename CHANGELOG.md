@@ -26,6 +26,26 @@ then ("Displa recovered from a stall on the Home vie"), for the life of the proc
   so no consumer needs to know; a cached-layer slot that was never rendered goes back to unrendered. A
   consumer that tracks what a slot HOLDS registers its own rollback. The thumbnail and screenshot captures
   are now cancelled on every kind of drop, not only a rejected submit. Event 212 logs each re-queue.
+- **Fix: a one-shot never waits without a bound, and never on a GPU known stuck.**
+  `VulkanDevice.ExecuteOneShot` ended in an unbounded `vkQueueWaitIdle`, reached on the render thread
+  for every frame of a consumer's live image upload, so a hung GPU froze the window before the loop's
+  bounded fence wait noticed anything. It now waits on a fence for at most 5 s (past the Windows GPU
+  timeout); a timeout leaks the pending command buffer, marks the device stuck and throws
+  `VkException(Timeout)`, and while the device is known stuck it throws at once without submitting. A
+  timeout thrown from inside a frame now resolves that frame (`AbortFrame`) before the loop retries.
+  `CreateFromBgra` frees its texture when the submit did not take. A caller must treat what a
+  timed-out one-shot read as still in use.
+- **`VulkanContext.QueueTextureUpload(texture)`**: records a `CreateDeferred` texture's upload at the
+  start of the next frame, before any render pass, for a texture made where a one-shot would block the
+  render thread or submit in the middle of a frame. Draw it once `IsUploaded` is true.
+- **Fix: a device that keeps refusing work is declared dead.** With every submit rejected, the
+  mid-frame recovery rebuilt sync and swapchain about 1.8 times a second forever over a frozen window.
+  Eight recoveries on `VK_ERROR_INITIALIZATION_FAILED` with no clean frame, over at least 5 s, now hand
+  off to `OnGpuWedged` and stop the loop (event 117), as a device loss does. Only a refusal counts: an
+  error the app causes every frame is not a dead device.
+- A texture's staging buffer is freed through the deferred-destroy schedule, and `CleanupStaging` is a
+  no-op until the upload is recorded; a frame begun and never ended is noticed before the next begin
+  reads its captures.
 - On DIR.Lib 11.2 (`SdfFontAtlas.RequeueUpload`).
 
 **A GPU wedge can be faked, on demand, on a healthy GPU (DEBUG).** Every path that answers a wedge

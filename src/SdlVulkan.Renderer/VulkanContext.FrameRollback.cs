@@ -107,6 +107,21 @@ public sealed unsafe partial class VulkanContext
     internal void RequeueTextureUpload(VkTexture texture)
         => (_requeuedTextureUploads ??= new List<VkTexture>()).Add(texture);
 
+    /// <summary>
+    /// Records <paramref name="texture"/>'s upload (<see cref="VkTexture.CreateDeferred"/>) into the next
+    /// frame, at its start and before any render pass, instead of in a one-shot of its own. For a texture
+    /// made where a frame is already recording its render pass (a draw path): the one-shot would block this
+    /// thread until the GPU finished, and submit in the middle of a frame, which some drivers reject.
+    /// Draw it once <see cref="VkTexture.IsUploaded"/> is true, and ask for that next frame. A dropped frame
+    /// records it again on its own. Render thread only.
+    /// </summary>
+    public void QueueTextureUpload(VkTexture texture)
+    {
+        ArgumentNullException.ThrowIfNull(texture);
+        AssertFrameThread(nameof(QueueTextureUpload));
+        if (!texture.IsUploaded) RequeueTextureUpload(texture);
+    }
+
     /// <summary>Re-records every re-queued texture upload into the frame just begun, before any render
     /// pass (transfers cannot happen inside one).</summary>
     private void RecordRequeuedTextureUploads(VkCommandBuffer cmd)
