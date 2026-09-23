@@ -7,6 +7,30 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.48
+
+**A GPU wedge can be faked, on demand, on a healthy GPU (DEBUG).** Every path that answers a wedge
+(the rejected-submit streak, the event loop's mid-frame recovery, the load-shed request, the
+device-loss hand-off) could only be exercised by a driver failing on its own, about twice a month on
+the Adreno X1-85. `GpuFaultInjection`, on `VulkanDevice.FaultInjection` (and forwarded from
+`VulkanContext`), answers the device's submits with the fault INSTEAD of submitting, which is what a
+rejected submit does on the real driver: `RejectSubmits(count)` returns
+`VK_ERROR_INITIALIZATION_FAILED` (the Adreno's answer after an engine reset; no count = until
+cleared), `LoseDevice()` returns `VK_ERROR_DEVICE_LOST` from every submit, `Clear()` disarms. Nothing
+reaches the GPU while it is armed. Compiled out of Release.
+
+- **One submit seam.** The frame submit, the offscreen submit and `ExecuteOneShot` all go through
+  `VulkanDevice.QueueSubmit`, so the fault reaches all three, and the ledger says when a wedge is
+  injected. Arming and clearing log at Warning (events 210, 211); the lines the renderer writes in
+  reply are the real ones.
+- **Inspector.** `gpu_fault` (`gpuFault` on the wire) arms, clears or reads the fault in a live app:
+  `reject` with an optional count, `lost`, `clear`, `status`. `lost` ends the event loop, as a real
+  loss does, so the app usually exits.
+- **Fix: a rejected `ExecuteOneShot` no longer leaks its command buffer.** It threw straight out of the
+  submit, one command buffer per immediate texture upload tried while the device refused work. Found
+  by faking the refusal.
+
+
 ## 7.47
 
 **Every frame's GPU time is measured, and a window renders at most once per display refresh.** Both

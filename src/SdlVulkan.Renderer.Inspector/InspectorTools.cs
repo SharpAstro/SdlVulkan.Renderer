@@ -261,6 +261,31 @@ public sealed class InspectorTools
     }
 
     [McpServerTool, Description(
+        "FAKE a GPU wedge in a DEBUG app, to drive its recovery paths on a healthy GPU. Nothing is sent to "
+        + "the GPU: while a fault is armed each vkQueueSubmit on the window's device is answered with the "
+        + "fault INSTEAD of submitting, which is what a rejected submit does on the real driver too. Modes: "
+        + "'reject' returns VK_ERROR_INITIALIZATION_FAILED (the Qualcomm Adreno's answer after an engine "
+        + "reset) for the next 'count' submits, or every submit until cleared when count is 0 -- three in a "
+        + "row escalate to the event loop's mid-frame recovery, and repeated recoveries raise the host's "
+        + "OnRenderDegraded; 'lost' returns VK_ERROR_DEVICE_LOST from every submit, which the loop treats as "
+        + "terminal: the host's OnGpuWedged runs and the event loop STOPS, so the app will usually exit, as it "
+        + "would on a real loss; 'clear' disarms; 'status' (default) only reads. The renderer's log lines in "
+        + "reply are the real ones, preceded by a Warning that the fault was injected. Returns {armed, "
+        + "deviceLost, rejectsRemaining (null = until cleared), fakedResults, contextDeviceLost, "
+        + "lastFrameSubmitted, ledger}.")]
+    public static async Task<string> gpu_fault(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("reject | lost | clear | status (default).")] string mode = "status",
+        [Description("For reject: how many submits to reject; 0 = every submit until cleared.")] int count = 0,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "gpuFault",
+            Json.Obj(("mode", mode), ("count", count > 0 ? count : null)), ct);
+        return result.GetRawText();
+    }
+
+    [McpServerTool, Description(
         "Render-thread watchdog: is the app's RENDER THREAD pumping or wedged? The inspector executes "
         + "EVERY command (including ping) ON the render thread, so a ping that round-trips proves the "
         + "render loop completed a frame and drained its queue; a ping that does NOT return within the "
