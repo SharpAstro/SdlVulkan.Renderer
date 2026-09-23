@@ -178,12 +178,13 @@ public sealed class InspectorTools
         [Description("End X pixel.")] float x2,
         [Description("End Y pixel.")] float y2,
         [Description("Interpolated motion events between start and end (1-64). Default 8. More steps matter for anything that integrates per event rather than reading the latest position.")] int steps = 8,
+        [Description("Modifier(s) held while moving (None, Ctrl, Shift, Alt, or combos like CtrlShift), carried on every motion event as a held key is -- for a hover that answers to a key. Default None.")] string mods = "None",
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
         var result = await socket.SendAsync(target, "move",
-            Json.Obj(("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2), ("steps", steps)), ct);
+            Json.Obj(("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2), ("steps", steps), ("mods", mods)), ct);
         return result.GetString() ?? "ok";
     }
 
