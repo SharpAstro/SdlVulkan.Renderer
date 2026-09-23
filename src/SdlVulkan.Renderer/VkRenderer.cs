@@ -231,6 +231,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public bool BeginFrame(DIR.Lib.RGBAColor32 clearColor)
     {
+        ForgetCachedLayer();
         _currentCmd = Surface.BeginFrame(out var resized);
         if (resized || _currentCmd == VkCommandBuffer.Null)
             return false;
@@ -364,6 +365,22 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         if (!_inCachedLayer) return;
         Surface.EndCachedLayerPass(_currentCmd);
+        _width = _savedLayerWidth;
+        _height = _savedLayerHeight;
+        UpdateProjection();
+        _damageRegion = _savedLayerRegion;
+        _inCachedLayer = false;
+    }
+
+    /// <summary>
+    /// Drops a cached layer left open by a frame that threw inside it, restoring the frame's own projection
+    /// and paintable region. Records nothing: it runs where that frame's command buffer is already gone (a
+    /// new frame, a recovery). Left alone, the stale flag refused every later layer pass, and the next
+    /// frame drew at the layer's scale.
+    /// </summary>
+    private void ForgetCachedLayer()
+    {
+        if (!_inCachedLayer) return;
         _width = _savedLayerWidth;
         _height = _savedLayerHeight;
         UpdateProjection();
@@ -599,6 +616,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public bool BeginOffscreenFrame(DIR.Lib.RGBAColor32 clearColor)
     {
+        ForgetCachedLayer();
         _currentCmd = Surface.BeginOffscreenFrame();
         if (_currentCmd == VkCommandBuffer.Null) return false;
 
@@ -677,6 +695,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public void RecoverFromGpuError()
     {
+        ForgetCachedLayer();
         _currentCmd = VkCommandBuffer.Null;
         _lastBoundPipeline = VkPipeline.Null;
         Surface.RecoverFromGpuError(_width, _height);
@@ -695,6 +714,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public void AbortFrame()
     {
+        // Closed properly rather than forgotten: the aborted frame is still submitted, so its layer
+        // pass must be ended in the command buffer, and the projection restored with it.
+        EndCachedLayer();
         Surface.AbortFrame();
         _currentCmd = VkCommandBuffer.Null;
         _lastBoundPipeline = VkPipeline.Null;

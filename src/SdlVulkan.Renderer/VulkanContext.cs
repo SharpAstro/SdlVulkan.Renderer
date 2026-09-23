@@ -1055,6 +1055,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public void AbortFrame()
     {
         if (!_frameBegun) return;
+        // A frame that threw inside a cached-layer pass still has it open; ending the command buffer
+        // inside a render pass is invalid, so close it first (it and the main pass never nest).
+        if (_inLayerPass) EndCachedLayerPass(_commandBuffers[_currentFrame]);
         // endRenderPass tracks reality: a frame that died before BeginRenderPass must not have
         // vkCmdEndRenderPass recorded into it (illegal), but still needs the submit to retire its
         // semaphore and fence.
