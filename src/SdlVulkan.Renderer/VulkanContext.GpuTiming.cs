@@ -74,6 +74,13 @@ public sealed unsafe partial class VulkanContext
     /// </summary>
     public double LastGpuFrameMs { get; private set; } = double.NaN;
 
+    /// <summary>
+    /// Frames begun by this context so far. Sampled twice, the difference over the interval is the
+    /// frame RATE, which is how a surface that keeps asking for frames with nothing changing is found:
+    /// idle, it should read close to zero.
+    /// </summary>
+    public long FramesBegun => _frameOrdinal;
+
     /// <summary>The frame ordinal <see cref="LastGpuFrameMs"/> belongs to.</summary>
     public long LastGpuFrameOrdinal { get; private set; }
 
