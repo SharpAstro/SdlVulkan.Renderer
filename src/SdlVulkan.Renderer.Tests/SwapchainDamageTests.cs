@@ -34,6 +34,25 @@ public sealed class SwapchainDamageTests
     }
 
     [Fact]
+    public void AnImageWhoseFrameWasDroppedRepaintsInFullAndOnlyThatOne()
+    {
+        var damage = new SwapchainDamage();
+        damage.Reset(2);
+        damage.TryTake(0, out _, out _, out _, out _);
+        damage.TryTake(1, out _, out _, out _, out _);
+        damage.Add(10f, 20f, 30f, 40f);
+
+        // The frame took image 0's region, then never reached the GPU.
+        damage.TryTake(0, out _, out _, out _, out _).ShouldBeTrue();
+        damage.MarkImageFull(0);
+
+        damage.TryTake(0, out _, out _, out _, out _).ShouldBeFalse("its region was lost unpainted: repaint all of it");
+        damage.TryTake(1, out var x, out var y, out var w, out var h).ShouldBeTrue("another image keeps its own region");
+        (x, y, w, h).ShouldBe((10f, 20f, 30f, 40f));
+        damage.MarkImageFull(7); // an index that is not tracked is ignored
+    }
+
+    [Fact]
     public void OnceAnImageIsPaintedAndDamagedItTakesJustThatRegion()
     {
         var damage = new SwapchainDamage();
