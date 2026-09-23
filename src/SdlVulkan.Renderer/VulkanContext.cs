@@ -750,6 +750,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
     {
         AssertFrameThread(nameof(BeginFrame));
         resized = false;
+        NoteUnendedFrameDropped();
         var fence = _inFlightFences[_currentFrame];
         // Bounded wait. We rely on the submit signaling this fence — including on drivers (Adreno
         // X1-85) where vkQueueSubmit returns a bogus error yet still signals normally. If a fence is

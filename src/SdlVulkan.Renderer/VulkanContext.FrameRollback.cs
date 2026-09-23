@@ -47,13 +47,22 @@ public sealed unsafe partial class VulkanContext
         return true;
     }
 
-    /// <summary>A frame starts recording into <paramref name="cmd"/>. Any rollback still pending belongs to
-    /// a frame that was begun and never ended, so its work never reached the queue: undo it first.</summary>
-    private void BeginFrameRecording(VkCommandBuffer cmd)
+    /// <summary>
+    /// Called FIRST in each frame begin, before anything reads the index's capture state. A frame still
+    /// marked as recording was begun and never ended (an exception between the two, with no abort), so
+    /// its work never reached the queue: undo it, and cancel the captures it carried. Cancelling them has
+    /// to precede the begin's readback step, which would otherwise hand their unwritten buffers back as
+    /// finished captures, the fence it checks having been waited for a DIFFERENT, earlier frame.
+    /// </summary>
+    private void NoteUnendedFrameDropped()
     {
-        RunFrameRollbacks("the previous frame was begun and never ended");
-        _recordingFrameCmd = cmd;
+        if (_recordingFrameCmd != VkCommandBuffer.Null)
+            NoteFrameDropped("the previous frame was begun and never ended");
     }
+
+    /// <summary>A frame starts recording into <paramref name="cmd"/>: what it records from here on is
+    /// provisional until it reaches the queue.</summary>
+    private void BeginFrameRecording(VkCommandBuffer cmd) => _recordingFrameCmd = cmd;
 
     /// <summary>The frame's submit was accepted: its work is on the queue, so nothing needs undoing.</summary>
     private void NoteFrameSubmitted()
