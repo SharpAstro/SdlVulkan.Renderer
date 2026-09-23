@@ -185,6 +185,8 @@ public sealed unsafe partial class VulkanContext
             var waitResult = DeviceApi.vkWaitForFences(1, &fence, true, ulong.MaxValue);
             NoteDeviceLost(waitResult, "vkWaitForFences(offscreen)");
         }
+        // Waited above, or nothing was in flight, in which case the slot holds no timed frame either.
+        CollectGpuTiming(_currentFrame);
         _frameOrdinal++;
         // Same contract as the swapchain BeginFrame: the wait proves frame (ordinal - MaxFramesInFlight)
         // retired, so deferred destroys scheduled against it run here.
@@ -199,6 +201,7 @@ public sealed unsafe partial class VulkanContext
         DeviceApi.vkResetCommandBuffer(cmd, 0);
         VkCommandBufferBeginInfo bi = new() { flags = VkCommandBufferUsageFlags.OneTimeSubmit };
         DeviceApi.vkBeginCommandBuffer(cmd, &bi);
+        BeginGpuFrameTiming(cmd);
 
         // Same contract as BeginFrame: the slot's fence has retired, so its ring buffer may grow here.
         BeginVertexRingFrame();
@@ -245,6 +248,7 @@ public sealed unsafe partial class VulkanContext
         if (!_isOffscreen) throw new InvalidOperationException("EndOffscreenFrame requires CreateOffscreen");
 
         DeviceApi.vkCmdEndRenderPass(cmd);
+        EndGpuFrameTiming(cmd);
         DeviceApi.vkEndCommandBuffer(cmd);
 
         VkSubmitInfo si = new()
@@ -260,6 +264,7 @@ public sealed unsafe partial class VulkanContext
         var frameFence = _inFlightFences[_currentFrame];
         DeviceApi.vkResetFences(1, &frameFence);
         var submitResult = SubmitOffscreen(&si, frameFence, "submit(offscreen)");
+        NoteGpuFrameSubmitted(submitResult == VkResult.Success);
 
         if (submitResult == VkResult.Success)
         {
@@ -322,6 +327,7 @@ public sealed unsafe partial class VulkanContext
         var fence = _inFlightFences[prevFrame];
         var waitResult = DeviceApi.vkWaitForFences(1, &fence, true, ulong.MaxValue);
         NoteDeviceLost(waitResult, "vkWaitForFences(offscreen complete)");
+        CollectGpuTiming(prevFrame);
     }
 
     /// <summary>

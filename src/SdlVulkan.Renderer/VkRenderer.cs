@@ -707,6 +707,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <summary>Whether the last <see cref="EndFrame"/> put work on the queue; see <see cref="VulkanContext.LastFrameSubmitted"/>.</summary>
     public bool LastFrameSubmitted => Surface.LastFrameSubmitted;
 
+    /// <summary>GPU time of the most recently completed frame; see <see cref="VulkanContext.LastGpuFrameMs"/>.</summary>
+    public double LastGpuFrameMs => Surface.LastGpuFrameMs;
+
     /// <summary>CPU-side composition of the current frame's glyph-atlas activity. The event loop
     /// logs it when a fence sticks (the wedge breadcrumb) — a GPU hang leaves no readable GPU
     /// state, so this is the best available record of what the hung submission contained.</summary>
