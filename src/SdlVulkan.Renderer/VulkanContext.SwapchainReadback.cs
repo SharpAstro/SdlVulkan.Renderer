@@ -121,11 +121,12 @@ public sealed unsafe partial class VulkanContext
         _presentCaptureRequested = false;
     }
 
-    // Mirror of the thumbnail cancellation in SubmitFrame's rejected-submit branch: the copy recorded
-    // into this frame died with it, so nothing will ever write the buffer. Re-arm the request rather
+    // Mirror of the thumbnail cancellation in NoteFrameDropped, which calls this for every frame that
+    // does not reach the queue: the copy recorded into this frame died with it, so nothing will ever
+    // write the buffer. Re-arm the request rather
     // than just clearing it -- the next frame that does submit records a fresh capture, and the
     // inspector's stepped screenshot completes instead of waiting on a capture that no longer exists.
-    partial void CancelPresentCaptureOnRejectedSubmit()
+    partial void CancelPresentCaptureOnDroppedFrame()
     {
         if (_presentCapturePending && _presentCapturePendingIndex == _currentFrame)
         {

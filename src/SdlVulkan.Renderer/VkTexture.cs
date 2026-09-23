@@ -35,8 +35,13 @@ public sealed unsafe class VkTexture : IDisposable
     public int Width { get; }
     public int Height { get; }
 
-    /// <summary>True once the upload commands have been recorded and the staging buffer can be freed after submit.</summary>
+    /// <summary>True once the upload commands have been recorded and the staging buffer can be freed after submit.
+    /// False again if the frame that carried the upload never reached the queue: the upload is then recorded
+    /// into the next frame on its own, as long as the staging buffer is still held.</summary>
     public bool IsUploaded { get; private set; }
+
+    // Cached so a re-queued upload allocates no delegate per frame it rides.
+    private Action? _requeueUpload;
 
     private readonly VulkanContext _ctx;
     private VkImage _image;
@@ -191,6 +196,9 @@ public sealed unsafe class VkTexture : IDisposable
     public void RecordUpload(VkCommandBuffer cmd)
     {
         if (IsUploaded) return;
+        // Nothing left to upload from: disposed, or its staging already freed. Recording a copy from a
+        // null buffer is what this used to do for a disposed texture.
+        if (_disposed || _stagingBuffer == VkBuffer.Null) return;
 
         var api = _ctx.DeviceApi;
 
@@ -212,6 +220,18 @@ public sealed unsafe class VkTexture : IDisposable
             VkImageLayout.TransferDstOptimal, VkImageLayout.ShaderReadOnlyOptimal);
 
         IsUploaded = true;
+        // Provisional until the frame carrying it reaches the queue (VulkanContext.OnFrameDropped). A
+        // one-shot's command buffer registers nothing: its submit is synchronous and its caller sees it fail.
+        _ctx.OnFrameDropped(cmd, _requeueUpload ??= RequeueUpload);
+    }
+
+    /// <summary>The frame that carried this upload was dropped: the image is still unwritten (and
+    /// Undefined), so mark it so and have the context record the upload into the next frame.</summary>
+    private void RequeueUpload()
+    {
+        if (_disposed) return;
+        IsUploaded = false;
+        _ctx.RequeueTextureUpload(this);
     }
 
     /// <summary>

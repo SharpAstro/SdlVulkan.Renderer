@@ -219,6 +219,18 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
 
         VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, page.Image, VkImageLayout.TransferDstOptimal, VkImageLayout.ShaderReadOnlyOptimal);
 
+        // Provisional until the frame carrying the copy reaches the queue (VulkanContext.OnFrameDropped).
+        // The page is found again by identity, not by the index it had here: a page destroyed in between
+        // shifts every later index down, and one that is gone has nothing left to upload.
+        var consumedInitialTransition = srcLayout == VkImageLayout.Undefined;
+        _ctx.OnFrameDropped(cmd, () =>
+        {
+            var index = _pageResources.IndexOf(page);
+            if (index < 0) return;
+            _core.RequeueUpload(index, r);
+            if (consumedInitialTransition) page.NeedsInitialTransition = true;
+        });
+
         _core.MarkPageFlushed(pageIndex);
         return true;
     }

@@ -199,9 +199,11 @@ public sealed unsafe partial class VulkanContext
         // permanently hung export/thumbnail thread rather than a recoverable stall.
         var cmd = _commandBuffers[_currentFrame];
         DeviceApi.vkResetCommandBuffer(cmd, 0);
+        BeginFrameRecording(cmd);
         VkCommandBufferBeginInfo bi = new() { flags = VkCommandBufferUsageFlags.OneTimeSubmit };
         DeviceApi.vkBeginCommandBuffer(cmd, &bi);
         BeginGpuFrameTiming(cmd);
+        RecordRequeuedTextureUploads(cmd);
 
         // Same contract as BeginFrame: the slot's fence has retired, so its ring buffer may grow here.
         BeginVertexRingFrame();
@@ -271,6 +273,7 @@ public sealed unsafe partial class VulkanContext
             Volatile.Write(ref _submitOrdinal[_currentFrame], _frameOrdinal);
             Volatile.Write(ref _submitPending[_currentFrame], 1);
             Interlocked.Increment(ref _submitsTotal);
+            NoteFrameSubmitted();
             _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
             return;
         }
@@ -285,6 +288,7 @@ public sealed unsafe partial class VulkanContext
         // hand the caller stale or blank pixels as if they were the page. A caller can retry a throw; it
         // cannot detect a plausible-looking wrong image.
         Volatile.Write(ref _submitPending[_currentFrame], 0);
+        NoteFrameDropped("offscreen submit failed");
         _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
         submitResult.CheckResult();
     }

@@ -569,6 +569,11 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // objects the host is now entitled to free.
         if (_abandoned) return;
 
+        // A frame begun before the error dies below with its command buffer, and so does every upload
+        // it recorded. Put them back in line while the frame index still names the frame they rode.
+        if (_recordingFrameCmd != VkCommandBuffer.Null)
+            NoteFrameDropped("recovery discarded the frame");
+
         // Flush the present queue (VUID-...-01282 / -05149) before the sync-object teardown and
         // CleanupSwapchain below, on the same drain-succeeded gate as the resize path.
         FlushPresentQueueAfterDrain(drained);
@@ -812,6 +817,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // instead means an abandoned frame leaves the fence SIGNALED and the next frame proceeds.
         var cmd = _commandBuffers[_currentFrame];
         DeviceApi.vkResetCommandBuffer(cmd, 0);
+        BeginFrameRecording(cmd);
 
         VkCommandBufferBeginInfo beginInfo = new()
         {
@@ -823,6 +829,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // buffer that must be resolved by a submit. AbortFrame does that when the frame is abandoned.
         _frameBegun = true;
         _renderPassBegun = false;
+        // Uploads a dropped frame carried away, recorded again before anything else this frame draws.
+        RecordRequeuedTextureUploads(cmd);
 
         // Grow the ring if the last frame in this slot ran out, and reset its cursor. Legal here
         // because the slot's fence was waited on above.
@@ -952,6 +960,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             Interlocked.Increment(ref _submitsTotal);
             _rejectedSubmitStreak = 0;
             LastFrameSubmitted = true;
+            NoteFrameSubmitted();
         }
         else if (submitResult == VkResult.ErrorInitializationFailed)
         {
@@ -964,12 +973,11 @@ public sealed unsafe partial class VulkanContext : IDisposable
             // covered before.
             Volatile.Write(ref _submitPending[_currentFrame], 0);
             ReplaceImageAvailableSemaphore(_currentFrame);
-            // A thumbnail copy recorded into this frame died with it. Cancel it, or the next
-            // BeginFrame on this index — which skips the fence wait, there being nothing to wait
-            // for — would snapshot a readback buffer the GPU never wrote.
-            if (_thumbPending && _thumbPendingIndex == _currentFrame)
-                _thumbPending = false;
-            CancelPresentCaptureOnRejectedSubmit();
+            // Everything this frame recorded died with it: the uploads it carried go back in line, and a
+            // thumbnail copy on this index is cancelled, or the next BeginFrame on it — which skips the
+            // fence wait, there being nothing to wait for — would snapshot a readback buffer the GPU
+            // never wrote.
+            NoteFrameDropped("submit rejected");
             _frameBegun = false;
             _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
             LastFrameSubmitted = false;
@@ -995,6 +1003,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             // take, so nothing will ever signal it. Clear the mark before throwing, or the throw leaves
             // the trap behind for whatever recovers.
             Volatile.Write(ref _submitPending[_currentFrame], 0);
+            NoteFrameDropped("submit failed");
             submitResult.CheckResult();
         }
 
@@ -1036,7 +1045,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
     // (a file wrapped in #if DEBUG). Partial methods with no implementation have their calls removed
     // by the compiler, so a Release build carries neither the code nor the call sites.
     partial void RecordPresentCapture(VkCommandBuffer cmd);
-    partial void CancelPresentCaptureOnRejectedSubmit();
+    partial void CancelPresentCaptureOnDroppedFrame();
     partial void ConsumePresentCaptureReadback();
     partial void CleanupPresentCapture();
 
