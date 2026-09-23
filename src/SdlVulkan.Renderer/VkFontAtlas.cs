@@ -254,8 +254,26 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, VkImageLayout.TransferDstOptimal, VkImageLayout.ShaderReadOnlyOptimal);
 
+        // Provisional until the frame carrying the copy reaches the queue (VulkanContext.OnFrameDropped):
+        // a dropped frame took the upload with it, so the region goes back in line, and so does the
+        // initial transition if this was the image's first flush (it is still Undefined on the GPU).
+        var consumedInitialTransition = srcLayout == VkImageLayout.Undefined;
+        _ctx.OnFrameDropped(cmd, () => RequeueFlush(regionX, regionY, regionW, regionH, consumedInitialTransition));
+
         ResetDirtyRegion();
         _unflushedGlyphs.Clear();
+    }
+
+    /// <summary>Puts a flushed region back in the dirty rect, because the frame that carried its upload
+    /// never reached the queue. The staging copy is still the truth, so uploading it again is exact.
+    /// Clamped, and harmless on a disposed atlas: it only moves the rect.</summary>
+    private void RequeueFlush(int x, int y, int w, int h, bool neededInitialTransition)
+    {
+        _dirtyX0 = Math.Min(_dirtyX0, x);
+        _dirtyY0 = Math.Min(_dirtyY0, y);
+        _dirtyX1 = Math.Min(Math.Max(_dirtyX1, x + w), _atlasWidth);
+        _dirtyY1 = Math.Min(Math.Max(_dirtyY1, y + h), _atlasHeight);
+        if (neededInitialTransition) _needsInitialTransition = true;
     }
 
     public void Dispose()

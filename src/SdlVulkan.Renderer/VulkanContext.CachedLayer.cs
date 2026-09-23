@@ -291,7 +291,15 @@ public sealed unsafe partial class VulkanContext
         if (!_inLayerPass) return;
         DeviceApi.vkCmdEndRenderPass(cmd);
         _inLayerPass = false;
-        _layerRendered[_currentFrame] = true;
+
+        // Provisional until the frame reaches the queue (OnFrameDropped). A slot never rendered is still
+        // Undefined on the GPU if this frame is dropped, and sampling it is the garbage the flag exists to
+        // prevent. A slot rendered before keeps its older, valid contents; whoever tracks WHAT a slot
+        // holds must register its own rollback, since this cannot know.
+        var slot = _currentFrame;
+        if (!_layerRendered[slot])
+            OnFrameDropped(cmd, () => _layerRendered[slot] = false);
+        _layerRendered[slot] = true;
     }
 
     private void CleanupCachedLayerTargets()

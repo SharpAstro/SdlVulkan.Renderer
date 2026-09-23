@@ -9,6 +9,25 @@ this file disagrees with. Bump it there and add the entry here, in the same comm
 
 ## 7.48
 
+**An upload recorded into a frame that never reaches the queue is recorded again, and a GPU wedge can
+be faked on demand to prove it.** The first came out of the second: with the Adreno's rejected submits
+faked in a live TianWen GUI, a notification written during the storm had lost every letter first drawn
+then ("Displa recovered from a stall on the Home vie"), for the life of the process.
+
+- **Fix: work recorded into a dropped frame is no longer lost.** The glyph atlases' flushes, deferred
+  texture uploads and a cached-layer pass all advanced their bookkeeping when RECORDED (dirty rect
+  reset, texture marked uploaded, slot marked rendered), so a frame the driver refused, one whose
+  submit failed, one recovery discarded, or one begun and never ended carried the work away unexecuted
+  and nothing uploaded it again. `VulkanContext.OnFrameDropped(cmd, rollback)` registers what undoing
+  recorded work means; the context runs it exactly when the frame does not reach the queue, and drops it
+  when the submit is accepted. The atlases put the region back in line (only that region: a whole-atlas
+  re-upload is the kind of burst the Adreno is suspected of choking on) and restore a first flush's
+  initial transition; a `VkTexture` whose upload was dropped is recorded into the next frame on its own,
+  so no consumer needs to know; a cached-layer slot that was never rendered goes back to unrendered. A
+  consumer that tracks what a slot HOLDS registers its own rollback. The thumbnail and screenshot captures
+  are now cancelled on every kind of drop, not only a rejected submit. Event 212 logs each re-queue.
+- On DIR.Lib 11.2 (`SdfFontAtlas.RequeueUpload`).
+
 **A GPU wedge can be faked, on demand, on a healthy GPU (DEBUG).** Every path that answers a wedge
 (the rejected-submit streak, the event loop's mid-frame recovery, the load-shed request, the
 device-loss hand-off) could only be exercised by a driver failing on its own, about twice a month on

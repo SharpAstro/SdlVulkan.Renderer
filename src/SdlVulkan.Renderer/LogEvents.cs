@@ -73,6 +73,9 @@ internal static partial class LogEvents
     [LoggerMessage(209, LogLevel.Information, "[VulkanContext] GPU frame timing unavailable on this queue (timestampValidBits = 0); LastGpuFrameMs stays NaN.")]
     public static partial void GpuTimingUnsupported(this ILogger logger);
 
+    [LoggerMessage(212, LogLevel.Information, "[VulkanContext] frame did not reach the queue ({Why}); put {Count} piece(s) of recorded work back in line for the next frame.")]
+    public static partial void FrameDroppedWorkRequeued(this ILogger logger, int count, string why);
+
 #if DEBUG
     // Warning, not Information: a log carrying a faked wedge must say so where anyone reading it for a
     // real one will look, because the lines the renderer writes in reply (201, 202, 207) are the real ones.
