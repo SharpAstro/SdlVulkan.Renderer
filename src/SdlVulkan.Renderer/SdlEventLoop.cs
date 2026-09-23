@@ -658,15 +658,14 @@ public sealed class SdlEventLoop
                 v.Window.GetSizeInPixels(out var sw, out var sh);
                 if (sw > 0 && sh > 0)
                 {
-                    renderer.RecoverFromGpuError();
-                    // Only re-run layout when the size actually changed — during a recovery storm
-                    // the size is unchanged, and re-notifying every cycle is pure churn.
-                    if ((uint)sw != v.LastRecoverW || (uint)sh != v.LastRecoverH)
-                    {
-                        v.OnResize?.Invoke((uint)sw, (uint)sh);
-                        v.LastRecoverW = (uint)sw;
-                        v.LastRecoverH = (uint)sh;
-                    }
+                    // On the sacrificial task, never this thread, exactly as the stuck-fence escalation
+                    // does: the rebuild tears down sync objects and the swapchain, and on a device that is
+                    // truly hung the driver can block INSIDE those calls (the 2026-07-10 dump). Run here, that
+                    // froze the window with no deadline; there, the poll at the top of this method bounds it
+                    // (GpuWedgeRecoveryDeadlineMs, then abandon and OnGpuWedged) and, on completion, re-runs
+                    // layout only if the size changed while it ran, as this used to.
+                    v.GpuRecoveryTask = Task.Run(renderer.RecoverFromGpuError);
+                    v.GpuRecoveryDeadlineTick = now + GpuWedgeRecoveryDeadlineMs;
                 }
                 v.NeedsRedraw = true;
 
