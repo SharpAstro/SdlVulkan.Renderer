@@ -702,6 +702,27 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         w.WriteNumber("vertexRingPeakBytes", ring.VertexRingPeakBytes);
         w.WriteNumber("vertexRingCapacityBytes", ring.VertexRingCapacityBytes);
         w.WriteNumber("vertexRingOverflowFrames", ring.VertexRingOverflowFrames);
+        // GPU time per frame from timestamp queries (VulkanContext.GpuTiming.cs): the last completed
+        // frame, the peak, how many exceeded the slow-frame budget, and the last frame's sections.
+        // Null, not NaN, when nothing has been measured: JSON has no NaN, and a writer asked for one
+        // throws.
+        w.WriteBoolean("gpuTimingSupported", ring.GpuTimingSupported);
+        if (double.IsFinite(ring.LastGpuFrameMs))
+            w.WriteNumber("gpuFrameMs", Math.Round(ring.LastGpuFrameMs, 3));
+        else
+            w.WriteNull("gpuFrameMs");
+        w.WriteNumber("gpuPeakFrameMs", Math.Round(ring.PeakGpuFrameMs, 3));
+        w.WriteNumber("gpuSlowFrames", ring.SlowGpuFrames);
+        w.WriteNumber("gpuSlowFrameBudgetMs", VulkanContext.SlowGpuFrameBudgetMs);
+        w.WriteStartArray("gpuSections");
+        foreach (var section in ring.LastGpuSections)
+        {
+            w.WriteStartObject();
+            w.WriteString("name", section.Name);
+            w.WriteNumber("ms", Math.Round(section.Milliseconds, 3));
+            w.WriteEndObject();
+        }
+        w.WriteEndArray();
         w.WriteEndObject();
     });
 
