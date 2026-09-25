@@ -181,6 +181,12 @@ public sealed class SdlEventLoop
     /// <summary>Primary window's render-degraded (load-shed) callback. See <see cref="SdlWindowView.OnRenderDegraded"/>.</summary>
     public Action? OnRenderDegraded { get => Primary.OnRenderDegraded; set => Primary.OnRenderDegraded = value; }
 
+    /// <summary>Primary window's GPU-wedged (terminal) callback. See <see cref="SdlWindowView.OnGpuWedged"/>.</summary>
+    public Action? OnGpuWedged { get => Primary.OnGpuWedged; set => Primary.OnGpuWedged = value; }
+
+    /// <summary>Whether the primary window's GPU has been declared wedged. See <see cref="SdlWindowView.IsGpuWedged"/>.</summary>
+    public bool IsGpuWedged => Primary.IsGpuWedged;
+
     /// <summary>Active touch fingers on the primary window.</summary>
     public int ActiveFingerCount => Primary.ActiveFingerCount;
 
@@ -233,7 +239,9 @@ public sealed class SdlEventLoop
 
     /// <summary>
     /// Runs the event loop until <see cref="Stop"/> is called or the cancellation token is triggered.
-    /// Blocks the calling thread.
+    /// Blocks the calling thread. It may be called again after it returned, including after it stopped
+    /// because a window's GPU was declared wedged: such a window stays inert
+    /// (<see cref="SdlWindowView.IsGpuWedged"/>) while its events go on being dispatched.
     /// </summary>
     public void Run(CancellationToken ct = default)
     {
@@ -254,10 +262,11 @@ public sealed class SdlEventLoop
             // A minimized window is excluded here (and skipped in the render pass below) so it never
             // forces the non-blocking PollEvent path: its surface is 0x0, so rendering it would just
             // busy-spin through failed acquire/present + swapchain recreation for frames nobody sees.
-            // Falling through to WaitEventTimeout lets the loop idle until a restore/expose event.
+            // Falling through to WaitEventTimeout lets the loop idle until a restore/expose event. A
+            // window whose GPU is wedged never renders again, so it never forces the poll path either.
             foreach (var v in _viewList)
             {
-                if (!v.NeedsRedraw || nowTick < v.NextRenderAttemptTick || v.Window.IsMinimized) continue;
+                if (v.IsGpuWedged || !v.NeedsRedraw || nowTick < v.NextRenderAttemptTick || v.Window.IsMinimized) continue;
                 if (nowStamp >= v.NextFrameDueTimestamp) { anyNeedsRedraw = true; break; }
                 var dueMs = (int)Math.Ceiling((v.NextFrameDueTimestamp - nowStamp) * 1000.0 / Stopwatch.Frequency);
                 waitMs = Math.Clamp(Math.Min(waitMs, dueMs), 1, 16);
@@ -276,7 +285,9 @@ public sealed class SdlEventLoop
                 } while (_running && PollEvent(out evt));
             }
 
-            // Per-window external redraw checks (background task completions, cursor blink, …).
+            // Per-window external redraw checks (background task completions, cursor blink, …). Still
+            // asked of a wedged window, whose redraw is then never drawn: a host may use the check as its
+            // once-per-iteration hook, as a shutdown drain does to stop the loop when its work completes.
             foreach (var v in _viewList)
                 if (v.CheckNeedsRedraw?.Invoke() == true)
                     v.NeedsRedraw = true;
@@ -289,7 +300,7 @@ public sealed class SdlEventLoop
             for (var i = 0; i < _viewList.Count; i++)
             {
                 var v = _viewList[i];
-                if (!v.NeedsRedraw) continue;
+                if (v.IsGpuWedged || !v.NeedsRedraw) continue;
                 // Minimized: skip render + swapchain recreation entirely (see the IsMinimized guard
                 // above). Leave NeedsRedraw armed so the window repaints the instant it is restored,
                 // without waiting for a fresh expose/resize event to re-arm it.
@@ -337,6 +348,11 @@ public sealed class SdlEventLoop
     private bool RenderView(SdlWindowView v)
     {
         var renderer = v.Renderer;
+
+        // Inert once wedged (SdlWindowView.IsGpuWedged). Run's render pass already skips such a window;
+        // this is the backstop, so nothing can reach a device that has been given up on.
+        if (v.IsGpuWedged)
+            return false;
 
         // Android app lifecycle: on the first frame after returning to the foreground, rebuild the
         // swapchain against a fresh surface (the native surface was destroyed while backgrounded).
@@ -411,9 +427,11 @@ public sealed class SdlEventLoop
             }
             else if (recovery.IsFaulted)
             {
-                v.GpuRecoveryTask = null;
+                // The rebuild itself threw, so the device is not coming back as far as this loop can
+                // tell: the same terminal hand-off as every other path. This used to stop the loop
+                // without telling the host, which then read the stop as a user's quit.
                 SdlVulkanLog.Logger.GpuRecoveryFailed(recovery.Exception?.GetBaseException().Message);
-                _running = false;
+                DeclareGpuWedged(v);
                 return false;
             }
             else if (Environment.TickCount64 >= v.GpuRecoveryDeadlineTick)
@@ -431,9 +449,7 @@ public sealed class SdlEventLoop
                 // can join is still entitled to read those handles.
                 renderer.AbandonDevice();
                 SdlVulkanLog.Logger.GpuWedgedRecoveryDeadline(GpuWedgeRecoveryDeadlineMs, v.Window.WindowId);
-                try { v.OnGpuWedged?.Invoke(); }
-                catch (Exception ex) { SdlVulkanLog.Logger.OnGpuWedgedHandlerThrew(ex.GetType().Name, ex.Message); }
-                _running = false;
+                DeclareGpuWedged(v);
                 return false;
             }
             else
@@ -584,9 +600,7 @@ public sealed class SdlEventLoop
                 if (++v.StuckEscalations >= GpuStuckEscalationLimit)
                 {
                     SdlVulkanLog.Logger.GpuWedgedEscalationLimit(v.StuckEscalations, v.Window.WindowId);
-                    try { v.OnGpuWedged?.Invoke(); }
-                    catch (Exception ex) { SdlVulkanLog.Logger.OnGpuWedgedHandlerThrew(ex.GetType().Name, ex.Message); }
-                    _running = false;
+                    DeclareGpuWedged(v);
                     return false;
                 }
                 v.GpuRecoveryTask = Task.Run(renderer.RecoverFromGpuError);
@@ -607,9 +621,7 @@ public sealed class SdlEventLoop
             if (vk.Result == VkResult.ErrorDeviceLost)
             {
                 SdlVulkanLog.Logger.DeviceLostTerminal(v.Window.WindowId);
-                try { v.OnGpuWedged?.Invoke(); }
-                catch (Exception ex) { SdlVulkanLog.Logger.OnGpuWedgedHandlerThrew(ex.GetType().Name, ex.Message); }
-                _running = false;
+                DeclareGpuWedged(v);
                 return false;
             }
 
@@ -631,9 +643,7 @@ public sealed class SdlEventLoop
             if (v.RecoveriesSinceCleanFrame >= DeadDeviceRecoveryLimit && now - v.FailingSinceTick >= DeadDeviceWindowMs)
             {
                 SdlVulkanLog.Logger.DeviceNotTakingWork(v.RecoveriesSinceCleanFrame, now - v.FailingSinceTick, vk.Result, v.Window.WindowId);
-                try { v.OnGpuWedged?.Invoke(); }
-                catch (Exception ex) { SdlVulkanLog.Logger.OnGpuWedgedHandlerThrew(ex.GetType().Name, ex.Message); }
-                _running = false;
+                DeclareGpuWedged(v);
                 return false;
             }
 
@@ -678,10 +688,11 @@ public sealed class SdlEventLoop
             }
             catch (Exception inner)
             {
-                // Recovery itself failed (likely a true device-lost) — there's no sensible way to
-                // continue, so bail out of the loop cleanly so the caller can dispose state.
+                // Starting the recovery itself failed (likely a true device-lost): there is no sensible
+                // way to go on drawing, so hand the terminal decision to the host like every other path,
+                // rather than stopping the loop as though the user had quit.
                 SdlVulkanLog.Logger.VulkanRecoveryFailed(inner.GetType().Name, inner.Message);
-                _running = false;
+                DeclareGpuWedged(v);
             }
             return false;
         }
@@ -704,6 +715,22 @@ public sealed class SdlEventLoop
             }
             throw;
         }
+    }
+
+    // The one terminal hand-off for a window whose GPU is not coming back. Every path that gives up on
+    // the device ends here, so the host hears about it the same way whichever path it was (two of them
+    // used to stop the loop without a word, which a host could only read as a quit), and the window is
+    // left inert for a host that goes on pumping its events without a GPU. The recovery task is dropped
+    // too: a re-entered Run would otherwise poll it again, find it still overdue and declare the wedge a
+    // second time, stopping the loop the moment it started.
+    private void DeclareGpuWedged(SdlWindowView v)
+    {
+        v.IsGpuWedged = true;
+        v.GpuRecoveryTask = null;
+        v.NeedsRedraw = false;
+        try { v.OnGpuWedged?.Invoke(); }
+        catch (Exception ex) { SdlVulkanLog.Logger.OnGpuWedgedHandlerThrew(ex.GetType().Name, ex.Message); }
+        _running = false;
     }
 
     private bool TryView(uint windowId, out SdlWindowView view) => _views.TryGetValue(windowId, out view!);
@@ -730,6 +757,10 @@ public sealed class SdlEventLoop
             case EventType.WindowPixelSizeChanged:
                 if (TryView(evt.Window.WindowID, out var vr))
                 {
+                    // A wedged window's swapchain is never rebuilt: its device has been given up on, and
+                    // a resize against it would throw out of Dispatch, which runs uncaught.
+                    if (vr.IsGpuWedged)
+                        break;
                     // Backgrounded or awaiting a surface rebuild (Android): the current surface is
                     // dead, so resizing the swapchain against it would throw SURFACE_LOST — and
                     // Dispatch runs uncaught. SDL can deliver Restored + Resized in one poll batch
