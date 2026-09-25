@@ -7,6 +7,33 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.49
+
+**A host can keep running after its GPU is declared wedged, with its window still closable.** Asked for
+by TianWen, whose night had to END when the Adreno's rejected submits tripped 7.48's dead-device rule:
+the window is the rig's process there, and the only answer the loop gave was to stop. Additive; no
+existing behaviour changes for a host that exits on the wedge, as every host so far does.
+
+- **`SdlWindowView.IsGpuWedged`**, true from the moment `OnGpuWedged` fires and never cleared. The loop
+  then treats that window as INERT: it never renders it, never resizes its swapchain and never polls a
+  recovery for it, while its events are still dispatched and its `CheckNeedsRedraw` is still asked every
+  iteration (a redraw it asks for is never drawn; a shutdown drain uses that check to stop the loop). So
+  `Run` may be called again after it stopped for a wedge, and the window stays movable and closable
+  (`SdlVulkanWindow.SetTitle` needs no GPU, so a host can say why nothing is drawn). Before, a second
+  `Run` rendered the dead window on any armed redraw and polled the abandoned recovery task, which was
+  never cleared, so it declared the wedge again and stopped at once.
+- **Every path that gives up on the device now tells the host.** A recovery task that FAULTED, and a
+  recovery that threw while being started, used to stop the loop without firing `OnGpuWedged`, which a
+  host could only read as the user quitting. All six terminal paths now go through one hand-off.
+- **The single-window loop forwards `OnGpuWedged` and `IsGpuWedged`**, as it already forwarded
+  `OnRenderDegraded`. They were reachable only on a view from `AddWindow`, so a single-window host (the
+  TianWen GUI) could not subscribe at all.
+- **DEBUG:** the inspector's screenshot answers at once, with an error, on a wedged window instead of
+  waiting 15 s for a frame that will never come; the `gpu_fault` tool describes the re-run.
+
+Unchanged, and deliberately so: a NON-Vulkan exception from `OnRender` is an app bug and is still
+rethrown out of `Run` (after the frame is resolved), for the host to handle.
+
 ## 7.48
 
 **An upload recorded into a frame that never reaches the queue is recorded again, and a GPU wedge can

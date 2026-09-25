@@ -268,8 +268,9 @@ public sealed class InspectorTools
         + "reset) for the next 'count' submits, or every submit until cleared when count is 0 -- three in a "
         + "row escalate to the event loop's mid-frame recovery, and repeated recoveries raise the host's "
         + "OnRenderDegraded; 'lost' returns VK_ERROR_DEVICE_LOST from every submit, which the loop treats as "
-        + "terminal: the host's OnGpuWedged runs and the event loop STOPS, so the app will usually exit, as it "
-        + "would on a real loss; 'clear' disarms; 'status' (default) only reads. The renderer's log lines in "
+        + "terminal: the host's OnGpuWedged runs and the event loop STOPS, as it would on a real loss. A host "
+        + "that runs the loop again keeps the window inert but closable (no frame, so no screenshot), and this "
+        + "inspector answers again once it does; 'clear' disarms; 'status' (default) only reads. The renderer's log lines in "
         + "reply are the real ones, preceded by a Warning that the fault was injected. Returns {armed, "
         + "deviceLost, rejectsRemaining (null = until cleared), fakedResults, contextDeviceLost, "
         + "lastFrameSubmitted, ledger}.")]

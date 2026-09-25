@@ -218,11 +218,25 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// (the driver blocking inside teardown: vkFreeMemory never returns while the GPU spins at 100% on
     /// a hung submission); repeated stuck escalations with no clean frame between; or the device went on
     /// refusing work through repeated mid-frame recoveries (the Adreno after an engine reset, which
-    /// rejects every submit with VK_ERROR_INITIALIZATION_FAILED rather than reporting the loss). The
-    /// event loop stops after this fires. The consumer should persist session state and exit or
-    /// relaunch; the same device does not come back, and this library does not yet build a new one.
+    /// rejects every submit with VK_ERROR_INITIALIZATION_FAILED rather than reporting the loss); or a
+    /// recovery attempt that itself failed. The event loop stops after this fires. The same device does
+    /// not come back, and this library does not yet build a new one, so the consumer either exits or
+    /// relaunches, or keeps running WITHOUT drawing: the window is left inert
+    /// (<see cref="IsGpuWedged"/>), and calling <see cref="SdlEventLoop.Run"/> again keeps its events
+    /// pumping, so it stays movable and closable while the host finishes its work.
     /// </summary>
     public Action? OnGpuWedged { get; set; }
+
+    /// <summary>
+    /// True once this window's GPU has been declared wedged (the moment <see cref="OnGpuWedged"/> fires),
+    /// and never cleared, since the same device does not come back. From then on the loop treats the
+    /// window as INERT: it never renders it, never resizes its swapchain and never polls a recovery for it.
+    /// Its events are still dispatched and its <see cref="CheckNeedsRedraw"/> is still asked every
+    /// iteration (a redraw it asks for is simply never drawn), so a host that calls
+    /// <see cref="SdlEventLoop.Run"/> again gets a window it can still close, keeps its once-per-iteration
+    /// hook, and can title the window with <see cref="SdlVulkanWindow.SetTitle"/>, which needs no GPU.
+    /// </summary>
+    public bool IsGpuWedged { get; internal set; }
 
     // --- per-window loop state (managed by SdlEventLoop) ---
     internal bool NeedsRedraw = true;

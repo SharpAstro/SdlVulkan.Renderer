@@ -396,6 +396,18 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
 
         public string? Advance()
         {
+            if (view.IsGpuWedged)
+            {
+                // No frame will ever carry the capture: the window is inert once its GPU is given up on,
+                // though the loop (and so this inspector) may well be running again to keep it closable.
+                return ToJson(static jw =>
+                {
+                    jw.WriteStartObject();
+                    jw.WriteString("error", "screenshot unavailable: the window's GPU was declared wedged");
+                    jw.WriteEndObject();
+                });
+            }
+
             var ctx = view.Renderer.Context;
             if (ctx.TryTakePresentCapture(out var rgba, out var w, out var h))
             {
