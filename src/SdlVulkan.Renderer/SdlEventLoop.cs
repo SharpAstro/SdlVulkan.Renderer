@@ -132,20 +132,21 @@ public sealed class SdlEventLoop
     /// </summary>
     public Func<bool>? OnQuit { get; set; }
 
-    /// <summary>Called once per loop iteration after any windows render. Use for process-wide post-frame
-    /// work (background task completions, state cleanup).</summary>
+    /// <summary>Called after a loop iteration in which at least one window rendered: NOT on an iteration that drew
+    /// nothing (an idle or minimized window). Use for process-wide post-frame work (background task completions,
+    /// state cleanup); for work that must run while the loop is alive but drawing nothing, use
+    /// <see cref="OnLoopIteration"/>.</summary>
     public Action? OnPostFrame { get; set; }
 
-#if DEBUG
     /// <summary>
-    /// DEBUG-only per-iteration hook: invoked once every loop iteration, AFTER the render pass, whether
-    /// or not a frame was drawn. Unlike <see cref="OnPostFrame"/> (which fires only on a rendered frame),
-    /// this still runs while every window is minimized -- so the debug inspector's command pump keeps
-    /// servicing commands (ping, describe, window-state) on a minimized window, which otherwise never
-    /// renders. Compiled out of Release entirely, so the Release loop carries no extra per-frame work.
+    /// Invoked once every loop iteration, AFTER the render pass, whether or not a frame was drawn: about every 16 ms
+    /// while the loop idles (its event wait is bounded), and never while the loop is stuck. That makes it the loop's
+    /// proof of life. A host that tells another process it is still there (a presence beat to a node, so a prompt
+    /// waits only for a window that can show it) beats from here; so does the debug inspector's command pump, which
+    /// must still serve a minimized window, which never renders. It runs on the render thread, so keep it cheap:
+    /// record, do not work. Compose with any hook already set (<c>var prev = loop.OnLoopIteration;</c>).
     /// </summary>
-    internal Action? OnLoopIteration { get; set; }
-#endif
+    public Action? OnLoopIteration { get; set; }
 
     // --- Single-window forwarding properties (delegate to the primary view) ---
 
@@ -335,11 +336,9 @@ public sealed class SdlEventLoop
             if (renderedAny)
                 OnPostFrame?.Invoke();
 
-#if DEBUG
-            // Per-iteration pump (debug inspector). Runs every iteration, incl. when nothing rendered
-            // (all windows minimized), so inspector commands still drain on a minimized window.
+            // Every iteration, incl. when nothing rendered (idle, or every window minimized): a host's proof of life,
+            // and the debug inspector's pump.
             OnLoopIteration?.Invoke();
-#endif
         }
     }
 
