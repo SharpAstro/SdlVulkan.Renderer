@@ -7,6 +7,17 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.50
+
+**`SdlEventLoop.OnLoopIteration` is public, in every configuration.** Asked for by TianWen, whose window must tell
+its node, every few seconds, that it is still alive and can show a prompt: a frozen window, whose render thread is
+stuck, must stop counting as someone who will answer, or it holds the night on a prompt nobody sees. The hook fires
+once every loop iteration whether or not anything was drawn, about every 16 ms while the loop idles and never while
+it is stuck, so it is that proof of life. It was DEBUG-only and internal (the inspector's pump), and
+`OnPostFrame`, the only public per-iteration callback, fires only after a rendered frame, so an idle, healthy window
+would have fallen silent. Additive: the cost in Release is one null check per iteration; the debug inspector still
+chains onto it as before. `OnPostFrame`'s summary no longer claims to run on every iteration.
+
 ## 7.49
 
 **A host can keep running after its GPU is declared wedged, with its window still closable.** Asked for
