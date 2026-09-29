@@ -1642,6 +1642,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // Emits one glyph quad into <paramref name="atlas"/>'s per-page vertex <paramref name="buckets"/>.
     // Split out so the tiered fallback can route a not-yet-ready large glyph's small-tier placeholder
     // into a separate bucket set — each is flushed with its own atlas's descriptor sets + AA band.
+    // An SDF vertex: vec2 pos + vec2 uv + vec4 cell (see sdf.vert and the SdfPipeline's layout).
+    private const int SdfFloatsPerVertex = 8;
+
     private void AddSdfQuad(VkSdfFontAtlas atlas, List<List<float>> buckets,
         in SdfFontAtlas.GlyphInfo glyph, float inkX, float inkY, float rotation, float xScale)
     {
@@ -1700,13 +1703,26 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             verts[20] = blx; verts[21] = bly; verts[22] = glyph.U0; verts[23] = lv1;
         }
 
+        // Widen each vertex with the glyph's cell in its page (u0, v0, u1, v1), the same on all six:
+        // sdf.frag clamps its coverage samples into it, because the texels around a cell are whatever
+        // the page held before (see sdf.vert).
+        Span<float> withCell = stackalloc float[SdfFloatsPerVertex * 6];
+        for (var v = 0; v < 6; v++)
+        {
+            verts.Slice(v * 4, 4).CopyTo(withCell.Slice(v * SdfFloatsPerVertex));
+            withCell[v * SdfFloatsPerVertex + 4] = glyph.U0;
+            withCell[v * SdfFloatsPerVertex + 5] = lv0;
+            withCell[v * SdfFloatsPerVertex + 6] = glyph.U1;
+            withCell[v * SdfFloatsPerVertex + 7] = lv1;
+        }
+
         // Accumulate into this glyph's page bucket; EndGlyphBatch writes each page to the vertex
         // ring and issues one bind+draw per page. (No immediate WriteVertices — draws are grouped
         // by page so each binds its own page descriptor set.)
         while (buckets.Count <= page)
-            buckets.Add(new List<float>(24 * 64));
+            buckets.Add(new List<float>(SdfFloatsPerVertex * 6 * 64));
         var pageList = buckets[page];
-        pageList.AddRange(verts);
+        pageList.AddRange(withCell);
         _glyphBatchVertexCount += 6;
     }
 
@@ -1919,7 +1935,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
                 var buffer = Surface.VertexBuffer;
                 var vkOffset = (ulong)vertOffset;
                 api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
-                api.vkCmdDraw(_currentCmd, (uint)(list.Count / 4), 1, 0, 0); // 4 floats (pos.xy+uv.xy)/vertex
+                api.vkCmdDraw(_currentCmd, (uint)(list.Count / SdfFloatsPerVertex), 1, 0, 0); // pos.xy+uv.xy+cell/vertex
             }
 
             // Second pass: small-tier placeholders for not-yet-ready large-tier glyphs. Same SDF
@@ -1973,7 +1989,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             var buffer = Surface.VertexBuffer;
             var vkOffset = (ulong)vertOffset;
             api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
-            api.vkCmdDraw(_currentCmd, (uint)(list.Count / 4), 1, 0, 0);
+            api.vkCmdDraw(_currentCmd, (uint)(list.Count / SdfFloatsPerVertex), 1, 0, 0);
         }
     }
 
