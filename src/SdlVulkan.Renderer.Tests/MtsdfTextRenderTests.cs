@@ -97,4 +97,58 @@ public sealed class MtsdfTextRenderTests(OffscreenGpuFixture gpu)
             partial.ShouldBeGreaterThan(20, "expected antialiased edge texels (partial coverage)");
         }
     }
+
+    /// <summary>
+    /// A stroke thinner than a pixel keeps its ink wherever it lands. The same hyphens are drawn at
+    /// eight vertical sub-pixel phases, and the ink each phase puts on screen (summed coverage, i.e.
+    /// area in pixels) must stay nearly the same: area coverage does not depend on where a shape
+    /// sits against the pixel grid. Sampling the distance field once at the pixel centre does: two
+    /// centres can straddle a thin stroke and both read it as outside, which drew a Times 'a' at
+    /// reading size without the hairline top of its bowl. At 7 px/em DejaVu's hyphen is about
+    /// 0.6 px thick, which is that case.
+    /// </summary>
+    [Fact]
+    public void MtsdfText_ThinStrokeKeepsItsInkAtEverySubPixelPhase()
+    {
+        if (gpu.Context is not { } ctx)
+        {
+            Assert.Skip("Vulkan runtime not available on this host");
+            return;
+        }
+
+        const uint w = 256, h = 48;
+        const int phases = 8, column = 32, perColumn = 3;
+        const float size = 7f;
+        ctx.ResizeOffscreen(w, h);
+
+        // The offscreen context is owned by the shared collection fixture; never dispose it here.
+        using var renderer = new VkRenderer(ctx, w, h);
+        var font = FontPath;
+        renderer.OnPreFlush = () => renderer.PreWarmSdfGlyph(font, size, new Rune('-'));
+
+        renderer.BeginOffscreenFrame(new RGBAColor32(0, 0, 0, 255)).ShouldBeTrue();
+        renderer.BeginSdfGlyphBatch(new RGBAColor32(255, 255, 255, 255), size);
+        for (var p = 0; p < phases; p++)
+        for (var i = 0; i < perColumn; i++)
+            renderer.AddBatchedSdfGlyphAtBaseline(font, new Rune('-'), -1,
+                baselineX: p * column + 4f + i * 8f, baselineY: 24f + p / (float)phases);
+        renderer.EndGlyphBatch();
+        renderer.EndOffscreenFrame();
+        ctx.WaitOffscreenFrameComplete();
+
+        var rgba = ctx.ReadbackOffscreenRgba();
+        var ink = new double[phases];
+        for (var y = 0; y < h; y++)
+        for (var x = 0; x < w; x++)
+            ink[x / column] += rgba[(y * (int)w + x) * 4] / 255.0;
+
+        var min = double.MaxValue;
+        var max = 0.0;
+        foreach (var a in ink) { min = Math.Min(min, a); max = Math.Max(max, a); }
+        var inkPerPhase = string.Join(", ", Array.ConvertAll(ink, a => a.ToString("F2")));
+
+        max.ShouldBeGreaterThan(1.0, $"the hyphens drew nothing: ink per phase {inkPerPhase}");
+        (min / max).ShouldBeGreaterThan(0.85,
+            $"a thin stroke's ink depends on its sub-pixel phase: ink per phase {inkPerPhase}");
+    }
 }

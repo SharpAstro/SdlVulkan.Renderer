@@ -7,6 +7,28 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.51
+
+**MTSDF text keeps strokes thinner than a pixel.** `sdf.frag` computed a pixel's coverage from ONE
+sample of the distance field at the pixel centre, blended over half a pixel. That estimates coverage
+well at an edge and badly across a stroke thinner than a pixel: two neighbouring centres can both fall
+just outside it, and the stroke draws nearly white. Found as a Times `a` in an arXiv paper drawn at
+reading size (about 29 px/em) without the hairline top of its bowl, with `n`, `e` and `o` thinned the
+same way. The shader now averages four samples on a rotated grid inside the pixel, each blended over a
+quarter pixel, so coverage is the pixel's area rather than its centre's distance. Measured on real
+atlas cells against exact area coverage (four glyphs, four sizes, five sub-pixel offsets): mean error
+0.032 to 0.012, worst pixel 0.63 to 0.28, and no stroke lost. The new test draws the same hyphens at
+eight sub-pixel phases, at 7 px/em, where DejaVu's hyphen is about 0.6 px thick: the ink on screen
+varied 0.16 to 5.82 px² with the phase alone, and now varies 3.07 to 3.32.
+
+The samples follow the pixel's footprint in texture space (`dFdx`/`dFdy`), so rotated text samples its
+own pixel, and reach at most 4.5 texels, which cannot touch another glyph's ink (every cell's ink sits
+behind 4 texels of spread, and cells are a texel apart). The `sdfEdge` push constant now carries each
+sample's half band, a quarter pixel, from `VkSdfFontAtlas.SampleHalfBand`, clamped at 0.45 field units
+rather than the 0.25 of DIR.Lib's `ScreenPxHalfBand`, which at 7 px/em cut the band to under half and
+turned each sample into an on/off test. DIR.Lib is unchanged. The cost is four texture reads per text
+fragment instead of one.
+
 ## 7.50
 
 **`SdlEventLoop.OnLoopIteration` is public, in every configuration.** Asked for by TianWen, whose window must tell
