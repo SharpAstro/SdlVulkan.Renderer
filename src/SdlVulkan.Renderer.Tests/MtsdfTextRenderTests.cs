@@ -147,6 +147,21 @@ public sealed class MtsdfTextRenderTests(OffscreenGpuFixture gpu)
         foreach (var a in ink) { min = Math.Min(min, a); max = Math.Max(max, a); }
         var inkPerPhase = string.Join(", ", Array.ConvertAll(ink, a => a.ToString("F2")));
 
+        // Where each phase's ink sits, row by row, so a failure says whether the stroke itself or
+        // something else in its column carries the difference.
+        var profile = new StringBuilder();
+        for (var p = 0; p < phases; p++)
+        {
+            profile.Append($"\n  phase {p}:");
+            for (var y = 0; y < h; y++)
+            {
+                var row = 0.0;
+                for (var x = p * column; x < (p + 1) * column; x++) row += rgba[(y * (int)w + x) * 4] / 255.0;
+                if (row > 0.005) profile.Append($" y{y}={row:F2}");
+            }
+        }
+        inkPerPhase += profile.ToString();
+
         max.ShouldBeGreaterThan(1.0, $"the hyphens drew nothing: ink per phase {inkPerPhase}");
         (min / max).ShouldBeGreaterThan(0.85,
             $"a thin stroke's ink depends on its sub-pixel phase: ink per phase {inkPerPhase}");
