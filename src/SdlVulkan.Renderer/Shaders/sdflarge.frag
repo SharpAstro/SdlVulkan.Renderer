@@ -8,8 +8,9 @@
 //
 // Like sdf.frag it clamps the sample into the glyph's own cell (vCell), half a texel in, because
 // the texels around a cell are whatever the atlas page held before, and it shifts the edge out
-// by 0.1 px, so text keeps its weight when a zoom carries it across 64 px/em (at this size the
-// shift is under 2% of a stem). The sdfEdge push constant is one screen pixel in field units.
+// by the same 0.025 px, so text keeps its weight when a zoom carries it across 64 px/em (at this
+// size the shift is a fraction of a percent of a stem). The sdfEdge push constant is one screen
+// pixel in field units.
 layout(location = 0) in vec2 vTexCoord;
 layout(location = 1) flat in vec4 vCell;
 layout(push_constant) uniform PC { mat4 proj; vec4 color; float sdfEdge; } pc;
@@ -21,7 +22,7 @@ void main() {
     float dist = median(texture(uTexture, clamp(vTexCoord, vCell.xy + halfTexel, vCell.zw - halfTexel)).rgb);
     float px = pc.sdfEdge > 0.0 ? pc.sdfEdge : fwidth(dist) + 1e-4;
     float w = min(0.5 * px, 0.45);
-    float t = max(0.5 - 0.1 * px, 0.05);
+    float t = max(0.5 - 0.025 * px, 0.05);
     float alpha = smoothstep(t - w, t + w, dist);
     if (alpha < 0.005) discard;
     FragColor = vec4(pc.color.rgb, pc.color.a * alpha);

@@ -7,6 +7,21 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.53
+
+**CFF and Type 1 text keeps its hairlines, and all text draws at pdfium's weight**, on DIR.Lib 11.6.
+
+DIR.Lib 11.6 takes SharpAstro.Fonts 1.13, which fixes the MTSDF of every CFF or Type 1 glyph with a counter
+(a, e, o, d, ...). Its generator read contour windings as TrueType's, so each outer edge of those glyphs drew
+about half a texel inside the outline; at reading size the top of a Times `a` drew with a gap in it whatever
+the shader did. The `.sdfg` disk cache moves to format 7, so the thin fields are not served from disk.
+
+That also corrects 7.52, whose 0.1 px edge shift was calibrated against an "11% lighter than pdfium" measured
+on a Type 1 paper: most of that gap was the thin glyphs. With correct fields 0.1 px drew 3-13% heavier than
+pdfium, and TrueType text, which never had the bug, 3-7% heavier. Both text shaders now shift the edge
+0.025 px, which puts whole-page ink within 0.6% of pdfium's at 150-300 dpi on a Type 1 paper and on TrueType
+documents (one page -1.8%). The two-sample design and its cost are unchanged.
+
 ## 7.52
 
 **MTSDF text at pdfium's weight, for about half 7.51's cost.** 7.51 drew text at exact area coverage, which
