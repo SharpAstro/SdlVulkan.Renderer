@@ -22,12 +22,20 @@ eight sub-pixel phases, at 7 px/em, where DejaVu's hyphen is about 0.6 px thick:
 varied 0.16 to 5.82 px² with the phase alone, and now varies 3.07 to 3.32.
 
 The samples follow the pixel's footprint in texture space (`dFdx`/`dFdy`), so rotated text samples its
-own pixel, and reach at most 4.5 texels, which cannot touch another glyph's ink (every cell's ink sits
-behind 4 texels of spread, and cells are a texel apart). The `sdfEdge` push constant now carries each
-sample's half band, a quarter pixel, from `VkSdfFontAtlas.SampleHalfBand`, clamped at 0.45 field units
-rather than the 0.25 of DIR.Lib's `ScreenPxHalfBand`, which at 7 px/em cut the band to under half and
-turned each sample into an on/off test. DIR.Lib is unchanged. The cost is four texture reads per text
-fragment instead of one.
+own pixel, and each is clamped to half a texel inside the glyph's own cell. **An SDF vertex is now
+32 bytes, not 16**: a new `sdf.vert` carries the cell (`u0, v0, u1, v1`) as a flat attribute. The clamp
+is needed because the texels around a cell are not "outside the glyph": the atlas uploads only the
+rectangle its new cells span and never clears a page, so they hold uninitialised memory on a new page
+and old glyphs on a recycled one. A first version let samples reach 4.5 texels past the cell, and in
+CI (lavapipe, which reuses freed memory as it is) a hyphen drawn low in its row picked up 0.8 to 1.4 px²
+of an earlier test's ink in the row below. The one-sample shader had a small version of the same leak,
+since bilinear filtering at a quad's edge read the gutter texel; that is closed too.
+
+The `sdfEdge` push constant now carries each sample's half band, a quarter pixel, from
+`VkSdfFontAtlas.SampleHalfBand`, clamped at 0.45 field units rather than the 0.25 of DIR.Lib's
+`ScreenPxHalfBand`, which at 7 px/em cut the band to under half and turned each sample into an on/off
+test. DIR.Lib is unchanged. The cost is four texture reads per text fragment instead of one, and twice
+the vertex bytes per glyph.
 
 ## 7.50
 
