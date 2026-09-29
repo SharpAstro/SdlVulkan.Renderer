@@ -49,8 +49,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
     public VkPipeline StrokePipeline { get; }
     public VkPipeline SdfPipeline { get; }
     /// <summary>MTSDF text at and above <see cref="VkSdfFontAtlas.SingleSampleMinPx"/>: one coverage sample a
-    /// pixel (sdflarge.frag) where <see cref="SdfPipeline"/> takes four. Same vertex layout and push
-    /// block; a separate pipeline because a branch inside one shader kept the four-sample cost.</summary>
+    /// pixel (sdflarge.frag) where <see cref="SdfPipeline"/> takes two. Same vertex layout and push block;
+    /// a pipeline of its own so that each shader carries only its own path.</summary>
     public VkPipeline SdfLargePipeline { get; }
 
     /// <summary>Rounded-box fill: one SDF quad per rect, so a translucent fill blends exactly once

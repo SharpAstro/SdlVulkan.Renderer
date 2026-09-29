@@ -7,6 +7,32 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.52
+
+**MTSDF text at pdfium's weight, for about half 7.51's cost.** 7.51 drew text at exact area coverage, which
+kept thin strokes but turned out about 11% lighter than pdfium, and so than every viewer built on it: pdfium
+draws small text heavier than its outlines (FreeType's LCD filter, the subpixels averaged back to grey, then a
+text-gamma table).
+
+- **The edge shifts 0.1 px outward** in both text shaders, a constant on the threshold that costs nothing. On an
+  arXiv paper in Times the ink comes to within 2-3% of pdfium's at 150-300 dpi (it was 10.5% short), and the
+  hairline top of an `a` at 29 px/em to about 0.8 px. pdfium's gamma table alone got a third of the way. Its
+  rounding of glyph origins to whole pixels is not copied: in a viewer that scrolls by fractions of a pixel,
+  text would step against the lines around it.
+- **Two samples a pixel below 64 px/em, not four:** a quarter pixel either side of the centre on the diagonal.
+  With the shift they keep thin strokes as steadily as four from 9 px/em up. A page of reading-size text takes
+  1.21 ms of GPU a frame, against 1.46 with 7.51's four samples and 0.82 with 7.50's one (Adreno X1-85,
+  1802×2332, medians of three rounds); large text costs what it always did. The thin-stroke test moves from 7
+  to 9 px/em: at 7 a hyphen is mostly its two ends, and the diagonal pair, whose x and y are coupled, scores 0.83
+  there (four samples 0.91, one 0.03). At 9 px/em one sample scores 0.38 and two 0.95.
+- **The `sdfEdge` push constant is now one screen pixel in field units** (`VkSdfFontAtlas.FieldUnitsPerPixel`,
+  replacing `SdfEdgeConstant`); each shader derives its band and shift from it, and the band is capped so it
+  never reaches past where the field goes flat.
+
+**A correction to 7.51:** its entry says the large-text pipeline is separate because a branch inside `sdf.frag`
+did not save the four-sample cost. The page that was measured was 61 px/em, below the 64 px/em threshold, so
+the branch was never taken; that claim is unproven. The separate pipeline stands on its own measurement.
+
 ## 7.51
 
 **MTSDF text keeps strokes thinner than a pixel.** `sdf.frag` computed a pixel's coverage from ONE
