@@ -5,13 +5,19 @@
 // single-channel SDF would round them off. Its vertex stage is sdf.vert: the
 // textured layout plus the glyph's cell in the atlas page.
 //
+// This is the SMALL-text shader, below 64 px/em. Text at and above that size goes through
+// sdflarge.frag, one sample a pixel, on a pipeline of its own (VkSdfFontAtlas.SingleSampleMinPx):
+// there the thinnest stroke spans about two pixels and one sample is as good as four. The two
+// are separate pipelines rather than one shader with a branch because the branch did not save
+// the cost: a GPU sizes a shader for its most expensive path, and with this four-sample path
+// compiled in, the one-sample branch still ran 9.5 ms a frame on a page of 600 dpi text that
+// the old shader drew in 5.1.
+//
 // Edge softness: the sdfEdge push constant carries the ANALYTIC half-width of each
-// sample's smoothstep band in distance units, computed per draw from the batch fontSize
-// (see VkSdfFontAtlas.SdfEdgeConstant). Its sign picks the sampling: positive is four
-// samples a pixel, each with a quarter-pixel band; negative is one sample with a
-// half-pixel band, for text large enough (64 px/em and up) that its thinnest stroke spans
-// about two pixels, where four samples only cost. The old fwidth(dist)-based band is kept
-// only as a fallback when the slot is 0 (a caller that never sets it).
+// sample's smoothstep band in distance units -- a quarter of a screen pixel, computed per
+// draw from the batch fontSize (see VkSdfFontAtlas.SdfEdgeConstant). The old
+// fwidth(dist)-based band is kept only as a fallback when the slot is 0 (a caller that
+// never sets it).
 //
 // Why not fwidth: the reconstructed median(r,g,b) is piecewise-linear with derivative
 // jumps along MSDF channel-switch boundaries (and along the generator's error-correction
@@ -40,11 +46,11 @@
 // a texel in, so bilinear filtering never reaches a texel outside it. Outside a cell is not
 // "outside the glyph": the atlas uploads only the rectangle its new cells span, and never
 // clears a page, so the space around a cell holds whatever the page held before --
-// uninitialised device memory on a new page, the glyphs a recycled page used to carry. On lavapipe, which reuses freed memory
-// as it is, samples that left the cell picked up an earlier test's glyphs, and only in the
-// order a CI run happened to take. Inside the cell the field is exact to its edge, where the
-// spread padding has already fallen to "outside", so a clamped sample reads what an
-// unclamped one should have.
+// uninitialised device memory on a new page, the glyphs a recycled page used to carry. On
+// lavapipe, which reuses freed memory as it is, samples that left the cell picked up an
+// earlier test's glyphs, and only in the order a CI run happened to take. Inside the cell
+// the field is exact to its edge, where the spread padding has already fallen to "outside",
+// so a clamped sample reads what an unclamped one should have.
 layout(location = 0) in vec2 vTexCoord;
 layout(location = 1) flat in vec4 vCell;
 layout(push_constant) uniform PC { mat4 proj; vec4 color; float sdfEdge; } pc;
@@ -52,30 +58,19 @@ layout(set = 0, binding = 0) uniform sampler2D uTexture;
 layout(location = 0) out vec4 FragColor;
 float median(vec3 v) { return max(min(v.r, v.g), min(max(v.r, v.g), v.b)); }
 void main() {
-    // Derivatives first, in uniform control flow, before the branch below.
     vec2 dx = dFdx(vTexCoord);
     vec2 dy = dFdy(vTexCoord);
-    // The cell, pulled in by half a texel so a bilinear tap at its edge reads only its own texels.
-    vec2 halfTexel = 0.5 / vec2(textureSize(uTexture, 0));
-    vec2 lo = vCell.xy + halfTexel;
-    vec2 hi = vCell.zw - halfTexel;
-    float alpha;
-    if (pc.sdfEdge < 0.0) {
-        // Large text: one sample at the centre, half-pixel band. The branch is uniform (a push
-        // constant), so it costs nothing to take.
-        float w = -pc.sdfEdge;
-        alpha = smoothstep(0.5 - w, 0.5 + w, median(texture(uTexture, clamp(vTexCoord, lo, hi)).rgb));
-        if (alpha < 0.005) discard;
-        FragColor = vec4(pc.color.rgb, pc.color.a * alpha);
-        return;
-    }
     // Half-width of each sample's smoothstep band in distance units = a quarter of a screen
     // pixel, since each sample stands for a quarter of the pixel. Analytic per-draw value when
     // provided; fwidth fallback otherwise.
     float ws = pc.sdfEdge > 0.0
         ? pc.sdfEdge
         : fwidth(median(texture(uTexture, vTexCoord).rgb)) * 0.25 + 1e-4;
-    alpha = 0.0;
+    // The cell, pulled in by half a texel so a bilinear tap at its edge reads only its own texels.
+    vec2 halfTexel = 0.5 / vec2(textureSize(uTexture, 0));
+    vec2 lo = vCell.xy + halfTexel;
+    vec2 hi = vCell.zw - halfTexel;
+    float alpha = 0.0;
     alpha += smoothstep(0.5 - ws, 0.5 + ws,
         median(texture(uTexture, clamp(vTexCoord - 0.125 * dx - 0.375 * dy, lo, hi)).rgb));
     alpha += smoothstep(0.5 - ws, 0.5 + ws,

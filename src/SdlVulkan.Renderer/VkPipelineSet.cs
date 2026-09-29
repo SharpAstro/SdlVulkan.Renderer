@@ -48,6 +48,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
     public VkPipeline MaskedPipeline { get; }
     public VkPipeline StrokePipeline { get; }
     public VkPipeline SdfPipeline { get; }
+    /// <summary>MTSDF text at and above <see cref="VkSdfFontAtlas.SingleSampleMinPx"/>: one coverage sample a
+    /// pixel (sdflarge.frag) where <see cref="SdfPipeline"/> takes four. Same vertex layout and push
+    /// block; a separate pipeline because a branch inside one shader kept the four-sample cost.</summary>
+    public VkPipeline SdfLargePipeline { get; }
 
     /// <summary>Rounded-box fill: one SDF quad per rect, so a translucent fill blends exactly once
     /// and the corners are antialiased. Backs <c>VkRenderer.FillRoundedRectangle</c>.</summary>
@@ -70,7 +74,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
     // whenever a shader source changes.
 
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
-        VkPipeline sdf, VkPipeline roundRect,
+        VkPipeline sdf, VkPipeline sdfLarge, VkPipeline roundRect,
         VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten,
         VkPipeline masked, VkMeshPipeline mesh, VkPipeline ellipseInstanced)
     {
@@ -82,6 +86,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         PagePipeline = page;
         StrokePipeline = stroke;
         SdfPipeline = sdf;
+        SdfLargePipeline = sdfLarge;
         RoundRectPipeline = roundRect;
         FlatMultiplyPipeline = flatMultiply;
         FlatScreenPipeline = flatScreen;
@@ -110,6 +115,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         var strokeFrag = LoadEmbeddedModule(deviceApi, "stroke.frag");
         var sdfVert = LoadEmbeddedModule(deviceApi, "sdf.vert");
         var sdfFrag = LoadEmbeddedModule(deviceApi, "sdf.frag");
+        var sdfLargeFrag = LoadEmbeddedModule(deviceApi, "sdflarge.frag");
         var roundRectVert = LoadEmbeddedModule(deviceApi, "roundrect.vert");
         var roundRectFrag = LoadEmbeddedModule(deviceApi, "roundrect.frag");
 
@@ -179,6 +185,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
             sdfAttrs[2] = new(2, VkFormat.R32G32B32A32Sfloat, 4 * sizeof(float));  // aCell
             var sdf = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, sdfVert, sdfFrag,
                 &sdfBinding, 1, sdfAttrs, 3, msaaSamples: msaa);
+            var sdfLarge = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, sdfVert, sdfLargeFrag,
+                &sdfBinding, 1, sdfAttrs, 3, msaaSamples: msaa);
 
             // Rounded-rect pipeline: vec2 pos + vec2 localPx + vec2 halfPx + float radiusPx.
             // The box parameters ride on vertex attributes rather than push constants so the shared
@@ -212,7 +220,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             // its own layout and so its own class.
             var mesh = VkMeshPipeline.Create(deviceApi, ctx.RenderPass, msaa);
 
-            return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, roundRect,
+            return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, sdfLarge, roundRect,
                 flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced);
         }
         finally
@@ -231,6 +239,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             deviceApi.vkDestroyShaderModule(strokeFrag);
             deviceApi.vkDestroyShaderModule(sdfVert);
             deviceApi.vkDestroyShaderModule(sdfFrag);
+            deviceApi.vkDestroyShaderModule(sdfLargeFrag);
             deviceApi.vkDestroyShaderModule(roundRectVert);
             deviceApi.vkDestroyShaderModule(roundRectFrag);
         }
@@ -251,6 +260,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(MaskedPipeline);
         _deviceApi.vkDestroyPipeline(StrokePipeline);
         _deviceApi.vkDestroyPipeline(SdfPipeline);
+        _deviceApi.vkDestroyPipeline(SdfLargePipeline);
         Mesh.Dispose();
     }
 
