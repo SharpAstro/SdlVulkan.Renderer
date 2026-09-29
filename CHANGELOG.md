@@ -34,8 +34,25 @@ since bilinear filtering at a quad's edge read the gutter texel; that is closed 
 The `sdfEdge` push constant now carries each sample's half band, a quarter pixel, from
 `VkSdfFontAtlas.SampleHalfBand`, clamped at 0.45 field units rather than the 0.25 of DIR.Lib's
 `ScreenPxHalfBand`, which at 7 px/em cut the band to under half and turned each sample into an on/off
-test. DIR.Lib is unchanged. The cost is four texture reads per text fragment instead of one, and twice
-the vertex bytes per glyph.
+test. DIR.Lib is unchanged.
+
+**Text of 64 px/em and up draws through a pipeline of its own with one sample**
+(`SdfLargePipeline`, `sdflarge.frag`, chosen per batch by `VkSdfFontAtlas.IsSingleSample`). There a
+Times hairline spans about two pixels, one sample estimates coverage as well as four, and four only
+cost. It is a separate pipeline rather than a branch in `sdf.frag` because a branch didn't save the
+cost: the four-sample path compiled into the same shader kept a page of large text at the four-sample
+price. GPU time a frame on an Adreno X1-85, 1802×2332 target, medians of three rounds (the GPU's
+clock moved between rounds, so read the ranges, not the digits):
+
+| Page | Before | After |
+|---|---|---|
+| Body text at 29 px/em (212 dpi) | 0.82 ms | 1.44 ms |
+| Reference list at 29 px/em (212 dpi) | 1.10 ms | 1.64-2.13 ms |
+| Body text at 75 px/em (600 dpi) | 3.9-5.0 ms | 4.1 ms |
+| Reference list at 81 px/em (800 dpi) | 9.1 ms | 6.9-9.0 ms |
+
+So the four samples cost about 0.6-1 ms a frame on a page of reading-size text, and nothing once text
+is large. An SDF vertex is twice the bytes it was.
 
 ## 7.50
 

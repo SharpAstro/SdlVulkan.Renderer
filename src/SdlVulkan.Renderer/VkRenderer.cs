@@ -1906,8 +1906,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         var api = Surface.DeviceApi;
         // Slot 20 = sdfEdge: the analytic half-width of each coverage sample's AA band for this batch's
-        // fontSize, its sign choosing four samples a pixel (positive, a quarter-pixel band) or one
-        // (negative, half a pixel) — see VkSdfFontAtlas.SdfEdgeConstant. The shader prefers it over
+        // fontSize, a quarter pixel on the four-sample pipeline and half a pixel on the one-sample one
+        // (see VkSdfFontAtlas.SdfEdgeConstant and IsSingleSample). The shaders prefer it over
         // fwidth(dist), whose derivative spikes at median channel-switch seams painted faint gray dashes
         // under round glyphs. Bitmap batches leave it 0 (unused).
         _pushConstants[20] = isSdf ? _activeSdfAtlas!.SdfEdgeConstant(_glyphBatchFontSize) : 0f;
@@ -1919,7 +1919,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             // pipeline + push constants once, then issue ONE bind(page descriptor)+draw per page.
             // Rebinding descriptor sets between draws is legal Vulkan and Adreno-safe — pages are
             // never destroyed mid-frame, unlike the old Grow() image swap.
-            BindPipeline(_pipelines!.SdfPipeline);
+            // Four coverage samples a pixel for small text, one from SingleSampleMinPx up; the fallback
+            // pass below shares the batch's size and so this choice (and SdfEdgeConstant's band).
+            BindPipeline(VkSdfFontAtlas.IsSingleSample(_glyphBatchFontSize)
+                ? _pipelines!.SdfLargePipeline
+                : _pipelines!.SdfPipeline);
             fixed (float* pPC = _pushConstants)
                 api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                     VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
