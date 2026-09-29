@@ -27,9 +27,10 @@
 // TWO SAMPLES A PIXEL, not one at its centre. One sample measures how far the pixel CENTRE is
 // from the nearest edge, which estimates coverage well at an edge and badly across a stroke
 // thinner than a pixel: two neighbouring centres can both fall just outside it, and the stroke
-// draws nearly white. At reading size (29 px/em) that erased the hairline top of a Times 'a'
-// and thinned n/e/o. The two samples sit a quarter pixel either side of the centre on the
-// diagonal, so a horizontal or vertical stroke is always straddled, each blended over a
+// draws nearly white. At reading size (29 px/em) that helped erase the hairline top of a Times
+// 'a' (the rest was the field itself; see the edge shift below). The two samples sit a quarter
+// pixel either side of the centre on the diagonal, so a horizontal or vertical stroke is always
+// straddled, each blended over a
 // sqrt(2)-quarter-pixel band (half the pixel's area apiece). Modelled on an ideal stroke, the
 // ink stays within 1-3% across sub-pixel phases, where one sample swings 30-50%; four samples on
 // a rotated grid were no steadier and cost half as much again (a page of 212 dpi body text:
@@ -37,14 +38,21 @@
 // running exactly along the pairs' own diagonal sees them as one sample; italic stems lean the
 // other way.
 //
-// EDGE SHIFTED OUT BY 0.1 px. Exact area coverage drew text about 11% lighter than pdfium (and
-// so than DB PDF and every viewer built on it), whose small text is heavier than its outlines:
-// it renders glyphs through FreeType's LCD filter, averages the subpixels back to grey and
-// applies a text-gamma table. Measured on an arXiv paper in Times at 150-300 dpi, a 0.1 px shift
-// brings the ink to within 3% of pdfium's and the hairlines to about 0.8 px at 29 px/em; the
-// gamma table alone got only a third of the way, and pdfium's snapping of glyph origins to whole
-// pixels is not copied (it would make text step against scrolling geometry). It is a constant
-// offset on the threshold, so it costs nothing.
+// EDGE SHIFTED OUT BY 0.025 px, which puts the ink on pdfium's (and so DB PDF's and every viewer
+// built on it). Measured as whole-page ink at 150-300 dpi, it lands within 0.6% of pdfium on a
+// Type 1 arXiv paper and on TrueType documents alike (one page -1.8%), where exact coverage, no
+// shift, is 1-4% lighter and 0.05 px is already up to 4% heavier. pdfium's small text is a little
+// heavier than its outlines: it renders through FreeType's LCD filter, averages the subpixels back
+// to grey and applies a text-gamma table. Its snapping of glyph origins to whole pixels is not
+// copied (it would make text step against scrolling geometry).
+//
+// The shift was 0.1 px, calibrated against an "11% lighter than pdfium" that was mostly not pdfium:
+// SharpAstro.Fonts before 1.13 generated every CFF and Type 1 glyph with a counter (a, e, o) half a
+// texel thin, having read its contour windings as TrueType's, and the paper the shift was measured
+// on is set in Type 1. With correct fields 0.1 px drew 3-13% heavier than pdfium, and TrueType text,
+// which never had the bug, 3-7% heavier. Weigh any change here against pdfium on both kinds of
+// font, and check the atlas field before blaming the shader. It is a constant offset on the
+// threshold, so it costs nothing.
 //
 // Every sample is clamped into the glyph's own cell (vCell), half a texel in, so bilinear
 // filtering never reaches a texel outside it. Outside a cell is not "outside the glyph": the
@@ -68,7 +76,7 @@ void main() {
     // on one side, and a thin stroke's ink comes to depend on its sub-pixel phase again (at 7 px/em
     // a hyphen swung 0.83:1 before this cap). The cap binds only below about 8 px/em.
     float px = pc.sdfEdge > 0.0 ? pc.sdfEdge : fwidth(median(texture(uTexture, vTexCoord).rgb)) + 1e-4;
-    float t = max(0.5 - 0.1 * px, 0.05);
+    float t = max(0.5 - 0.025 * px, 0.05);
     float ws = min(0.3536 * px, t - 0.01);
     // The cell, pulled in by half a texel so a bilinear tap at its edge reads only its own texels.
     vec2 halfTexel = 0.5 / vec2(textureSize(uTexture, 0));

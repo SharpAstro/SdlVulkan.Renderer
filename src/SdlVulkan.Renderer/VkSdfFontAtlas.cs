@@ -117,7 +117,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     /// <summary>
     /// The <c>sdfEdge</c> push constant for a batch at <paramref name="fontSize"/> (screen px/em): ONE
     /// SCREEN PIXEL in distance-field units, which is what both text shaders derive their smoothstep band
-    /// and their 0.1 px edge shift from. A texel is 1/(2·spread) field units and fontSize/rasterSize screen
+    /// and their edge shift from. A texel is 1/(2·spread) field units and fontSize/rasterSize screen
     /// pixels wide. Not <see cref="SdfFontAtlas.ScreenPxHalfBand"/>, which is half of this clamped at 0.25
     /// field units: at 7 px/em that clamp cut the band to less than half, turned each sample into a
     /// near-binary test and brought back the phase dependence the samples exist to remove. The shaders
