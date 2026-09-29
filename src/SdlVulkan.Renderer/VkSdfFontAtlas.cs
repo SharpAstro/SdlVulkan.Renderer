@@ -103,16 +103,36 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     // came from, not on the type.
     public float GetGlyphScale(float requestedFontSize) => _core.GetGlyphScale(requestedFontSize);
     /// <summary>
-    /// Half-width of each coverage sample's smoothstep band, in field units: a QUARTER screen pixel at
-    /// <paramref name="fontSize"/>, because sdf.frag averages four samples per pixel and each stands for a
-    /// quarter of it. Not <see cref="SdfFontAtlas.ScreenPxHalfBand"/> halved: that one is clamped at 0.25
-    /// field units, which at 7 px/em cuts a half-pixel band to less than half, turns each sample into a
-    /// near-binary test and brings back the phase dependence the samples exist to remove. Clamped at 0.45
-    /// here instead, which a quarter pixel reaches only below about 4.5 px/em: the field is flat at 0 and 1
-    /// beyond the spread, so a band that wide still reads exactly 0 and 1 away from an edge.
+    /// On-screen size (px/em) from which sdf.frag takes ONE sample per pixel instead of four. There the
+    /// thinnest stroke a text face draws (a Times hairline, about 0.03 em) spans about 2 px, and one
+    /// sample at the centre estimates coverage as well as four; the four would only cost, and at 600 dpi
+    /// they took a page of body text from 5.1 to 9.3 ms of GPU a frame. Below it, strokes approach a
+    /// pixel and four samples are what keeps them.
     /// </summary>
-    public float SampleHalfBand(float fontSize) =>
-        Math.Clamp(0.25f / (_core.GetGlyphScale(fontSize) * 2f * SdfFontAtlas.SdfSpread), 1e-3f, 0.45f);
+    public const float SingleSampleMinPx = 64f;
+
+    /// <summary>
+    /// The sdf.frag <c>sdfEdge</c> push constant for a batch at <paramref name="fontSize"/> (screen px/em).
+    /// All 84 bytes of the push block are in use, so the sign carries the sampling mode.
+    /// <list type="bullet">
+    /// <item>Positive: four samples a pixel, and the value is each sample's smoothstep half-band in field
+    /// units, a QUARTER screen pixel, since each sample stands for a quarter of the pixel. Not
+    /// <see cref="SdfFontAtlas.ScreenPxHalfBand"/> halved: that one is clamped at 0.25 field units, which
+    /// at 7 px/em cuts a half-pixel band to less than half, turns each sample into a near-binary test and
+    /// brings back the phase dependence the samples exist to remove. Clamped at 0.45 here instead, which a
+    /// quarter pixel reaches only below about 4.5 px/em: the field is flat at 0 and 1 beyond the spread, so
+    /// a band that wide still reads exactly 0 and 1 away from an edge.</item>
+    /// <item>Negative, from <see cref="SingleSampleMinPx"/> up: one sample, and the magnitude is its
+    /// half-band, HALF a screen pixel.</item>
+    /// </list>
+    /// </summary>
+    public float SdfEdgeConstant(float fontSize)
+    {
+        var quarterPx = 0.25f / (_core.GetGlyphScale(fontSize) * 2f * SdfFontAtlas.SdfSpread);
+        return fontSize >= SingleSampleMinPx
+            ? -Math.Clamp(2f * quarterPx, 1e-3f, 0.45f)
+            : Math.Clamp(quarterPx, 1e-3f, 0.45f);
+    }
 
     // ---- GPU-side page surface ------------------------------------------------------------------
 

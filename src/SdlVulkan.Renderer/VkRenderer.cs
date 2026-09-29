@@ -1906,10 +1906,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         var api = Surface.DeviceApi;
         // Slot 20 = sdfEdge: the analytic half-width of each coverage sample's AA band for this batch's
-        // fontSize (a quarter pixel; sdf.frag takes four samples a pixel). The shader prefers it over
+        // fontSize, its sign choosing four samples a pixel (positive, a quarter-pixel band) or one
+        // (negative, half a pixel) — see VkSdfFontAtlas.SdfEdgeConstant. The shader prefers it over
         // fwidth(dist), whose derivative spikes at median channel-switch seams painted faint gray dashes
         // under round glyphs. Bitmap batches leave it 0 (unused).
-        _pushConstants[20] = isSdf ? _activeSdfAtlas!.SampleHalfBand(_glyphBatchFontSize) : 0f;
+        _pushConstants[20] = isSdf ? _activeSdfAtlas!.SdfEdgeConstant(_glyphBatchFontSize) : 0f;
 
         if (isSdf && _activeSdfAtlas is not null)
         {
@@ -1972,7 +1973,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (!any) return;
 
         var api = Surface.DeviceApi;
-        _pushConstants[20] = _sdfFontAtlas.SampleHalfBand(_glyphBatchFontSize);
+        _pushConstants[20] = _sdfFontAtlas.SdfEdgeConstant(_glyphBatchFontSize);
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
