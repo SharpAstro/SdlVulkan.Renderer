@@ -104,35 +104,27 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     public float GetGlyphScale(float requestedFontSize) => _core.GetGlyphScale(requestedFontSize);
     /// <summary>
     /// On-screen size (px/em) from which text draws through the one-sample pipeline (sdflarge.frag)
-    /// instead of the four-sample one (sdf.frag). There the thinnest stroke a text face draws (a Times
+    /// instead of the two-sample one (sdf.frag). There the thinnest stroke a text face draws (a Times
     /// hairline, about 0.03 em) spans about 2 px, and one sample at the centre estimates coverage as well
-    /// as four; the four would only cost, and at 600 dpi they took a page of body text from 5.1 to 9.3 ms
-    /// of GPU a frame. Below it, strokes approach a pixel and four samples are what keeps them.
+    /// as two. Below it, strokes approach a pixel and the second sample is what keeps them.
     /// </summary>
     public const float SingleSampleMinPx = 64f;
 
     /// <summary>Whether a batch at <paramref name="fontSize"/> (screen px/em) draws through the one-sample
-    /// pipeline. The one place the choice is made, so the pipeline and its band cannot disagree.</summary>
+    /// pipeline. The one place the choice is made.</summary>
     public static bool IsSingleSample(float fontSize) => fontSize >= SingleSampleMinPx;
 
     /// <summary>
-    /// The <c>sdfEdge</c> push constant for a batch at <paramref name="fontSize"/> (screen px/em): the
-    /// smoothstep half-band of each coverage sample, in field units.
-    /// <list type="bullet">
-    /// <item>Four-sample pipeline: a QUARTER screen pixel, since each sample stands for a quarter of the
-    /// pixel. Not <see cref="SdfFontAtlas.ScreenPxHalfBand"/> halved: that one is clamped at 0.25 field
-    /// units, which at 7 px/em cuts a half-pixel band to less than half, turns each sample into a
-    /// near-binary test and brings back the phase dependence the samples exist to remove. Clamped at 0.45
-    /// here instead, which a quarter pixel reaches only below about 4.5 px/em: the field is flat at 0 and 1
-    /// beyond the spread, so a band that wide still reads exactly 0 and 1 away from an edge.</item>
-    /// <item>One-sample pipeline, from <see cref="SingleSampleMinPx"/> up: HALF a screen pixel.</item>
-    /// </list>
+    /// The <c>sdfEdge</c> push constant for a batch at <paramref name="fontSize"/> (screen px/em): ONE
+    /// SCREEN PIXEL in distance-field units, which is what both text shaders derive their smoothstep band
+    /// and their 0.1 px edge shift from. A texel is 1/(2·spread) field units and fontSize/rasterSize screen
+    /// pixels wide. Not <see cref="SdfFontAtlas.ScreenPxHalfBand"/>, which is half of this clamped at 0.25
+    /// field units: at 7 px/em that clamp cut the band to less than half, turned each sample into a
+    /// near-binary test and brought back the phase dependence the samples exist to remove. The shaders
+    /// clamp what they derive instead, where the field's range actually binds.
     /// </summary>
-    public float SdfEdgeConstant(float fontSize)
-    {
-        var quarterPx = 0.25f / (_core.GetGlyphScale(fontSize) * 2f * SdfFontAtlas.SdfSpread);
-        return Math.Clamp(IsSingleSample(fontSize) ? 2f * quarterPx : quarterPx, 1e-3f, 0.45f);
-    }
+    public float FieldUnitsPerPixel(float fontSize) =>
+        Math.Clamp(1f / (_core.GetGlyphScale(fontSize) * 2f * SdfFontAtlas.SdfSpread), 1e-3f, 8f);
 
     // ---- GPU-side page surface ------------------------------------------------------------------
 

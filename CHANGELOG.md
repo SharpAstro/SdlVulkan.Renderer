@@ -9,50 +9,48 @@ this file disagrees with. Bump it there and add the entry here, in the same comm
 
 ## 7.51
 
-**MTSDF text keeps strokes thinner than a pixel.** `sdf.frag` computed a pixel's coverage from ONE
-sample of the distance field at the pixel centre, blended over half a pixel. That estimates coverage
-well at an edge and badly across a stroke thinner than a pixel: two neighbouring centres can both fall
-just outside it, and the stroke draws nearly white. Found as a Times `a` in an arXiv paper drawn at
-reading size (about 29 px/em) without the hairline top of its bowl, with `n`, `e` and `o` thinned the
-same way. The shader now averages four samples on a rotated grid inside the pixel, each blended over a
-quarter pixel, so coverage is the pixel's area rather than its centre's distance. Measured on real
-atlas cells against exact area coverage (four glyphs, four sizes, five sub-pixel offsets): mean error
-0.032 to 0.012, worst pixel 0.63 to 0.28, and no stroke lost. The new test draws the same hyphens at
-eight sub-pixel phases, at 7 px/em, where DejaVu's hyphen is about 0.6 px thick: the ink on screen
-varied 0.16 to 5.82 px² with the phase alone, and now varies 3.07 to 3.32.
+**MTSDF text keeps strokes thinner than a pixel, at pdfium's weight.** Found as an arXiv paper set in Times
+whose every `a` drew at reading size (29 px/em) without the hairline top of its bowl, with `n`, `e` and `o`
+thinned the same way. The glyphs in the atlas were right; three things in how they were drawn were not.
 
-The samples follow the pixel's footprint in texture space (`dFdx`/`dFdy`), so rotated text samples its
-own pixel, and each is clamped to half a texel inside the glyph's own cell. **An SDF vertex is now
-32 bytes, not 16**: a new `sdf.vert` carries the cell (`u0, v0, u1, v1`) as a flat attribute. The clamp
-is needed because the texels around a cell are not "outside the glyph": the atlas uploads only the
-rectangle its new cells span and never clears a page, so they hold uninitialised memory on a new page
-and old glyphs on a recycled one. A first version let samples reach 4.5 texels past the cell, and in
-CI (lavapipe, which reuses freed memory as it is) a hyphen drawn low in its row picked up 0.8 to 1.4 px²
-of an earlier test's ink in the row below. The one-sample shader had a small version of the same leak,
-since bilinear filtering at a quad's edge read the gutter texel; that is closed too.
+- **One sample a pixel lost thin strokes.** `sdf.frag` took a pixel's coverage from one sample of the distance
+  field at the pixel centre, and across a stroke thinner than a pixel two neighbouring centres can both fall
+  just outside it. Text below 64 px/em now takes **two samples**, a quarter pixel either side of the centre on
+  the diagonal, each blended over half the pixel's area, so a horizontal or vertical stroke is always
+  straddled. The new `MtsdfTextRenderTests` case draws hyphens at eight sub-pixel phases at 9 px/em, where each
+  is about 0.8 px thick: with one sample their ink varied 0.38:1 with the phase alone, with two it holds to
+  0.95. Four samples on a rotated grid were no steadier from 9 px/em up and cost more (below it, where a
+  hyphen is mostly ends and the diagonal pair couples x and y, four keep 0.91 and two 0.83).
+- **Exact coverage was lighter than every other viewer.** pdfium, and so every viewer built on it, draws small
+  text about 11% heavier than its outlines: FreeType's LCD filter, the subpixels averaged back to grey, then a
+  text-gamma table. Both text shaders now shift the edge **0.1 px** outward, a constant on the threshold that
+  costs nothing. On that paper at 150-300 dpi the ink comes to within 3% of pdfium's, and the `a`'s hairline to
+  about 0.8 px. pdfium's gamma table alone got a third of the way. Its rounding of glyph origins to whole pixels
+  is not copied: in a viewer that scrolls by fractions of a pixel, text would step against the lines around it.
+- **Samples outside a glyph's cell read stale memory.** The atlas uploads only the rectangle its new cells span
+  and never clears a page, so the texels around a cell hold uninitialised memory on a new page and old glyphs
+  on a recycled one. Every sample is now clamped half a texel inside the glyph's own cell, which a new
+  `sdf.vert` passes as a flat attribute: **an SDF vertex is 32 bytes, not 16.** A first version let samples
+  reach past the cell and, on CI's lavapipe, which reuses freed memory as it is, picked up an earlier test's
+  glyphs. The old one-sample shader had a small version of the same leak (bilinear filtering at a quad's edge
+  read the gutter texel), closed too.
 
-The `sdfEdge` push constant now carries each sample's half band, a quarter pixel, from
-`VkSdfFontAtlas.SampleHalfBand`, clamped at 0.45 field units rather than the 0.25 of DIR.Lib's
-`ScreenPxHalfBand`, which at 7 px/em cut the band to under half and turned each sample into an on/off
-test. DIR.Lib is unchanged.
+**Text of 64 px/em and up draws through a pipeline of its own**, `SdfLargePipeline` over `sdflarge.frag`, with
+one sample and the same shift and clamp: there the thinnest stroke spans about two pixels and one sample is as
+good as two. The renderer picks per batch through `VkSdfFontAtlas.IsSingleSample`. The `sdfEdge` push
+constant is now one screen pixel in field units (`VkSdfFontAtlas.FieldUnitsPerPixel`), and each shader derives
+its band and shift from it. DIR.Lib is unchanged.
 
-**Text of 64 px/em and up draws through a pipeline of its own with one sample**
-(`SdfLargePipeline`, `sdflarge.frag`, chosen per batch by `VkSdfFontAtlas.IsSingleSample`). There a
-Times hairline spans about two pixels, one sample estimates coverage as well as four, and four only
-cost. It is a separate pipeline rather than a branch in `sdf.frag` because a branch didn't save the
-cost: the four-sample path compiled into the same shader kept a page of large text at the four-sample
-price. GPU time a frame on an Adreno X1-85, 1802×2332 target, medians of three rounds (the GPU's
-clock moved between rounds, so read the ranges, not the digits):
+**Cost**, GPU time a frame on an Adreno X1-85, 1802×2332 target, medians of three alternating rounds:
 
-| Page | Before | After |
+| Page | One sample (7.50) | Two samples + shift |
 |---|---|---|
-| Body text at 29 px/em (212 dpi) | 0.82 ms | 1.44 ms |
-| Reference list at 29 px/em (212 dpi) | 1.10 ms | 1.64-2.13 ms |
-| Body text at 75 px/em (600 dpi) | 3.9-5.0 ms | 4.1 ms |
-| Reference list at 81 px/em (800 dpi) | 9.1 ms | 6.9-9.0 ms |
+| Body text, 29 px/em | 0.82 ms | 1.21 ms |
+| Reference list, 29 px/em | 1.11 ms | 1.50 ms |
+| Body text, 75 px/em | 5.0-6.0 ms | 5.4 ms |
 
-So the four samples cost about 0.6-1 ms a frame on a page of reading-size text, and nothing once text
-is large. An SDF vertex is twice the bytes it was.
+About 0.4 ms a frame on a full page of reading-size text, nothing on large text. Four samples, tried first,
+cost 0.65-1 ms.
 
 ## 7.50
 
