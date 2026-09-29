@@ -102,7 +102,17 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     // raster size, which differs per tier — so callers invoke them on the specific atlas a glyph
     // came from, not on the type.
     public float GetGlyphScale(float requestedFontSize) => _core.GetGlyphScale(requestedFontSize);
-    public float ScreenPxHalfBand(float fontSize) => _core.ScreenPxHalfBand(fontSize);
+    /// <summary>
+    /// Half-width of each coverage sample's smoothstep band, in field units: a QUARTER screen pixel at
+    /// <paramref name="fontSize"/>, because sdf.frag averages four samples per pixel and each stands for a
+    /// quarter of it. Not <see cref="SdfFontAtlas.ScreenPxHalfBand"/> halved: that one is clamped at 0.25
+    /// field units, which at 7 px/em cuts a half-pixel band to less than half, turns each sample into a
+    /// near-binary test and brings back the phase dependence the samples exist to remove. Clamped at 0.45
+    /// here instead, which a quarter pixel reaches only below about 4.5 px/em: the field is flat at 0 and 1
+    /// beyond the spread, so a band that wide still reads exactly 0 and 1 away from an edge.
+    /// </summary>
+    public float SampleHalfBand(float fontSize) =>
+        Math.Clamp(0.25f / (_core.GetGlyphScale(fontSize) * 2f * SdfFontAtlas.SdfSpread), 1e-3f, 0.45f);
 
     // ---- GPU-side page surface ------------------------------------------------------------------
 
