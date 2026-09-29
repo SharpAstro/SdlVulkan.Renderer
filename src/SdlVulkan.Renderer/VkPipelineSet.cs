@@ -108,6 +108,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         var ellipseInstFrag = LoadEmbeddedModule(deviceApi, "ellipseinst.frag");
         var strokeVert = LoadEmbeddedModule(deviceApi, "stroke.vert");
         var strokeFrag = LoadEmbeddedModule(deviceApi, "stroke.frag");
+        var sdfVert = LoadEmbeddedModule(deviceApi, "sdf.vert");
         var sdfFrag = LoadEmbeddedModule(deviceApi, "sdf.frag");
         var roundRectVert = LoadEmbeddedModule(deviceApi, "roundrect.vert");
         var roundRectFrag = LoadEmbeddedModule(deviceApi, "roundrect.frag");
@@ -168,9 +169,16 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var stroke = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, strokeVert, strokeFrag,
                 &strokeBinding, 1, strokeAttrs, 2, msaaSamples: msaa);
 
-            // SDF pipeline: same vertex layout as textured, SDF fragment shader
-            var sdf = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, texVert, sdfFrag,
-                &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
+            // SDF pipeline: vec2 pos + vec2 uv + vec4 cell (32B). The cell is the glyph's rectangle in its
+            // atlas page, the same on all six vertices of a quad; sdf.frag clamps its coverage samples into
+            // it, because the texels around a cell are whatever the page held before (see sdf.frag).
+            VkVertexInputBindingDescription sdfBinding = new(8 * sizeof(float));
+            var sdfAttrs = stackalloc VkVertexInputAttributeDescription[3];
+            sdfAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                        // aPos
+            sdfAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));        // aTexCoord
+            sdfAttrs[2] = new(2, VkFormat.R32G32B32A32Sfloat, 4 * sizeof(float));  // aCell
+            var sdf = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, sdfVert, sdfFrag,
+                &sdfBinding, 1, sdfAttrs, 3, msaaSamples: msaa);
 
             // Rounded-rect pipeline: vec2 pos + vec2 localPx + vec2 halfPx + float radiusPx.
             // The box parameters ride on vertex attributes rather than push constants so the shared
@@ -221,6 +229,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             deviceApi.vkDestroyShaderModule(ellipseInstFrag);
             deviceApi.vkDestroyShaderModule(strokeVert);
             deviceApi.vkDestroyShaderModule(strokeFrag);
+            deviceApi.vkDestroyShaderModule(sdfVert);
             deviceApi.vkDestroyShaderModule(sdfFrag);
             deviceApi.vkDestroyShaderModule(roundRectVert);
             deviceApi.vkDestroyShaderModule(roundRectFrag);

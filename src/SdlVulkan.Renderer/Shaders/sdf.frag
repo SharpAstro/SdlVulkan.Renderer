@@ -2,8 +2,8 @@
 // MTSDF text pipeline: samples a multi-channel signed distance field atlas
 // (RGBA8; RGB = per-channel pseudo-distance, A = true distance). The edge is
 // reconstructed from median(r,g,b), which keeps sharp corners crisp where a
-// single-channel SDF would round them off. Uses the same vertex layout as
-// TexturedPipeline.
+// single-channel SDF would round them off. Its vertex stage is sdf.vert: the
+// textured layout plus the glyph's cell in the atlas page.
 //
 // Edge softness: the sdfEdge push constant carries the ANALYTIC half-width of each
 // sample's smoothstep band in distance units -- a quarter of a screen pixel, computed per
@@ -30,23 +30,25 @@
 // real atlas cells against exact area coverage: mean error 0.032 -> 0.012, worst pixel
 // 0.63 -> 0.28, and no stroke lost. The band is per SAMPLE and computed for it rather than
 // half the per-pixel one, because that one is clamped at 0.25: at 7 px/em the clamp, and a
-// reach cap of 3 texels this shader first had, shrank the footprint enough that a hyphen's
-// ink still swung 0.75:1 with its sub-pixel phase (MtsdfTextRenderTests pins it).
+// cap on the samples' reach this shader first had, shrank the footprint enough that a
+// hyphen's ink still swung 0.75:1 with its sub-pixel phase (MtsdfTextRenderTests pins it).
 //
 // The offsets follow the pixel's footprint in texture space (dFdx/dFdy), so rotated text
-// samples its own pixel. Their reach is capped at 4.5 texels so a sample never reads another
-// glyph's ink: a cell's own ink sits at least 4 texels (the spread) inside it, and the next
-// cell's ink starts 5 texels past its edge (a 1-texel gutter plus that cell's spread), so
-// anything a sample reaches beyond its own cell is padding, which reads as outside, as the
-// true field there would. The cap engages only below ~5 px/em.
+// samples its own pixel, and every sample is clamped into the glyph's own cell (vCell), half
+// a texel in, so bilinear filtering never reaches a texel outside it. Outside a cell is not
+// "outside the glyph": the atlas uploads only the rectangle its new cells span, and never
+// clears a page, so the space around a cell holds whatever the page held before --
+// uninitialised device memory on a new page, the glyphs a recycled page used to carry. On lavapipe, which reuses freed memory
+// as it is, samples that left the cell picked up an earlier test's glyphs, and only in the
+// order a CI run happened to take. Inside the cell the field is exact to its edge, where the
+// spread padding has already fallen to "outside", so a clamped sample reads what an
+// unclamped one should have.
 layout(location = 0) in vec2 vTexCoord;
+layout(location = 1) flat in vec4 vCell;
 layout(push_constant) uniform PC { mat4 proj; vec4 color; float sdfEdge; } pc;
 layout(set = 0, binding = 0) uniform sampler2D uTexture;
 layout(location = 0) out vec4 FragColor;
 float median(vec3 v) { return max(min(v.r, v.g), min(max(v.r, v.g), v.b)); }
-float coverage(vec2 uv, float w) {
-    return smoothstep(0.5 - w, 0.5 + w, median(texture(uTexture, uv).rgb));
-}
 void main() {
     vec2 dx = dFdx(vTexCoord);
     vec2 dy = dFdy(vTexCoord);
@@ -56,17 +58,20 @@ void main() {
     float ws = pc.sdfEdge > 0.0
         ? pc.sdfEdge
         : fwidth(median(texture(uTexture, vTexCoord).rgb)) * 0.25 + 1e-4;
-    // Texels per screen pixel, to cap the samples' reach inside the cell's padding.
-    vec2 texSize = vec2(textureSize(uTexture, 0));
-    float texelsPerPx = max(length(dx * texSize), length(dy * texSize));
-    float reach = min(1.0, 4.5 / max(0.375 * texelsPerPx, 1e-4));
-    dx *= reach;
-    dy *= reach;
-    float alpha = 0.25 * (
-        coverage(vTexCoord - 0.125 * dx - 0.375 * dy, ws) +
-        coverage(vTexCoord + 0.375 * dx - 0.125 * dy, ws) +
-        coverage(vTexCoord + 0.125 * dx + 0.375 * dy, ws) +
-        coverage(vTexCoord - 0.375 * dx + 0.125 * dy, ws));
+    // The cell, pulled in by half a texel so a bilinear tap at its edge reads only its own texels.
+    vec2 halfTexel = 0.5 / vec2(textureSize(uTexture, 0));
+    vec2 lo = vCell.xy + halfTexel;
+    vec2 hi = vCell.zw - halfTexel;
+    float alpha = 0.0;
+    alpha += smoothstep(0.5 - ws, 0.5 + ws,
+        median(texture(uTexture, clamp(vTexCoord - 0.125 * dx - 0.375 * dy, lo, hi)).rgb));
+    alpha += smoothstep(0.5 - ws, 0.5 + ws,
+        median(texture(uTexture, clamp(vTexCoord + 0.375 * dx - 0.125 * dy, lo, hi)).rgb));
+    alpha += smoothstep(0.5 - ws, 0.5 + ws,
+        median(texture(uTexture, clamp(vTexCoord + 0.125 * dx + 0.375 * dy, lo, hi)).rgb));
+    alpha += smoothstep(0.5 - ws, 0.5 + ws,
+        median(texture(uTexture, clamp(vTexCoord - 0.375 * dx + 0.125 * dy, lo, hi)).rgb));
+    alpha *= 0.25;
     if (alpha < 0.005) discard;
     FragColor = vec4(pc.color.rgb, pc.color.a * alpha);
 }
