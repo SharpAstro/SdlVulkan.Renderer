@@ -104,8 +104,12 @@ public sealed class MtsdfTextRenderTests(OffscreenGpuFixture gpu)
     /// area in pixels) must stay nearly the same: area coverage does not depend on where a shape
     /// sits against the pixel grid. Sampling the distance field once at the pixel centre does: two
     /// centres can straddle a thin stroke and both read it as outside, which drew a Times 'a' at
-    /// reading size without the hairline top of its bowl. At 7 px/em DejaVu's hyphen is about
-    /// 0.6 px thick, which is that case.
+    /// reading size without the hairline top of its bowl. At 9 px/em DejaVu's hyphen is about
+    /// 0.8 px thick, which is that case: one sample a pixel scores 0.38 here, two score 0.95.
+    /// <para>9 px/em, not smaller, because below it the hyphen is mostly its two ends, and the
+    /// two-sample pair (on a diagonal, so its x and y are coupled) makes an end pixel's coverage
+    /// depend on the vertical phase: at 7 px/em it scores 0.83 where four samples score 0.91 and one
+    /// sample 0.03. Two samples cost half what four do, and text that small is below reading size.</para>
     /// </summary>
     [Fact]
     public void MtsdfText_ThinStrokeKeepsItsInkAtEverySubPixelPhase()
@@ -118,7 +122,7 @@ public sealed class MtsdfTextRenderTests(OffscreenGpuFixture gpu)
 
         const uint w = 256, h = 48;
         const int phases = 8, column = 32, perColumn = 3;
-        const float size = 7f;
+        const float size = 9f;
         ctx.ResizeOffscreen(w, h);
 
         // The offscreen context is owned by the shared collection fixture; never dispose it here.

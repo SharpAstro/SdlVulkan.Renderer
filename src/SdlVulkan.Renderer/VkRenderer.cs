@@ -1905,12 +1905,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _glyphBatchIsSdf = false;
 
         var api = Surface.DeviceApi;
-        // Slot 20 = sdfEdge: the analytic half-width of each coverage sample's AA band for this batch's
-        // fontSize, a quarter pixel on the four-sample pipeline and half a pixel on the one-sample one
-        // (see VkSdfFontAtlas.SdfEdgeConstant and IsSingleSample). The shaders prefer it over
-        // fwidth(dist), whose derivative spikes at median channel-switch seams painted faint gray dashes
-        // under round glyphs. Bitmap batches leave it 0 (unused).
-        _pushConstants[20] = isSdf ? _activeSdfAtlas!.SdfEdgeConstant(_glyphBatchFontSize) : 0f;
+        // Slot 20 = sdfEdge: one screen pixel in distance-field units at this batch's fontSize, from which
+        // the text shaders derive their AA band and edge shift (see VkSdfFontAtlas.FieldUnitsPerPixel).
+        // The shaders prefer it over fwidth(dist), whose derivative spikes at median channel-switch seams
+        // painted faint gray dashes under round glyphs. Bitmap batches leave it 0 (unused).
+        _pushConstants[20] = isSdf ? _activeSdfAtlas!.FieldUnitsPerPixel(_glyphBatchFontSize) : 0f;
 
         if (isSdf && _activeSdfAtlas is not null)
         {
@@ -1919,8 +1918,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             // pipeline + push constants once, then issue ONE bind(page descriptor)+draw per page.
             // Rebinding descriptor sets between draws is legal Vulkan and Adreno-safe — pages are
             // never destroyed mid-frame, unlike the old Grow() image swap.
-            // Four coverage samples a pixel for small text, one from SingleSampleMinPx up; the fallback
-            // pass below shares the batch's size and so this choice (and SdfEdgeConstant's band).
+            // Two coverage samples a pixel for small text, one from SingleSampleMinPx up; the fallback
+            // pass below shares the batch's size and so this choice.
             BindPipeline(VkSdfFontAtlas.IsSingleSample(_glyphBatchFontSize)
                 ? _pipelines!.SdfLargePipeline
                 : _pipelines!.SdfPipeline);
@@ -1977,7 +1976,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (!any) return;
 
         var api = Surface.DeviceApi;
-        _pushConstants[20] = _sdfFontAtlas.SdfEdgeConstant(_glyphBatchFontSize);
+        _pushConstants[20] = _sdfFontAtlas.FieldUnitsPerPixel(_glyphBatchFontSize);
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
