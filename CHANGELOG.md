@@ -7,6 +7,15 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.54
+
+**A thumbnail capture completes on an offscreen context.** The capture's copy rides the frame fence, and
+the swapchain `BeginFrame` snapshots it once that fence has been waited. `BeginOffscreenFrame` mirrors that
+frame's contract (the wait, GPU timing, deferred destroys) but left the snapshot out, so offscreen a capture
+was recorded and never came back: `ThumbnailCaptureBusy` stayed true for good and no later capture could
+start. Found writing a headless test for a consumer's capture logic, which could not run at all. Fixed by
+the one missing call; `OffscreenThumbnailCaptureTests` fails without it.
+
 ## 7.53
 
 **CFF and Type 1 text keeps its hairlines, and all text draws at pdfium's weight**, on DIR.Lib 11.6.

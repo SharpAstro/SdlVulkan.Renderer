@@ -192,6 +192,10 @@ public sealed unsafe partial class VulkanContext
         // Same contract as the swapchain BeginFrame: the wait proves frame (ordinal - MaxFramesInFlight)
         // retired, so deferred destroys scheduled against it run here.
         FlushRetiredDeferredDestroys();
+        // And the same for a thumbnail capture: if its copy rode this fence index, the wait just proved
+        // it complete, so snapshot it. Without this an offscreen context recorded a capture and never
+        // released it -- ThumbnailCaptureBusy stayed true for good, and no later capture could start.
+        ConsumeThumbnailReadback();
 
         // Not reset here — EndOffscreenFrame resets it immediately before the submit that signals it,
         // for the same reason as the swapchain path (see the note in BeginFrame). It matters MORE here:
