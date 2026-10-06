@@ -7,6 +7,17 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.55
+
+**The stroke shader draws round caps.** `DrawPersistentStrokes(..., roundCaps: true)` draws each segment
+with a half-disc fan of `StrokeRoundCapTriangles` (8) triangles at each end, built in `stroke.vert` from the
+vertex index alone: 54 vertices an instance instead of 6, and nothing stored. Two segments that meet both
+cap the point, and the half-discs cover a round join, so a round-capped, round-joined polyline needs its
+segments and nothing else; a zero-length segment is a disc. Without the flag a segment is its quad, as it
+always was. A consumer tessellating its own cap and join wedges for such strokes can drop them: on one CAD
+sheet of 1.35 million short round-capped lines they were 498 MB of a 518 MB upload. Additive;
+`StrokeRoundCapRenderTests` covers it.
+
 ## 7.54
 
 **A thumbnail capture completes on an offscreen context.** The capture's copy rides the frame fence, and
