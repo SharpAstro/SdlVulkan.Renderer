@@ -129,6 +129,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     // ---- GPU-side page surface ------------------------------------------------------------------
 
     public VkDescriptorSet GetPageDescriptorSet(int pageIndex) => _pageResources[pageIndex].DescriptorSet;
+    public long PageStamp(int pageIndex) => _core.PageStamp(pageIndex);
+    public void TouchPage(int pageIndex) => _core.TouchPage(pageIndex);
     public VkSampler Sampler => _sampler;
 
     // ---- ISdfAtlasBackend -----------------------------------------------------------------------

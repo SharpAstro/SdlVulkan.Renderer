@@ -1802,11 +1802,30 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     private void AddSdfQuad(VkSdfFontAtlas atlas, List<List<float>> buckets,
         in SdfFontAtlas.GlyphInfo glyph, float inkX, float inkY, float rotation, float xScale)
     {
+        Span<float> withCell = stackalloc float[SdfFloatsPerVertex * 6];
+        WriteSdfQuad(atlas, in glyph, atlas.GetGlyphScale(_glyphBatchFontSize), inkX, inkY, rotation, xScale,
+            withCell, out var page);
+
+        // Accumulate into this glyph's page bucket; EndGlyphBatch writes each page to the vertex
+        // ring and issues one bind+draw per page. (No immediate WriteVertices — draws are grouped
+        // by page so each binds its own page descriptor set.)
+        while (buckets.Count <= page)
+            buckets.Add(new List<float>(SdfFloatsPerVertex * 6 * 64));
+        var pageList = buckets[page];
+        pageList.AddRange(withCell);
+        _glyphBatchVertexCount += 6;
+    }
+
+    // One glyph's six SDF vertices (SdfFloatsPerVertex floats each) at glyphScale, into withCell, and the
+    // atlas page they sample. The batch path and LayoutSdfGlyph both come through here, so a glyph laid out
+    // for a persistent buffer lands exactly where the batch would have drawn it.
+    private static void WriteSdfQuad(VkSdfFontAtlas atlas, in SdfFontAtlas.GlyphInfo glyph, float glyphScale,
+        float inkX, float inkY, float rotation, float xScale, Span<float> withCell, out int page)
+    {
         // The atlas may span several page textures; recover this glyph's page + page-local V
         // (U is already page-local). Each page is drawn separately in EndGlyphBatch.
-        atlas.DecodePage(glyph, out var page, out var lv0, out var lv1);
+        atlas.DecodePage(glyph, out page, out var lv0, out var lv1);
 
-        var glyphScale = atlas.GetGlyphScale(_glyphBatchFontSize);
         // Stretch only the writing direction. SDF spread padding follows xScale on the X-axis
         // too so the ink inside the texture continues to land at (inkX, inkY) after scaling
         // — otherwise compressed text would slip leftward by (1 - xScale) * spread.
@@ -1860,7 +1879,6 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // Widen each vertex with the glyph's cell in its page (u0, v0, u1, v1), the same on all six:
         // sdf.frag clamps its coverage samples into it, because the texels around a cell are whatever
         // the page held before (see sdf.vert).
-        Span<float> withCell = stackalloc float[SdfFloatsPerVertex * 6];
         for (var v = 0; v < 6; v++)
         {
             verts.Slice(v * 4, 4).CopyTo(withCell.Slice(v * SdfFloatsPerVertex));
@@ -1869,15 +1887,6 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             withCell[v * SdfFloatsPerVertex + 6] = glyph.U1;
             withCell[v * SdfFloatsPerVertex + 7] = lv1;
         }
-
-        // Accumulate into this glyph's page bucket; EndGlyphBatch writes each page to the vertex
-        // ring and issues one bind+draw per page. (No immediate WriteVertices — draws are grouped
-        // by page so each binds its own page descriptor set.)
-        while (buckets.Count <= page)
-            buckets.Add(new List<float>(SdfFloatsPerVertex * 6 * 64));
-        var pageList = buckets[page];
-        pageList.AddRange(withCell);
-        _glyphBatchVertexCount += 6;
     }
 
     /// <summary>
@@ -1944,6 +1953,155 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         AddBatchedSdfGlyphAtBaselineCore(atlas, buckets, in glyph, baselineX, baselineY, rotation, xIsInkLeft, xScale);
     }
 
+    /// <summary>What <see cref="LayoutSdfGlyph"/> made of a glyph.</summary>
+    public enum SdfGlyphLayout
+    {
+        /// <summary>A quad was written, sampling the atlas page returned with it.</summary>
+        Quad,
+        /// <summary>The glyph has no ink to draw (a space), and that is final.</summary>
+        Blank,
+        /// <summary>The glyph is not in the atlas yet, or not uploaded yet, and has been queued. Lay the
+        /// text out again once the atlas has settled.</summary>
+        Pending,
+        /// <summary>The large tier refused the glyph for want of a free page: lay it out from the small
+        /// tier, as the batch path draws it.</summary>
+        Refused,
+    }
+
+    /// <summary>Floats in one glyph INSTANCE as <see cref="LayoutSdfGlyph"/> writes it and
+    /// <see cref="DrawPersistentSdfGlyphs"/> draws it (sdfinst.vert): the quad's top-left corner and its two
+    /// edge vectors, the glyph's cell in its atlas page, and its em size with the distance-field units one
+    /// unit of the caller's space spans.</summary>
+    public const int SdfInstanceFloats = 12;
+
+    /// <summary>Whether text <paramref name="fontSizePx"/> tall on screen draws from the large SDF tier, by
+    /// the rule <see cref="BeginSdfGlyphBatch"/> applies to a batch.</summary>
+    public bool UsesLargeSdfTier(float fontSizePx) => _sdfFontAtlasLarge is not null && fontSizePx > _sdfLargeTierMinPx;
+
+    /// <summary>
+    /// Lays out one glyph for a caller that keeps it across frames, such as a page's text held in a
+    /// persistent buffer: one instance of <see cref="SdfInstanceFloats"/> floats into
+    /// <paramref name="instance"/>, at <paramref name="fontSize"/> in the caller's own coordinate space (a
+    /// page's points, say). Drawn by <see cref="DrawPersistentSdfGlyphs"/> at that space's origin and
+    /// scale, the glyph lands where <see cref="AddBatchedSdfGlyphAtBaselineByGid"/> would have drawn it at
+    /// <paramref name="fontSize"/> times the scale, and with the same antialiasing: the quad scales
+    /// linearly with the size, and the band is derived per glyph in the shader from the size it carries,
+    /// so laying a glyph out once serves every zoom. It samples <paramref name="atlasPage"/> of the small or
+    /// large tier, whose <see cref="SdfPageStamp"/> is <paramref name="pageStamp"/>; when that changes the
+    /// page was recycled and the glyph must be laid out again. Like the batch path this never rasterizes on
+    /// the render thread: a glyph not ready yet is queued and reported <see cref="SdfGlyphLayout.Pending"/>.
+    /// </summary>
+    public SdfGlyphLayout LayoutSdfGlyph(string fontPath, uint gid, string? type1Name,
+        float baselineX, float baselineY, float fontSize, float rotation, float xScale, bool largeTier,
+        Span<float> instance, out int atlasPage, out long pageStamp)
+    {
+        atlasPage = -1;
+        pageStamp = -1;
+        var atlas = largeTier ? _sdfFontAtlasLarge : _sdfFontAtlas;
+        // No large tier: the caller uses the small one, as for a refusal. No SDF atlas at all: nothing
+        // can ever draw, which is final.
+        if (atlas is null) return largeTier ? SdfGlyphLayout.Refused : SdfGlyphLayout.Blank;
+
+        var glyph = atlas.GetGlyphByGid(fontPath, gid, type1Name, skipUnflushed: true, rasterizeOnMiss: false);
+        if (glyph.IsRefused) return SdfGlyphLayout.Refused;
+        if (!glyph.IsFinal) return SdfGlyphLayout.Pending;
+        if (glyph.Width == 0) return SdfGlyphLayout.Blank;
+
+        var glyphScale = atlas.GetGlyphScale(fontSize);
+        InkTopLeft(in glyph, glyphScale, baselineX, baselineY, rotation, xIsInkLeft: false, xScale,
+            out var inkX, out var inkY);
+        WriteSdfInstance(atlas, in glyph, glyphScale, inkX, inkY, rotation, xScale, instance, out atlasPage);
+        instance[10] = fontSize;
+        // VkSdfFontAtlas.FieldUnitsPerPixel at this size, before its clamp: one unit of the caller's space
+        // in field units. The shader divides by the zoom and clamps there.
+        instance[11] = 1f / (glyphScale * 2f * SdfFontAtlas.SdfSpread);
+        pageStamp = atlas.PageStamp(atlasPage);
+        return SdfGlyphLayout.Quad;
+    }
+
+    // One glyph's instance: the frame WriteSdfQuad builds its six vertices from, by the same arithmetic,
+    // with the shader adding the edge vectors to the corner as WriteSdfQuad adds them on the CPU.
+    private static void WriteSdfInstance(VkSdfFontAtlas atlas, in SdfFontAtlas.GlyphInfo glyph, float glyphScale,
+        float inkX, float inkY, float rotation, float xScale, Span<float> instance, out int page)
+    {
+        atlas.DecodePage(glyph, out page, out var lv0, out var lv1);
+        var w = glyph.Width * glyphScale * xScale;
+        var h = glyph.Height * glyphScale;
+        var padX = glyph.Spread * glyphScale * xScale;
+        var padY = glyph.Spread * glyphScale;
+        if (MathF.Abs(rotation) < 0.01f)
+        {
+            instance[0] = inkX - padX; instance[1] = inkY - padY;
+            instance[2] = w;           instance[3] = 0f;
+            instance[4] = 0f;          instance[5] = h;
+        }
+        else
+        {
+            var cosA = MathF.Cos(rotation);
+            var sinA = MathF.Sin(rotation);
+            var rxU = cosA;  var ryU = sinA;   // right unit
+            var dxU = -sinA; var dyU = cosA;   // down unit
+            instance[0] = inkX - padX * rxU - padY * dxU;
+            instance[1] = inkY - padX * ryU - padY * dyU;
+            instance[2] = w * rxU; instance[3] = w * ryU;
+            instance[4] = h * dxU; instance[5] = h * dyU;
+        }
+        instance[6] = glyph.U0; instance[7] = lv0; instance[8] = glyph.U1; instance[9] = lv1;
+    }
+
+    /// <summary>The stamp of a page of the small or large SDF tier (<see cref="SdfFontAtlas.PageStamp"/>),
+    /// or -1 for a page that does not exist. A glyph laid out by <see cref="LayoutSdfGlyph"/> is valid
+    /// while its page's stamp is the one it was laid out with.</summary>
+    public long SdfPageStamp(int atlasPage, bool largeTier) =>
+        (largeTier ? _sdfFontAtlasLarge : _sdfFontAtlas)?.PageStamp(atlasPage) ?? -1;
+
+    /// <summary>
+    /// Draws glyphs laid out by <see cref="LayoutSdfGlyph"/> from a persistent buffer: the
+    /// <paramref name="glyphCount"/> instances at <paramref name="byteOffset"/>, all sampling
+    /// <paramref name="atlasPage"/> of one tier, placed by <paramref name="originX"/>,
+    /// <paramref name="originY"/> and <paramref name="scale"/> as <see cref="DrawPersistentTriangles"/>
+    /// places its triangles. One draw holds glyphs of any mix of sizes: each picks its coverage path and
+    /// antialiasing band from its own size times the scale, as a batch of that size would (sdfinst.frag).
+    /// The page is marked used, so the atlas's LRU, which sees no lookups for these glyphs, does not
+    /// recycle it while it is on screen. The caller checks <see cref="SdfPageStamp"/> first.
+    /// </summary>
+    public void DrawPersistentSdfGlyphs(Vortice.Vulkan.VkBuffer buffer, uint byteOffset, uint glyphCount,
+        int atlasPage, bool largeTier, DIR.Lib.RGBAColor32 color, float originX, float originY, float scale)
+    {
+        var atlas = largeTier ? _sdfFontAtlasLarge : _sdfFontAtlas;
+        if (_pipelines is null || atlas is null || glyphCount == 0 || (uint)atlasPage >= (uint)atlas.PageCount)
+            return;
+        atlas.TouchPage(atlasPage);
+
+        var api = Surface.DeviceApi;
+        Span<float> pc = stackalloc float[21];
+        var w = (float)_width;
+        var h = (float)_height;
+        pc[0]  = 2f * scale / w;
+        pc[5]  = 2f * scale / h;
+        pc[10] = -1f;
+        pc[12] = 2f * originX / w - 1f;
+        pc[13] = 2f * originY / h - 1f;
+        pc[15] = 1f;
+        pc[16] = color.Red / 255f;
+        pc[17] = color.Green / 255f;
+        pc[18] = color.Blue / 255f;
+        pc[19] = color.Alpha / 255f;
+        // The zoom, from which sdfinst.vert derives each glyph's band and on-screen size.
+        pc[20] = scale;
+
+        BindPipeline(_pipelines.SdfInstancedPipeline);
+        fixed (float* pPC = pc)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+        var descriptorSet = atlas.GetPageDescriptorSet(atlasPage);
+        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
+            Surface.PipelineLayout, 0, 1, &descriptorSet, 0, null);
+        var vkOffset = (ulong)byteOffset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, 6, glyphCount, 0, 0);
+    }
+
     // Shared baseline→ink-top transform behind both SDF AtBaseline overloads (rune-resolved and
     // GID-direct) — keeps the two resolve paths in lockstep, mirroring GetGlyphByKey in the atlas.
     private void AddBatchedSdfGlyphAtBaselineCore(VkSdfFontAtlas atlas, List<List<float>> buckets,
@@ -1952,6 +2110,19 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         if (glyph.Width == 0) return;
 
+        InkTopLeft(in glyph, atlas.GetGlyphScale(_glyphBatchFontSize), baselineX, baselineY, rotation,
+            xIsInkLeft, xScale, out var inkX, out var inkY);
+
+        // The glyph is already resolved above for its bearings — emit its quad straight into the
+        // chosen atlas's buckets (the active tier, or the small-tier fallback set).
+        AddSdfQuad(atlas, buckets, in glyph, inkX, inkY, rotation, xScale);
+    }
+
+    // Shared baseline→ink-top transform, at glyphScale: the batch path's and LayoutSdfGlyph's.
+    private static void InkTopLeft(in SdfFontAtlas.GlyphInfo glyph, float glyphScale,
+        float baselineX, float baselineY, float rotation, bool xIsInkLeft, float xScale,
+        out float inkX, out float inkY)
+    {
         // BearingX/BearingY on the SDF atlas are to the SDF TEXTURE edges (inc. spread padding).
         // Convert to INK bearings so we can pass ink-top-left to AddBatchedSdfGlyph:
         //   ink_bearing_X = texture_bearing_X + spread (ink is spread pixels right of texture left)
@@ -1961,10 +2132,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // positions) drift right by their own LSB, producing visible gaps in the rendered run.
         // The bearing-X lives along the writing direction so it must scale with xScale —
         // otherwise compressed glyphs slip out of their narrow advance slots.
-        var glyphScale = atlas.GetGlyphScale(_glyphBatchFontSize);
         var bx = xIsInkLeft ? 0f : (glyph.BearingX + glyph.Spread) * glyphScale * xScale;
         var by = (glyph.BearingY - glyph.Spread) * glyphScale;
-        float inkX, inkY;
         if (MathF.Abs(rotation) < 0.001f)
         {
             inkX = baselineX + bx;
@@ -1979,10 +2148,6 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             inkX = baselineX + bx * cosR + by * sinR;
             inkY = baselineY + bx * sinR - by * cosR;
         }
-
-        // The glyph is already resolved above for its bearings — emit its quad straight into the
-        // chosen atlas's buckets (the active tier, or the small-tier fallback set).
-        AddSdfQuad(atlas, buckets, in glyph, inkX, inkY, rotation, xScale);
     }
 
     /// <summary>

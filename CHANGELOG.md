@@ -7,6 +7,35 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.61
+
+**Text can be laid out once and drawn every frame from a persistent buffer.** On DIR.Lib 11.12.
+`AddBatchedSdfGlyphAtBaselineByGid` builds a glyph's quad, copies it into the per-frame vertex ring
+and draws it, on every frame. A caller whose text does not change (a PDF page) paid that for every
+glyph of every redraw. In a PDF viewer panning a CAD sheet, that was 98,425 glyphs and 8-12 ms of
+CPU a frame. This release adds a persistent path beside the batch, which is unchanged.
+
+- **`LayoutSdfGlyph`** lays one glyph out in the caller's own space (a page's points, say) as a 48-byte
+  instance: the quad's corner and edge vectors, its cell in the atlas page, and its size. It reports
+  `Quad`, `Blank`, `Pending` (queued, lay out again later) or `Refused` (the large tier is full), along
+  with the atlas page it samples and that page's stamp.
+- **`DrawPersistentSdfGlyphs`** draws a range of instances at an origin and a scale, through a new
+  instanced pipeline (`sdfinst.vert`/`sdfinst.frag`). The quad comes from the vertex index, as for
+  strokes. Each glyph derives its antialiasing band and its coverage path (two samples below 64 px a em,
+  one from it) from its own size times the scale, where a batch pushes them per draw. So one draw holds
+  glyphs of any mix of sizes, and laying a glyph out once serves every zoom. The draw keeps the atlas
+  page hot in its LRU.
+- **`SdfPageStamp`** says when a page's glyphs were recycled, so the caller lays out again, and
+  **`UsesLargeSdfTier`** is the batch path's tier rule, for a caller choosing a tier per glyph.
+
+`PersistentSdfGlyphTests` draws the same glyphs both ways and requires the same pixels. It covers 3 to
+90 px a em, a layout scale other than 1, and a rotated, compressed glyph. Doubling the band an instance
+carries fails every case.
+
+Measured in that viewer, offscreen, Release, Adreno X1-85, minimum of 30 redraws of a resident sheet:
+the text draw went from 12.1 to 0.63 ms, and the sheet's GPU time from 69.4 to 45.3 ms, because a draw
+per run (320) replaced a batch per run and size (5,534).
+
 ## 7.60
 
 **A frame's main pass can run single-sampled on a device that multisamples.** `VkRenderer.SingleSampleMainPass`
