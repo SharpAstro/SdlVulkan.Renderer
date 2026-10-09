@@ -52,6 +52,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
     /// pixel (sdflarge.frag) where <see cref="SdfPipeline"/> takes two. Same vertex layout and push block;
     /// a pipeline of its own so that each shader carries only its own path.</summary>
     public VkPipeline SdfLargePipeline { get; }
+    /// <summary>MTSDF text laid out once and kept (<c>VkRenderer.DrawPersistentSdfGlyphs</c>): one INSTANCE
+    /// per glyph, its quad expanded from the vertex index (sdfinst.vert), and the coverage path chosen per
+    /// glyph by its size on screen (sdfinst.frag), so one draw holds glyphs of any mix of sizes.</summary>
+    public VkPipeline SdfInstancedPipeline { get; }
 
     /// <summary>Rounded-box fill: one SDF quad per rect, so a translucent fill blends exactly once
     /// and the corners are antialiased. Backs <c>VkRenderer.FillRoundedRectangle</c>.</summary>
@@ -76,9 +80,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
         VkPipeline sdf, VkPipeline sdfLarge, VkPipeline roundRect,
         VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten,
-        VkPipeline masked, VkMeshPipeline mesh, VkPipeline ellipseInstanced)
+        VkPipeline masked, VkMeshPipeline mesh, VkPipeline ellipseInstanced, VkPipeline sdfInstanced)
     {
         _deviceApi = deviceApi;
+        SdfInstancedPipeline = sdfInstanced;
         FlatPipeline = flat;
         TexturedPipeline = textured;
         EllipsePipeline = ellipse;
@@ -123,6 +128,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
         var sdfVert = LoadEmbeddedModule(deviceApi, "sdf.vert");
         var sdfFrag = LoadEmbeddedModule(deviceApi, "sdf.frag");
         var sdfLargeFrag = LoadEmbeddedModule(deviceApi, "sdflarge.frag");
+        var sdfInstVert = LoadEmbeddedModule(deviceApi, "sdfinst.vert");
+        var sdfInstFrag = LoadEmbeddedModule(deviceApi, "sdfinst.frag");
         var roundRectVert = LoadEmbeddedModule(deviceApi, "roundrect.vert");
         var roundRectFrag = LoadEmbeddedModule(deviceApi, "roundrect.frag");
 
@@ -195,6 +202,20 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var sdfLarge = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, sdfVert, sdfLargeFrag,
                 &sdfBinding, 1, sdfAttrs, 3, msaaSamples: msaa);
 
+            // Instanced SDF pipeline: ONE INSTANCE per glyph = vec2 origin + vec2 axisU + vec2 axisV +
+            // vec4 cell + vec2 size (48B), the quad's six vertices from gl_VertexIndex as for strokes. Same
+            // push block; its last float carries the zoom rather than a batch's sdfEdge (see sdfinst.vert).
+            VkVertexInputBindingDescription sdfInstBinding = new(VkRenderer.SdfInstanceFloats * sizeof(float),
+                VkVertexInputRate.Instance);
+            var sdfInstAttrs = stackalloc VkVertexInputAttributeDescription[5];
+            sdfInstAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                         // aOrigin
+            sdfInstAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));         // aAxisU
+            sdfInstAttrs[2] = new(2, VkFormat.R32G32Sfloat, 4 * sizeof(float));         // aAxisV
+            sdfInstAttrs[3] = new(3, VkFormat.R32G32B32A32Sfloat, 6 * sizeof(float));   // aCell
+            sdfInstAttrs[4] = new(4, VkFormat.R32G32Sfloat, 10 * sizeof(float));        // aSize
+            var sdfInstanced = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, sdfInstVert, sdfInstFrag,
+                &sdfInstBinding, 1, sdfInstAttrs, 5, msaaSamples: msaa);
+
             // Rounded-rect pipeline: vec2 pos + vec2 localPx + vec2 halfPx + float radiusPx.
             // The box parameters ride on vertex attributes rather than push constants so the shared
             // 84-byte push block stays identical across every pipeline (see roundrect.vert).
@@ -228,7 +249,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var mesh = VkMeshPipeline.Create(deviceApi, renderPass, msaa);
 
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, sdfLarge, roundRect,
-                flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced);
+                flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced, sdfInstanced);
         }
         finally
         {
@@ -247,6 +268,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
             deviceApi.vkDestroyShaderModule(sdfVert);
             deviceApi.vkDestroyShaderModule(sdfFrag);
             deviceApi.vkDestroyShaderModule(sdfLargeFrag);
+            deviceApi.vkDestroyShaderModule(sdfInstVert);
+            deviceApi.vkDestroyShaderModule(sdfInstFrag);
             deviceApi.vkDestroyShaderModule(roundRectVert);
             deviceApi.vkDestroyShaderModule(roundRectFrag);
         }
@@ -268,6 +291,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(StrokePipeline);
         _deviceApi.vkDestroyPipeline(SdfPipeline);
         _deviceApi.vkDestroyPipeline(SdfLargePipeline);
+        _deviceApi.vkDestroyPipeline(SdfInstancedPipeline);
         Mesh.Dispose();
     }
 
