@@ -7,6 +7,23 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.56
+
+**`MeasureText` remembers what it measured.** A measurement runs the whole shaper (GSUB, GPOS, bidi
+itemization) and resolves every glyph. UI chrome measures the same strings on every frame it paints:
+a sidebar fitting its page labels, a tab strip fitting its titles, both re-measuring as they trim a
+label to an ellipsis. On a 219-page document in a PDF viewer, that was two thirds of the CPU of a frame
+that drew nothing new.
+
+Results are now cached by font, size and text, looked up from the span without allocating. A
+measurement is cached only if every glyph resolved: one that came back with no advance and no
+height would freeze a short width. The cache is dropped when `TextShaper` is replaced, and cleared
+once it holds 4,096 entries.
+
+Measured offscreen, Release, Adreno X1-85: fitting twelve page labels the way that sidebar does,
+every one a sheet title of about 50 characters that overflows, went
+from 1.90-1.94 ms to 0.08-0.09 ms per frame, two runs alternated.
+
 ## 7.55
 
 **The stroke shader draws round caps.** `DrawPersistentStrokes(..., roundCaps: true)` draws each segment

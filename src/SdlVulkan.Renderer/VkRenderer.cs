@@ -62,6 +62,19 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // consumes it per line before reshaping, and never calls MeasureText mid-iteration.
     private readonly List<ShapedGlyph> _shapedLine = new();
 
+    // MeasureText's results, by font and size and then by text. A measurement runs the whole shaper
+    // (GSUB, GPOS, bidi itemization) and resolves every glyph, and UI chrome measures the same strings on
+    // every frame it paints: a sidebar fitting its page labels, a tab strip fitting its titles, both
+    // re-measuring as they trim a label to an ellipsis. On a 219-page document that was two thirds of the
+    // CPU of a frame that drew nothing new. A width depends on the text, font, size and shaper, so the
+    // cache is dropped when the shaper is replaced, and it is bounded by clearing past
+    // MeasureCacheLimit entries rather than by LRU: chrome is a small working set, and a clear costs one
+    // frame of measuring. Not thread-safe, like the rest of the frame API.
+    private readonly Dictionary<(string Font, float Size), Dictionary<string, (float Width, float Height)>> _measureCache = new();
+    private ITextShaper? _measureCacheShaper;
+    private int _measureCacheCount;
+    private const int MeasureCacheLimit = 4096;
+
     // sdfInitialAtlasDim: square size of each SDF atlas PAGE (0 = the atlas default, 2048²). The
     // atlas never reallocates — when a page fills it appends a new page — so this is the page
     // granularity, not a glyph cap. A glyph-heavy consumer can raise it (must be a power of two)
@@ -170,6 +183,21 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (_sdfFontAtlas is null || text.IsEmpty)
             return (0f, 0f);
 
+        if (!ReferenceEquals(TextShaper, _measureCacheShaper) || _measureCacheCount >= MeasureCacheLimit)
+        {
+            _measureCache.Clear();
+            _measureCacheCount = 0;
+            _measureCacheShaper = TextShaper;
+        }
+        if (!_measureCache.TryGetValue((fontFamily, fontSize), out var byText))
+        {
+            byText = new Dictionary<string, (float Width, float Height)>(StringComparer.Ordinal);
+            _measureCache[(fontFamily, fontSize)] = byText;
+        }
+        var cached = byText.GetAlternateLookup<ReadOnlySpan<char>>();
+        if (cached.TryGetValue(text, out var known))
+            return known;
+
         var glyphScale = _sdfFontAtlas!.GetGlyphScale(fontSize);
         var bitmapScale = VkFontAtlas.GetGlyphScale(fontSize);
 
@@ -182,6 +210,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var width = 0f;
         var maxAscent = 0f;
         var maxDescent = 0f;
+        // A glyph that could not be resolved comes back with no advance and no height, and measures as
+        // nothing. Such a measurement is returned but not cached, so a short width is not frozen.
+        var complete = true;
         // ref readonly over the backing array (no List enumerator, no per-glyph struct copy).
         foreach (ref readonly var sg in CollectionsMarshal.AsSpan(_shapedLine))
         {
@@ -205,12 +236,19 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
                 bearingY = glyph.BearingY * glyphScale;
                 height = glyph.Height * glyphScale;
             }
+            if (advance == 0f && height == 0f) complete = false;
             width += advance + sg.XAdvanceAdjust;
             if (bearingY > maxAscent) maxAscent = bearingY;
             var descent = height - bearingY;
             if (descent > maxDescent) maxDescent = descent;
         }
-        return (width, maxAscent + maxDescent);
+        var result = (width, maxAscent + maxDescent);
+        if (complete)
+        {
+            cached[text] = result;
+            _measureCacheCount++;
+        }
+        return result;
     }
 
     /// <summary>
