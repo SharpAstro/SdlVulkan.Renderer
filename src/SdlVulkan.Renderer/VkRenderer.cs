@@ -8,7 +8,18 @@ namespace SdlVulkan.Renderer;
 
 public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 {
+    // The set the next bind draws with: _mainPipelines, built for the device's own sample count, except
+    // inside a main pass the consumer asked to run single-sampled (SingleSampleMainPass), which draws with
+    // _singleSamplePipelines. A pipeline's sample count must match the pass it is drawn in.
     private VkPipelineSet? _pipelines;
+    private VkPipelineSet? _mainPipelines;
+    private VkPipelineSet? _singleSamplePipelines;
+    // The single-sample set is built off the render thread: a pipeline set is about 50 ms of driver
+    // compile (Adreno X1-85, warm driver cache), which a window's creation should not pay for a feature
+    // its first frames rarely use. vkCreateGraphicsPipelines needs no external synchronisation without a
+    // pipeline cache. Until the set is in, a frame that asks for a single-sample main pass gets the
+    // multisampled one, which is correct, merely slower.
+    private Task<VkPipelineSet>? _singleSamplePipelinesBuild;
     private VkFontAtlas? _fontAtlas;
     private VkSdfFontAtlas? _sdfFontAtlas;
     // Optional large-text tier: a second SDF atlas at a bigger raster (e.g. 128px). BeginSdfGlyphBatch
@@ -91,7 +102,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         _width = width;
         _height = height;
-        _pipelines = VkPipelineSet.Create(ctx);
+        _mainPipelines = _pipelines = VkPipelineSet.Create(ctx);
+        if (ctx.SingleSampleMainPassAvailable)
+            _singleSamplePipelinesBuild = Task.Run(
+                () => VkPipelineSet.Create(ctx, ctx.SingleSampleRenderPass, VkSampleCountFlags.Count1));
         _fontAtlas = new VkFontAtlas(ctx, rasterizer);
         _sdfFontAtlas = sdfInitialAtlasDim > 0
             ? new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, sdfDiskCache, sdfInitialAtlasDim, sdfInitialAtlasDim)
@@ -121,7 +135,45 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public override uint Width => _width;
     public override uint Height => _height;
 
+    /// <summary>The pipelines the current pass draws with (see <see cref="SingleSampleMainPass"/>).</summary>
     public VkPipelineSet? Pipelines => _pipelines;
+
+    /// <summary>
+    /// Run each frame's main pass at one sample on a device that multisamples, from the next pass begun.
+    /// Read when <see cref="BeginFrame"/> or <see cref="BeginOffscreenFrame"/> opens the main pass, so a
+    /// consumer can decide it per frame, as late as its <see cref="OnPreRenderPass"/> hook, once it knows
+    /// what the frame will draw. A cached-layer or thumbnail pass recorded in that hook stays multisampled.
+    /// <para>For a frame that draws only what antialiases itself: text, rounded boxes, ellipses, textured
+    /// quads (a blit of an antialiased layer), axis-aligned rectangles and <see cref="DrawLine"/>. Those
+    /// come out the same at one sample as at the device's count, and skip multisampling the whole window,
+    /// which on a tiling GPU is most of an idle frame's cost (3.09 against 2.22 ms of GPU in one viewer).
+    /// Geometry that takes its edges from MSAA (<see cref="DrawTriangles"/>, persistent fills and strokes,
+    /// meshes) is aliased in such a frame. No effect on a single-sampled device; see
+    /// <see cref="VulkanContext.LastFrameSingleSampled"/> for what a frame actually did.</para>
+    /// </summary>
+    public bool SingleSampleMainPass { get; set; }
+
+    /// <summary>
+    /// Whether <see cref="SingleSampleMainPass"/> can take effect: the device multisamples, and the
+    /// single-sample pipelines, built off the render thread from construction, are in. Until then a frame
+    /// that asks for it runs multisampled.
+    /// </summary>
+    public bool SingleSampleMainPassReady
+        => _singleSamplePipelines is not null || _singleSamplePipelinesBuild is { IsCompletedSuccessfully: true };
+
+    // The main pass's sample count, as asked for and available; the set to draw it with follows.
+    private bool BeginMainPassPipelines()
+    {
+        if (_singleSamplePipelines is null && _singleSamplePipelinesBuild is { IsCompleted: true } built)
+        {
+            if (built.IsCompletedSuccessfully) _singleSamplePipelines = built.Result;
+            else SdlVulkanLog.Logger.SingleSamplePipelinesFailed(built.Exception?.GetBaseException().Message);
+            _singleSamplePipelinesBuild = null;
+        }
+        var single = SingleSampleMainPass && _singleSamplePipelines is not null;
+        if (single) _pipelines = _singleSamplePipelines;
+        return single;
+    }
     internal VkFontAtlas? FontAtlas => _fontAtlas;
     public ManagedFontRasterizer? GlyphRasterizer => _fontAtlas?.Rasterizer;
     public bool FontAtlasDirty => _fontAtlas?.IsDirty == true || _sdfFontAtlas?.IsDirty == true
@@ -288,6 +340,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         LastPreFlushMs = 0;
         LastPreRenderPassMs = 0;
+        _pipelines = _mainPipelines;
         ForgetCachedLayer();
         _currentCmd = Surface.BeginFrame(out var resized);
         if (resized || _currentCmd == VkCommandBuffer.Null)
@@ -319,7 +372,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // Preserves the previous contents and confines painting to the accumulated damage when the
         // caller supplied any, otherwise clears and paints in full. Sets _damageRegion so every clip
         // below is bounded by it.
-        Surface.BeginFrameRenderPass(_currentCmd, clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f);
+        var single = BeginMainPassPipelines();
+        Surface.BeginFrameRenderPass(_currentCmd, clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f,
+            single);
         var region = Surface.LastFrameRegion;
         _damageRegion = (region.offset.x, region.offset.y, (int)region.extent.width, (int)region.extent.height);
         _lastBoundPipeline = VkPipeline.Null; // fresh command buffer — nothing is bound
@@ -332,6 +387,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void EndFrame()
     {
         Surface.EndFrame(_currentCmd);
+        _pipelines = _mainPipelines;
     }
 
     private void InvokePreFlush()
@@ -691,6 +747,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         LastPreFlushMs = 0;
         LastPreRenderPassMs = 0;
+        _pipelines = _mainPipelines;
         ForgetCachedLayer();
         _currentCmd = Surface.BeginOffscreenFrame();
         if (_currentCmd == VkCommandBuffer.Null) return false;
@@ -707,8 +764,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         InvokePreRenderPass();
 
+        var single = BeginMainPassPipelines();
         Surface.BeginOffscreenRenderPass(_currentCmd,
-            clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f);
+            clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f, single);
         // The whole target is the paintable area of an offscreen frame. It used to go unset here, so a
         // clip popped to empty mid-frame reset the scissor to whatever the field held — nothing, on a
         // context that had never begun a swapchain frame.
@@ -721,6 +779,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void EndOffscreenFrame()
     {
         Surface.EndOffscreenFrame(_currentCmd);
+        _pipelines = _mainPipelines;
     }
 
     public override void Resize(uint width, uint height)
@@ -2123,30 +2182,17 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var len = MathF.Sqrt(dx * dx + dy * dy);
         if (len < 0.001f) return;
 
-        // Perpendicular normal scaled to half-thickness
-        var hw = Math.Max(thickness, 1) * 0.5f;
-        var nx = -dy / len * hw;
-        var ny = dx / len * hw;
-
-        // 4 corners of the rotated quad
-        var ax = x0 + nx; var ay = y0 + ny;
-        var bx = x0 - nx; var by = y0 - ny;
-        var cx = x1 - nx; var cy = y1 - ny;
-        var ex = x1 + nx; var ey = y1 + ny;
-
-        // 2 triangles (6 vertices, 2 floats each)
-        ReadOnlySpan<float> vertices =
-        [
-            ax, ay, bx, by, cx, cy,
-            ax, ay, cx, cy, ex, ey
-        ];
-
-        DrawTriangles(vertices, color);
+        // A box from one end to the other, thickness wide, antialiased by its own distance field
+        // (AppendLineBox), so a line comes out the same in a single-sampled main pass as at 4x. It was two
+        // flat triangles, smooth only where MSAA made them so (SingleSampleMainPass).
+        _polyScratch.Clear();
+        AppendLineBox(_polyScratch, x0, y0, x1, y1, Math.Max(thickness, 1) * 0.5f);
+        DrawLineBoxes(CollectionsMarshal.AsSpan(_polyScratch), color);
     }
 
     /// <summary>
-    /// Batched polyline: expands every segment to a rotated quad and records the whole run as ONE
-    /// FlatPipeline draw (single WriteVertices + bind + push + draw), instead of the base class's
+    /// Batched polyline: expands every segment to the antialiased box <see cref="DrawLine"/> draws and
+    /// records the whole run as ONE draw (single WriteVertices + bind + push + draw), instead of the base class's
     /// one-<see cref="DrawLine"/>-per-segment loop (N draws). Geometry is identical to calling
     /// <see cref="DrawLine"/> per consecutive pair; no join handling (matches the base contract).
     /// </summary>
@@ -2157,15 +2203,14 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var hw = Math.Max(thickness, 1) * 0.5f;
         _polyScratch.Clear();
         for (var i = 1; i < points.Length; i++)
-            AppendSegmentQuad(_polyScratch, points[i - 1].X, points[i - 1].Y, points[i].X, points[i].Y, hw);
+            AppendLineBox(_polyScratch, points[i - 1].X, points[i - 1].Y, points[i].X, points[i].Y, hw);
 
-        if (_polyScratch.Count >= 6)
-            DrawTriangles(CollectionsMarshal.AsSpan(_polyScratch), color);
+        DrawLineBoxes(CollectionsMarshal.AsSpan(_polyScratch), color);
     }
 
     /// <summary>
     /// Batched dashed polyline: every visible dash across every segment becomes one rotated quad, and
-    /// the whole run records as ONE FlatPipeline draw. Dash pattern resets at each vertex (no phase
+    /// the whole run records as ONE draw. Dash pattern resets at each vertex (no phase
     /// continuity), matching the base <c>DrawLineDashed</c> semantics. Degrades to
     /// <see cref="DrawPolyline"/> when either length is non-positive.
     /// </summary>
@@ -2190,30 +2235,60 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             for (var t = 0f; t < len; t += period)
             {
                 var dashEnd = MathF.Min(t + dashLength, len);
-                AppendSegmentQuad(_polyScratch, x0 + ux * t, y0 + uy * t, x0 + ux * dashEnd, y0 + uy * dashEnd, hw);
+                AppendLineBox(_polyScratch, x0 + ux * t, y0 + uy * t, x0 + ux * dashEnd, y0 + uy * dashEnd, hw);
             }
         }
 
-        if (_polyScratch.Count >= 6)
-            DrawTriangles(CollectionsMarshal.AsSpan(_polyScratch), color);
+        DrawLineBoxes(CollectionsMarshal.AsSpan(_polyScratch), color);
     }
 
-    // Appends one segment's rotated quad (2 triangles, 6 position-only vertices) to the accumulator.
-    // Same perpendicular-normal quad math as DrawLine; degenerate (zero-length) segments are skipped.
-    private static void AppendSegmentQuad(List<float> dst, float x0, float y0, float x1, float y1, float hw)
+    // Floats per vertex of a line box: the round-rect pipeline's position, offset from the box centre,
+    // half extents and corner radius (roundrect.vert).
+    private const int LineBoxFloatsPerVertex = 7;
+
+    // Appends one segment as the round-rect pipeline's quad (6 vertices): a box from one end to the other,
+    // 2*hw wide, with square ends and no rounding. Its coverage is a signed distance in the box's own frame,
+    // feathered over a pixel (roundrect.frag), so it antialiases whatever the pass's sample count and at
+    // any angle. The quad reaches a pixel past the box on every side so that feather is drawn. Degenerate
+    // (zero-length) segments are skipped.
+    private static void AppendLineBox(List<float> dst, float x0, float y0, float x1, float y1, float hw)
     {
         var dx = x1 - x0;
         var dy = y1 - y0;
         var len = MathF.Sqrt(dx * dx + dy * dy);
         if (len < 0.001f) return;
 
-        var nx = -dy / len * hw;
-        var ny = dx / len * hw;
-        var ax = x0 + nx; var ay = y0 + ny;
-        var bx = x0 - nx; var by = y0 - ny;
-        var cx = x1 - nx; var cy = y1 - ny;
-        var ex = x1 + nx; var ey = y1 + ny;
-        dst.AddRange([ax, ay, bx, by, cx, cy, ax, ay, cx, cy, ex, ey]);
+        var halfLen = len * 0.5f;
+        var ux = dx / len; var uy = dy / len;        // along the line
+        var vx = -uy; var vy = ux;                   // across it
+        var cx = (x0 + x1) * 0.5f; var cy = (y0 + y1) * 0.5f;
+        var ex = halfLen + 1f;
+        var ey = hw + 1f;
+        void Vertex(List<float> d, float along, float across) => d.AddRange(
+            [cx + ux * along + vx * across, cy + uy * along + vy * across, along, across, halfLen, hw, 0f]);
+        Vertex(dst, -ex, -ey); Vertex(dst, ex, -ey); Vertex(dst, ex, ey);
+        Vertex(dst, -ex, -ey); Vertex(dst, ex, ey); Vertex(dst, -ex, ey);
+    }
+
+    // One draw of the line boxes AppendLineBox accumulated.
+    private void DrawLineBoxes(ReadOnlySpan<float> vertices, DIR.Lib.RGBAColor32 color)
+    {
+        if (_pipelines is null || vertices.Length < 6 * LineBoxFloatsPerVertex) return;
+        var api = Surface.DeviceApi;
+        SetColor(color);
+        _pushConstants[20] = 0f; // unused by this shader; keep the shared block well-defined
+        var offset = Surface.WriteVertices(vertices);
+        if (offset == uint.MaxValue) return;
+
+        BindPipeline(_pipelines.RoundRectPipeline);
+        fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, (uint)(vertices.Length / LineBoxFloatsPerVertex), 1, 0, 0);
     }
 
     public override void DrawRectangle(in RectInt rect, DIR.Lib.RGBAColor32 strokeColor, int strokeWidth)
@@ -2689,8 +2764,18 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _sdfFontAtlasLarge = null;
         _fontAtlas?.Dispose();
         _fontAtlas = null;
-        _pipelines?.Dispose();
-        _pipelines = null;
+        _mainPipelines?.Dispose();
+        // A build still running would create pipelines on a device about to go, so it is waited out first.
+        // It is CPU work on a pool thread with a bounded end (one pipeline set), not I/O.
+        if (_singleSamplePipelines is null && _singleSamplePipelinesBuild is { } build)
+        {
+            ((IAsyncResult)build).AsyncWaitHandle.WaitOne();
+            if (build.IsCompletedSuccessfully) _singleSamplePipelines = build.Result;
+            else SdlVulkanLog.Logger.SingleSamplePipelinesFailed(build.Exception?.GetBaseException().Message);
+        }
+        _singleSamplePipelines?.Dispose();
+        _pipelines = _mainPipelines = _singleSamplePipelines = null;
+        _singleSamplePipelinesBuild = null;
     }
 
     /// <inheritdoc/>

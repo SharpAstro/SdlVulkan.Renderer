@@ -96,7 +96,14 @@ public sealed unsafe class VkPipelineSet : IDisposable
         Mesh = mesh;
     }
 
-    public static VkPipelineSet Create(VulkanContext ctx)
+    public static VkPipelineSet Create(VulkanContext ctx) => Create(ctx, ctx.RenderPass, ctx.MsaaSamples);
+
+    /// <summary>
+    /// The set built against <paramref name="renderPass"/> at <paramref name="samples"/>: what a pipeline's
+    /// sample count must match is the pass it is drawn in, so a device that offers a single-sample main pass
+    /// beside its multisampled one (<see cref="VulkanContext.SingleSampleRenderPass"/>) needs a set for each.
+    /// </summary>
+    public static VkPipelineSet Create(VulkanContext ctx, VkRenderPass renderPass, VkSampleCountFlags samples)
     {
         var deviceApi = ctx.DeviceApi;
 
@@ -124,8 +131,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
             // Flat pipeline: vec2 pos only
             VkVertexInputBindingDescription flatBinding = new(2 * sizeof(float));
             VkVertexInputAttributeDescription flatAttr = new(0, VkFormat.R32G32Sfloat, 0);
-            var msaa = ctx.MsaaSamples;
-            var flat = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
+            var msaa = samples;
+            var flat = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, msaaSamples: msaa);
 
             // Textured pipeline: vec2 pos + vec2 uv (for font atlas glyphs)
@@ -133,11 +140,11 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var texAttrs = stackalloc VkVertexInputAttributeDescription[2];
             texAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);
             texAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));
-            var textured = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, texVert, texFrag,
+            var textured = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, texVert, texFrag,
                 &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
 
             // Page pipeline: same vertex layout as textured, but pass-through fragment shader
-            var page = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, texVert, pageFrag,
+            var page = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, texVert, pageFrag,
                 &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
 
             // Ellipse pipeline: vec2 pos + vec2 local
@@ -145,7 +152,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var ellipseAttrs = stackalloc VkVertexInputAttributeDescription[2];
             ellipseAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);
             ellipseAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));
-            var ellipse = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, ellipseVert, ellipseFrag,
+            var ellipse = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, ellipseVert, ellipseFrag,
                 &ellipseBinding, 1, ellipseAttrs, 2, msaaSamples: msaa);
 
             // Instanced ellipse pipeline: ONE INSTANCE per ellipse = vec2 centre + vec2 axisU +
@@ -161,7 +168,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             ellipseInstAttrs[2] = new(2, VkFormat.R32G32Sfloat, 4 * sizeof(float));       // aAxisV
             ellipseInstAttrs[3] = new(3, VkFormat.R32Sfloat, 6 * sizeof(float));          // aStrokeWidth
             ellipseInstAttrs[4] = new(4, VkFormat.R32G32B32A32Sfloat, 7 * sizeof(float)); // aColor
-            var ellipseInstanced = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout,
+            var ellipseInstanced = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout,
                 ellipseInstVert, ellipseInstFrag,
                 &ellipseInstBinding, 1, ellipseInstAttrs, 5, msaaSamples: msaa);
 
@@ -172,7 +179,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var strokeAttrs = stackalloc VkVertexInputAttributeDescription[2];
             strokeAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                  // aP0
             strokeAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));  // aP1
-            var stroke = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, strokeVert, strokeFrag,
+            var stroke = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, strokeVert, strokeFrag,
                 &strokeBinding, 1, strokeAttrs, 2, msaaSamples: msaa);
 
             // SDF pipeline: vec2 pos + vec2 uv + vec4 cell (32B). The cell is the glyph's rectangle in its
@@ -183,9 +190,9 @@ public sealed unsafe class VkPipelineSet : IDisposable
             sdfAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                        // aPos
             sdfAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));        // aTexCoord
             sdfAttrs[2] = new(2, VkFormat.R32G32B32A32Sfloat, 4 * sizeof(float));  // aCell
-            var sdf = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, sdfVert, sdfFrag,
+            var sdf = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, sdfVert, sdfFrag,
                 &sdfBinding, 1, sdfAttrs, 3, msaaSamples: msaa);
-            var sdfLarge = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, sdfVert, sdfLargeFrag,
+            var sdfLarge = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, sdfVert, sdfLargeFrag,
                 &sdfBinding, 1, sdfAttrs, 3, msaaSamples: msaa);
 
             // Rounded-rect pipeline: vec2 pos + vec2 localPx + vec2 halfPx + float radiusPx.
@@ -197,28 +204,28 @@ public sealed unsafe class VkPipelineSet : IDisposable
             roundRectAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));  // aLocal
             roundRectAttrs[2] = new(2, VkFormat.R32G32Sfloat, 4 * sizeof(float));  // aHalf
             roundRectAttrs[3] = new(3, VkFormat.R32Sfloat, 6 * sizeof(float));     // aRadius
-            var roundRect = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, roundRectVert, roundRectFrag,
+            var roundRect = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, roundRectVert, roundRectFrag,
                 &roundRectBinding, 1, roundRectAttrs, 4, msaaSamples: msaa);
 
             // Blend mode variants of the flat pipeline
-            var flatMultiply = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
+            var flatMultiply = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.DstColor, VkBlendFactor.OneMinusSrcAlpha, msaaSamples: msaa);
-            var flatScreen = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
+            var flatScreen = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.OneMinusSrcColor, msaaSamples: msaa);
-            var flatDarken = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
+            var flatDarken = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Min, msaa);
-            var flatLighten = CreatePipeline(deviceApi, ctx.RenderPass, ctx.PipelineLayout, flatVert, flatFrag,
+            var flatLighten = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, flatVert, flatFrag,
                 &flatBinding, 1, &flatAttr, 1, VkBlendFactor.One, VkBlendFactor.One, VkBlendOp.Max, msaa);
 
             // Masked pipeline: the page pipeline's vertex layout and blending, against the device's
             // OTHER pipeline layout -- the two-sampler one. Same push constants, so nothing a caller
             // sets per draw changes.
-            var masked = CreatePipeline(deviceApi, ctx.RenderPass, ctx.MaskedPipelineLayout, texVert, maskedFrag,
+            var masked = CreatePipeline(deviceApi, renderPass, ctx.MaskedPipelineLayout, texVert, maskedFrag,
                 &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
 
             // The one depth-TESTING pipeline, against the same pass: see VkMeshPipeline for why it has
             // its own layout and so its own class.
-            var mesh = VkMeshPipeline.Create(deviceApi, ctx.RenderPass, msaa);
+            var mesh = VkMeshPipeline.Create(deviceApi, renderPass, msaa);
 
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, sdfLarge, roundRect,
                 flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced);

@@ -47,6 +47,9 @@ internal static partial class LogEvents
     public static partial void FrameTiming(this ILogger logger, uint windowId, long frame, double frameMs, double beginMs,
         double hooksMs, double renderMs, double endMs, long gpuFrame, double gpuMs, string gpuSections);
 
+    [LoggerMessage(120, LogLevel.Warning, "[VkRenderer] the single-sample pipelines could not be built ({Reason}); every main pass stays multisampled.")]
+    public static partial void SingleSamplePipelinesFailed(this ILogger logger, string? reason);
+
     [LoggerMessage(108, LogLevel.Error, "[SdlEventLoop] wedge breadcrumb (window {WindowId}): {AtlasBreadcrumb}; {ChurnBreadcrumb}; {Ledger}; {CleanFrameAge}")]
     public static partial void WedgeBreadcrumb(this ILogger logger, uint windowId, string atlasBreadcrumb, string churnBreadcrumb, string ledger, string cleanFrameAge);
 

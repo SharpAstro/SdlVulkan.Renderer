@@ -46,6 +46,15 @@ public sealed unsafe class VulkanDevice : IDisposable
     public VkCommandPool CommandPool { get; }
     public VkRenderPass RenderPass { get; }
 
+    /// <summary>
+    /// <see cref="RenderPass"/> single-sampled: the same attachments, formats, layouts and dependencies at
+    /// one sample, with no resolve. The pass a frame's main pass takes when its consumer asks for one
+    /// (<c>VkRenderer.SingleSampleMainPass</c>), so a frame that only blits an already-antialiased layer
+    /// and draws its chrome does not multisample the whole window to do it. Null when
+    /// <see cref="MsaaSamples"/> is one already.
+    /// </summary>
+    public VkRenderPass SingleSampleRenderPass { get; }
+
     /// <summary>The color format the render pass — and therefore the swapchain images — use. Chosen
     /// from the surface's supported formats on the swapchain path (B8G8R8A8Unorm on desktop for
     /// readback/offscreen byte-order parity; R8G8B8A8Unorm on Android/Mali, which offers no BGRA);
@@ -166,7 +175,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         VkInstance instance, VkInstanceApi instanceApi,
         VkPhysicalDevice physicalDevice, VkDevice device, VkDeviceApi deviceApi,
         VkQueue graphicsQueue, uint graphicsQueueFamily,
-        VkCommandPool commandPool, VkRenderPass renderPass,
+        VkCommandPool commandPool, VkRenderPass renderPass, VkRenderPass singleSampleRenderPass,
         VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
         VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout,
         VkDescriptorSetLayout maskedSetLayout, VkPipelineLayout maskedPipelineLayout,
@@ -183,6 +192,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         MinImageTransferGranularity = QueryTransferGranularity(instanceApi, physicalDevice, graphicsQueueFamily);
         CommandPool = commandPool;
         RenderPass = renderPass;
+        SingleSampleRenderPass = singleSampleRenderPass;
         ColorFormat = colorFormat;
         _descriptorPools.Add(descriptorPool);
         _currentPool = descriptorPool;
@@ -259,9 +269,11 @@ public sealed unsafe class VulkanDevice : IDisposable
         // Swapchain render pass — clears, and leaves the presented image in PresentSrcKHR.
         var renderPass = CreateCompatibleRenderPass(deviceApi, colorFormat, depthFormat, msaaSamples,
             VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.PresentSrcKHR);
+        var singleSamplePass = CreateSingleSamplePass(deviceApi, colorFormat, depthFormat, msaaSamples,
+            VkImageLayout.PresentSrcKHR);
 
         var created = CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, renderPass, colorFormat, depthFormat, msaaSamples, ownsInstance);
+            graphicsQueue, queueFamily, renderPass, singleSamplePass, colorFormat, depthFormat, msaaSamples, ownsInstance);
         created.MemoryBudgetAvailable = wantsBudget;
         return created;
     }
@@ -307,13 +319,25 @@ public sealed unsafe class VulkanDevice : IDisposable
         // can transition it for the copy itself.
         var renderPass = CreateCompatibleRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples,
             VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.ColorAttachmentOptimal);
+        var singleSamplePass = CreateSingleSamplePass(deviceApi, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples,
+            VkImageLayout.ColorAttachmentOptimal);
 
         var dev = CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, renderPass, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples, ownsInstance);
+            graphicsQueue, queueFamily, renderPass, singleSamplePass, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples, ownsInstance);
         dev.MarkQueuePrivate();
         dev.MemoryBudgetAvailable = wantsBudget;
         return dev;
     }
+
+    // The main pass at one sample, beside a multisampled one; Null when the device is single-sampled
+    // already. Same shape as the factory's own pass in every respect but the sample count, so the
+    // context builds a framebuffer for it from the very images the multisampled pass resolves into.
+    private static VkRenderPass CreateSingleSamplePass(VkDeviceApi deviceApi, VkFormat colorFormat,
+        VkFormat depthFormat, VkSampleCountFlags msaaSamples, VkImageLayout finalLayout)
+        => msaaSamples == VkSampleCountFlags.Count1
+            ? VkRenderPass.Null
+            : CreateCompatibleRenderPass(deviceApi, colorFormat, depthFormat, VkSampleCountFlags.Count1,
+                VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, finalLayout);
 
     // Shared tail of both factories: command pool, descriptor pool/layout/set, pipeline layout.
     // Identical on the swapchain and offscreen paths so VkPipelineSet's pre-baked pipelines and the
@@ -322,7 +346,7 @@ public sealed unsafe class VulkanDevice : IDisposable
     private static VulkanDevice CreateCommon(
         VkInstance instance, VkInstanceApi instanceApi,
         VkPhysicalDevice physicalDevice, VkDevice device, VkDeviceApi deviceApi,
-        VkQueue graphicsQueue, uint queueFamily, VkRenderPass renderPass,
+        VkQueue graphicsQueue, uint queueFamily, VkRenderPass renderPass, VkRenderPass singleSamplePass,
         VkFormat colorFormat, VkFormat depthFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
     {
         // Command pool
@@ -435,7 +459,7 @@ public sealed unsafe class VulkanDevice : IDisposable
 
         return new VulkanDevice(
             instance, instanceApi, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, commandPool, renderPass,
+            graphicsQueue, queueFamily, commandPool, renderPass, singleSamplePass,
             descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout,
             maskedSetLayout, maskedPipelineLayout, colorFormat, depthFormat,
             msaaSamples, ownsInstance);
@@ -1042,6 +1066,8 @@ public sealed unsafe class VulkanDevice : IDisposable
         foreach (var pool in _descriptorPools)
             DeviceApi.vkDestroyDescriptorPool(pool);
         DeviceApi.vkDestroyRenderPass(RenderPass);
+        if (SingleSampleRenderPass != VkRenderPass.Null)
+            DeviceApi.vkDestroyRenderPass(SingleSampleRenderPass);
         DeviceApi.vkDestroyCommandPool(CommandPool);
         DeviceApi.vkDestroyDevice();
 

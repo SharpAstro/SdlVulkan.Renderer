@@ -866,17 +866,20 @@ public sealed unsafe partial class VulkanContext : IDisposable
         return cmd;
     }
 
-    public void BeginRenderPass(VkCommandBuffer cmd, float clearR, float clearG, float clearB, float clearA)
+    public void BeginRenderPass(VkCommandBuffer cmd, float clearR, float clearG, float clearB, float clearA,
+        bool singleSample = false)
     {
         Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
         FillClearValues(clears, clearR, clearG, clearB, clearA);
+        var single = singleSample && SingleSampleMainPassAvailable;
+        LastFrameSingleSampled = single;
 
         fixed (VkClearValue* pClears = clears)
         {
             VkRenderPassBeginInfo rpBI = new()
             {
-                renderPass = RenderPass,
-                framebuffer = _framebuffers[_currentImageIndex],
+                renderPass = single ? SingleSampleRenderPass : RenderPass,
+                framebuffer = single ? _singleSampleFramebuffers[_currentImageIndex] : _framebuffers[_currentImageIndex],
                 renderArea = new VkRect2D(0, 0, SwapchainWidth, SwapchainHeight),
                 clearValueCount = ClearValueCount,
                 pClearValues = pClears
@@ -1455,10 +1458,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
                 resolveView: _swapchainImageViews[i],
                 extent.width, extent.height);
         }
+        CreateSingleSampleSwapchainTargets(SwapchainFormat, extent.width, extent.height);
     }
 
     private void CleanupSwapchain()
     {
+        CleanupSingleSampleSwapchainTargets();
         foreach (var fb in _framebuffers)
             DeviceApi.vkDestroyFramebuffer(fb);
         foreach (var iv in _swapchainImageViews)
