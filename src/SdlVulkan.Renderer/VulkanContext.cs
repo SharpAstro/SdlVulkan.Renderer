@@ -350,8 +350,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private readonly VkDeviceMemory[] _vertexMemories = new VkDeviceMemory[MaxFramesInFlight];
     private readonly float*[] _vertexMapped = new float*[MaxFramesInFlight];
     // Each slot's capacity in bytes. They start at the size the consumer asked for and grow on
-    // demand, one slot at a time: a slot's buffer can only be replaced at the start of a frame that
-    // owns it, once its fence has retired, so after an overflow the two catch up a frame apart.
+    // demand, one slot at a time: the slot a frame runs out in grows there and then, its old buffer
+    // retired through DeferDestroy (TryGrowVertexRingNow), and the other takes the same demand at the
+    // start of its own next frame, where its fence has retired and the swap is free.
     private readonly uint[] _vertexBufferSizes = new uint[MaxFramesInFlight];
     private int _vertexOffset; // in floats
     // Everything the current frame ASKED to write, in floats, whether or not it fit. A frame that
@@ -362,6 +363,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private uint _vertexRingPeakBytes;
     private int _vertexRingOverflowFrames;
     private bool _vertexRingOverflowed;
+    private int _vertexRingGrownMidFrame;
 
     /// <summary>
     /// Ceiling for one slot of the per-frame vertex ring. Growth stops here and a frame needing more
@@ -375,12 +377,17 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public uint VertexRingPeakBytes => _vertexRingPeakBytes;
     /// <summary>The current frame's slot capacity, in bytes.</summary>
     public uint VertexRingCapacityBytes => _vertexBufferSizes[_currentFrame];
-    /// <summary>Frames that dropped at least one write because the ring was full.</summary>
+    /// <summary>Frames that dropped at least one write because the ring was full, which since the ring
+    /// grows mid-frame takes a frame needing more than <see cref="VertexRingMaxBytes"/>.</summary>
     public int VertexRingOverflowFrames => _vertexRingOverflowFrames;
+    /// <summary>How many times a frame ran out of its slot and moved to a bigger buffer mid-frame,
+    /// dropping nothing (see TryGrowVertexRingNow).</summary>
+    public int VertexRingGrownMidFrame => _vertexRingGrownMidFrame;
     /// <summary>
     /// True from the first write the current frame dropped until the next frame begins. The ring
     /// grows at that next frame start, so a consumer that sees this after its frame should draw
-    /// once more: the frame it just drew is missing whatever did not fit.
+    /// once more: the frame it just drew is missing whatever did not fit. Only a frame needing more
+    /// than <see cref="VertexRingMaxBytes"/> drops a write; short of that the ring grows mid-frame.
     /// </summary>
     public bool VertexRingOverflowed => _vertexRingOverflowed;
 
@@ -1084,10 +1091,11 @@ public sealed unsafe partial class VulkanContext : IDisposable
     {
         _vertexDemand += data.Length;
         var maxFloats = (int)(_vertexBufferSizes[_currentFrame] / sizeof(float));
-        if (_vertexOffset + data.Length > maxFloats)
+        if (_vertexOffset + data.Length > maxFloats && !TryGrowVertexRingNow(data.Length))
         {
-            // Dropped for THIS frame; the ring grows to the whole frame's demand at the next frame
-            // start (see BeginVertexRingFrame), and VertexRingOverflowed tells the loop to draw again.
+            // Past VertexRingMaxBytes: dropped for THIS frame; the ring grows to the whole frame's
+            // demand at the next frame start (see BeginVertexRingFrame), and VertexRingOverflowed tells
+            // the loop to draw again.
             var wanted = (uint)Math.Min((long)_vertexDemand * sizeof(float), VertexRingMaxBytes);
             if (wanted > _vertexRingWanted) _vertexRingWanted = wanted;
             if (!_vertexRingOverflowed)
@@ -1124,15 +1132,16 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private void BeginVertexRingFrame()
     {
         var slot = _currentFrame;
+        // What the previous frame needed, whole: a frame that grew its slot mid-frame (see
+        // TryGrowVertexRingNow) wrote everything, so this is the only place its total is known, and the
+        // slot that did not grow takes it here, where the swap is free, rather than mid-frame.
+        var lastDemand = (uint)Math.Min((long)_vertexDemand * sizeof(float), VertexRingMaxBytes);
+        if (lastDemand > _vertexRingWanted) _vertexRingWanted = lastDemand;
         var wanted = _vertexRingWanted;
         if (wanted > _vertexBufferSizes[slot])
         {
-            const ulong megabyte = 1UL << 20;
-            var grown = Math.Max(_vertexBufferSizes[slot] * 2UL, wanted * 5UL / 4);
-            grown = Math.Min(grown, VertexRingMaxBytes);
-            grown = (grown + megabyte - 1) & ~(megabyte - 1);
-            grown = Math.Min(grown, VertexRingMaxBytes);
-            if (grown > _vertexBufferSizes[slot]) RecreateVertexBuffer(slot, (uint)grown);
+            var grown = GrownVertexRingSize(_vertexBufferSizes[slot], wanted);
+            if (grown > _vertexBufferSizes[slot]) RecreateVertexBuffer(slot, grown);
         }
         if (wanted != 0)
         {
@@ -1145,6 +1154,53 @@ public sealed unsafe partial class VulkanContext : IDisposable
         _vertexDemand = 0;
         _vertexRingOverflowed = false;
     }
+
+    // The larger of twice the current size and a quarter over the demand, rounded up to a megabyte and
+    // capped at VertexRingMaxBytes (see BeginVertexRingFrame's remarks for why both).
+    private static uint GrownVertexRingSize(uint current, ulong wanted)
+    {
+        const ulong megabyte = 1UL << 20;
+        var grown = Math.Max(current * 2UL, wanted * 5UL / 4);
+        grown = Math.Min(grown, VertexRingMaxBytes);
+        grown = (grown + megabyte - 1) & ~(megabyte - 1);
+        return (uint)Math.Min(grown, VertexRingMaxBytes);
+    }
+
+    /// <summary>
+    /// The frame being recorded has run out of its slot's ring: move the slot to a bigger buffer now,
+    /// so the write that did not fit, and every one after it, lands. Returns false only past
+    /// <see cref="VertexRingMaxBytes"/>, where the write is dropped as before.
+    /// </summary>
+    /// <remarks>
+    /// The ring used to drop the rest of such a frame's draws and grow at the next frame start, and the
+    /// frame was presented anyway, missing them: a dense sheet's first draw (98,425 glyphs of text into
+    /// a 16 MB ring) came up as an empty page for one frame, then came back. Growing here costs one
+    /// allocation on the render thread instead. The draws already recorded bound the old buffer, which
+    /// stays alive until this frame has retired (DeferDestroy); every later write and bind goes to the
+    /// new one, because every caller binds <see cref="VertexBuffer"/> after its own write. A caller that
+    /// draws several writes as ONE range (the bitmap glyph batch) has to notice the buffer change itself.
+    /// </remarks>
+    private bool TryGrowVertexRingNow(int floats)
+    {
+        var slot = _currentFrame;
+        var needed = (ulong)floats * sizeof(float);
+        var grown = GrownVertexRingSize(_vertexBufferSizes[slot], (ulong)_vertexDemand * sizeof(float));
+        if (grown < needed || grown <= _vertexBufferSizes[slot]) return false;
+
+        DebugLogRingGrewMidFrame(_vertexBufferSizes[slot], grown);
+        DeferDestroy(buffer: _vertexBuffers[slot], memory: _vertexMemories[slot]);
+        _vertexBuffers[slot] = VkBuffer.Null;
+        _vertexMemories[slot] = VkDeviceMemory.Null;
+        _vertexMapped[slot] = null;
+        CreateVertexBuffer(slot, grown);
+        _vertexOffset = 0;
+        _vertexRingGrownMidFrame++;
+        return true;
+    }
+
+    [Conditional("DEBUG")]
+    private static void DebugLogRingGrewMidFrame(uint fromBytes, uint toBytes)
+        => Console.Error.WriteLine($"[VkBuffer] grew mid-frame from {fromBytes / (1024f * 1024f):F1}MB to {toBytes / (1024f * 1024f):F1}MB");
 
     public VkBuffer VertexBuffer => _vertexBuffers[_currentFrame];
 

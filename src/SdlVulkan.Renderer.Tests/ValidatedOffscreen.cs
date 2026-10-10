@@ -47,12 +47,14 @@ internal static class ValidatedOffscreen
         ctx?.Dispose(); // owns + destroys the instance
     }
 
+    /// <param name="vertexBufferSize">The per-frame vertex ring's starting size, for a test that has to
+    /// outgrow it; the context's default when null.</param>
     /// <param name="msaaSamples">The sample count the context's device bakes into its render pass.
     /// Count1 unless a test guards the MSAA shape specifically — three attachments where the
     /// single-sample pass has two, and a resolve that the single-sample pass never performs.</param>
     public static unsafe bool TryCreate(uint width, uint height,
         out VulkanContext? ctx, out VkDebugUtilsMessengerEXT messenger, out VkInstanceApi? api, out string skip,
-        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
+        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1, uint? vertexBufferSize = null)
     {
         ctx = null;
         messenger = VkDebugUtilsMessengerEXT.Null;
@@ -109,7 +111,9 @@ internal static class ValidatedOffscreen
             api = GetApi(instance);
             api.vkCreateDebugUtilsMessengerEXT(&debugCI, out messenger).CheckResult();
 
-            ctx = VulkanContext.CreateOffscreen(instance, width, height, msaaSamples: msaaSamples);
+            ctx = vertexBufferSize is { } ring
+                ? VulkanContext.CreateOffscreen(instance, width, height, msaaSamples: msaaSamples, vertexBufferSize: ring)
+                : VulkanContext.CreateOffscreen(instance, width, height, msaaSamples: msaaSamples);
             return true;
         }
         catch (Exception e)
