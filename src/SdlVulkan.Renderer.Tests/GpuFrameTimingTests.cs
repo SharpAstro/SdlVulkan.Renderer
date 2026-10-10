@@ -126,4 +126,74 @@ public sealed class GpuFrameTimingTests(OffscreenGpuFixture gpu)
 
         ctx.LastGpuSections.Length.ShouldBe(VulkanContext.MaxGpuSections);
     }
+
+    [Fact]
+    public void ACachedLayerPassIsTimedAsItsOwnSection()
+    {
+        if (TimedContext() is not { } ctx)
+        {
+            Assert.Skip("Vulkan timestamps not available on this host");
+            return;
+        }
+
+        // The offscreen context is owned by the shared collection fixture; never dispose it here.
+        using var renderer = new VkRenderer(ctx, Width, Height);
+        renderer.EnsureCachedLayerTargets(Width, Height).ShouldBeTrue();
+        try
+        {
+            // A consumer draws its layer from the pre-render-pass hook, as the cached layer requires.
+            renderer.OnPreRenderPass = _ =>
+            {
+                renderer.BeginCachedLayer(Width, Height, Backdrop).ShouldBeTrue();
+                renderer.FillRectangle(new RectInt(new PointInt(24, 24), new PointInt(4, 4)), Ink);
+                renderer.EndCachedLayer();
+            };
+            renderer.BeginOffscreenFrame(Backdrop).ShouldBeTrue();
+            ctx.BeginGpuSection("main pass");
+            renderer.FillRectangle(new RectInt(new PointInt(8, 8), new PointInt(0, 0)), Ink);
+            renderer.EndOffscreenFrame();
+            ctx.WaitOffscreenFrameComplete();
+
+            // The layer's section is opened and closed by the pass itself, outside it, so it is there
+            // without the consumer asking and is closed before anything the consumer times after it.
+            ctx.LastGpuSections.ToArray().Select(s => s.Name)
+                .ShouldBe(new[] { VulkanContext.CachedLayerGpuSection, "main pass" });
+        }
+        finally
+        {
+            renderer.OnPreRenderPass = null;
+            renderer.ReleaseCachedLayerTargets();
+        }
+    }
+
+    [Fact]
+    public void TheHooksTimeIsTheConsumersOwnAndBelongsToItsFrame()
+    {
+        if (gpu.Context is not { } ctx)
+        {
+            Assert.Skip("Vulkan runtime not available on this host");
+            return;
+        }
+        ctx.ResizeOffscreen(Width, Height);
+
+        // The offscreen context is owned by the shared collection fixture; never dispose it here.
+        using var renderer = new VkRenderer(ctx, Width, Height);
+        renderer.OnPreFlush = () => System.Threading.Thread.Sleep(20);
+        renderer.OnPreRenderPass = _ => System.Threading.Thread.Sleep(30);
+        renderer.BeginOffscreenFrame(Backdrop).ShouldBeTrue();
+        // A sleep can wake a little before its due time on a coarse timer, never by a third of it.
+        renderer.LastPreFlushMs.ShouldBeGreaterThan(15);
+        renderer.LastPreRenderPassMs.ShouldBeGreaterThan(25);
+        renderer.EndOffscreenFrame();
+        ctx.WaitOffscreenFrameComplete();
+
+        // A frame whose hooks are unset reports zero, not the time the last frame's hooks took.
+        renderer.OnPreFlush = null;
+        renderer.OnPreRenderPass = null;
+        renderer.BeginOffscreenFrame(Backdrop).ShouldBeTrue();
+        renderer.LastPreFlushMs.ShouldBe(0);
+        renderer.LastPreRenderPassMs.ShouldBe(0);
+        renderer.EndOffscreenFrame();
+        ctx.WaitOffscreenFrameComplete();
+    }
 }
