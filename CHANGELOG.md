@@ -13,11 +13,14 @@ this file disagrees with. Bump it there and add the entry here, in the same comm
 `SdlVulkan.Renderer.WebView`, for an app that hosts a site it does not control (a YouTube player that
 hides Shorts, say):
 
-- `INativeWebView.AddScriptAtDocumentStart(js)` registers a script that runs at the start of every
+- `INativeWebView.AddScriptAtDocumentStartAsync(js)` registers a script that runs at the start of every
   document from then on, top-level and frames, before the page's own scripts: WebView2's
   `AddScriptToExecuteOnDocumentCreated`, WebKitGTK's document-start user script. It may be called before
-  `AttachToWindow`; scripts registered then reach the first navigation. A class implementing
-  `INativeWebView` outside this package must add the method.
+  `AttachToWindow`; scripts registered then reach the first navigation. The task completes once the
+  browser has the script. WebView2 registers asynchronously, and a navigation sent before it confirms
+  may miss the script, so on Windows a navigation requested after the call is held until it does: a
+  caller need not await before navigating. A class implementing `INativeWebView` outside this package
+  must add the method.
 - `NativeWebView.Create(NativeWebViewOptions)` with `UserDataFolder`, where the browser keeps its
   profile. On Windows it is WebView2's user data folder (the default, beside the executable, already
   persisted). On Linux cookies go to `cookies.sqlite` there; WebKitGTK's default kept them only for the

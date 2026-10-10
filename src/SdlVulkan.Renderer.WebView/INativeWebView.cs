@@ -40,8 +40,13 @@ public interface INativeWebView : IDisposable
     /// Use it to restyle or patch a site you do not control: inject CSS, hook <c>history</c>, observe
     /// the DOM. May be called before <see cref="AttachToWindow"/>; scripts registered then apply from the
     /// first navigation. A script registered later does not reach the document already loaded, only the
-    /// next one (pair it with <see cref="ExecuteScriptAsync"/> to cover the current page too).</summary>
-    void AddScriptAtDocumentStart(string javaScript);
+    /// next one (pair it with <see cref="ExecuteScriptAsync"/> to cover the current page too).
+    /// <para>The task completes once the browser has the script, and faults if it refused it. There is
+    /// no need to await it before navigating: a navigation requested after this call waits for the
+    /// registration on its own (WebView2 registers asynchronously; WebKitGTK at once). Registered
+    /// before <see cref="AttachToWindow"/>, the task completes only after attaching, so do not await
+    /// it ahead of the attach. Disposing the view before it attaches cancels it.</para></summary>
+    Task AddScriptAtDocumentStartAsync(string javaScript);
 
     /// <summary>Evaluates <paramref name="javaScript"/> in the page and returns its JSON result.</summary>
     Task<string> ExecuteScriptAsync(string javaScript);
@@ -92,7 +97,8 @@ public sealed record NativeWebViewOptions
     /// persists.</item>
     /// <item>Linux: cookies go to <c>cookies.sqlite</c> in this folder. Null keeps WebKitGTK's default,
     /// where cookies live only as long as the process. The cookie store belongs to WebKit's default
-    /// context, so it is process-wide: the first view created with a folder sets it for every view.</item>
+    /// context, so it is process-wide: each view created with a folder points it there, for every
+    /// view, and the last one wins.</item>
     /// </list></summary>
     public string? UserDataFolder { get; init; }
 }

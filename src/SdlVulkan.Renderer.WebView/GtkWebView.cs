@@ -117,7 +117,7 @@ internal sealed class GtkWebView(NativeWebViewOptions options) : INativeWebView
     private RectInt? _bounds;
     private string? _pendingUrl, _pendingHtml;
     // Guarded by itself: appended from the caller's thread, drained once on the GTK thread at init.
-    private readonly List<string> _pendingDocumentStartScripts = [];
+    private readonly List<(string Script, TaskCompletionSource Done)> _pendingDocumentStartScripts = [];
 
     public event Action<string>? TitleChanged;
     public event Action<string>? NavigationCompleted;
@@ -192,10 +192,15 @@ internal sealed class GtkWebView(NativeWebViewOptions options) : INativeWebView
             AddUserScript(ucm, DiagnosticsScript);
             lock (_pendingDocumentStartScripts)
             {
-                foreach (var script in _pendingDocumentStartScripts)
+                // Synchronous here, and ahead of the first navigation (AttachToWindow applies it
+                // only after init), so nothing has to hold the navigation the way Win32WebView does.
+                foreach (var (script, done) in _pendingDocumentStartScripts)
+                {
                     AddUserScript(ucm, script);
+                    done.TrySetResult();
+                }
                 _pendingDocumentStartScripts.Clear();
-                _ucm = ucm; // published under the lock, so a later AddScriptAtDocumentStart sees it
+                _ucm = ucm; // published under the lock, so a later AddScriptAtDocumentStartAsync sees it
             }
 
             var (x, y, w, h) = ToXywh(_bounds!.Value);
@@ -224,7 +229,24 @@ internal sealed class GtkWebView(NativeWebViewOptions options) : INativeWebView
         catch (Exception ex)
         {
             _initError = ex;
+            FailPendingDocumentStartScripts(ex);
             _initEvent.Set();
+        }
+    }
+
+    // Scripts registered before an init that failed (or a Dispose before attaching) never reach a view.
+    private void FailPendingDocumentStartScripts(Exception? error)
+    {
+        lock (_pendingDocumentStartScripts)
+        {
+            foreach (var (_, done) in _pendingDocumentStartScripts)
+            {
+                if (error is null)
+                    done.TrySetCanceled();
+                else
+                    done.TrySetException(error);
+            }
+            _pendingDocumentStartScripts.Clear();
         }
     }
 
@@ -239,18 +261,27 @@ internal sealed class GtkWebView(NativeWebViewOptions options) : INativeWebView
             Path.Combine(Path.GetFullPath(folder), "cookies.sqlite"), WebkitCookiePersistentStorageSqlite);
     }
 
-    public void AddScriptAtDocumentStart(string javaScript)
+    public Task AddScriptAtDocumentStartAsync(string javaScript)
     {
         ArgumentNullException.ThrowIfNull(javaScript);
+        // Completed on the GTK thread; RunContinuationsAsynchronously keeps an awaiting caller's
+        // continuation off it.
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_pendingDocumentStartScripts)
         {
             if (_ucm == nint.Zero)
             {
-                _pendingDocumentStartScripts.Add(javaScript);
-                return;
+                _pendingDocumentStartScripts.Add((javaScript, done));
+                return done.Task;
             }
         }
-        RunOnGtk(() => AddUserScript(_ucm, javaScript));
+        // Queued ahead of any navigation requested after this call (RunOnGtk is FIFO), so it reaches it.
+        RunOnGtk(() =>
+        {
+            AddUserScript(_ucm, javaScript);
+            done.TrySetResult();
+        });
+        return done.Task;
     }
 
     private static void AddUserScript(nint ucm, string source)
@@ -366,6 +397,7 @@ internal sealed class GtkWebView(NativeWebViewOptions options) : INativeWebView
             return;
         _disposed = true;
         _ready = false;
+        FailPendingDocumentStartScripts(null);
 
         if (_gtkThread is { IsAlive: true })
         {
