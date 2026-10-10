@@ -7,7 +7,7 @@ namespace SdlVulkan.Renderer.Tests;
 
 /// <summary>
 /// Guards the batched <see cref="VkRenderer.DrawPolyline"/> / <see cref="VkRenderer.DrawPolylineDashed"/>
-/// overrides. They collapse the base class's one-<c>DrawLine</c>-per-segment loop (N FlatPipeline draws)
+/// overrides. They collapse the base class's one-<c>DrawLine</c>-per-segment loop (N draws)
 /// into a single draw, but each segment's rotated-quad geometry is unchanged — so the offscreen
 /// framebuffer must match the per-segment path byte-for-byte. Skips when no Vulkan ICD is available
 /// (mirrors <see cref="MtsdfTextRenderTests"/>); runs on lavapipe in CI.

@@ -39,7 +39,7 @@ public sealed unsafe partial class VulkanContext
     /// (<paramref name="width"/>, <paramref name="height"/>) at the device's sample count.
     /// </summary>
     internal void CreateDepthAttachment(uint width, uint height,
-        out VkImage image, out VkDeviceMemory memory, out VkImageView view)
+        out VkImage image, out VkDeviceMemory memory, out VkImageView view, VkSampleCountFlags? samples = null)
     {
         VkImageCreateInfo imgCI = new()
         {
@@ -48,7 +48,7 @@ public sealed unsafe partial class VulkanContext
             extent = new VkExtent3D(width, height, 1),
             mipLevels = 1,
             arrayLayers = 1,
-            samples = MsaaSamples,
+            samples = samples ?? MsaaSamples,
             tiling = VkImageTiling.Optimal,
             // Never sampled and never stored, so TransientAttachment lets a tiler keep it in tile memory
             // and never write it out at all. Paired with the pass's storeOp DontCare — the flag alone
@@ -105,9 +105,11 @@ public sealed unsafe partial class VulkanContext
     /// ignored otherwise.
     /// </summary>
     internal VkFramebuffer CreateCompatibleFramebuffer(VkRenderPass renderPass,
-        VkImageView colorView, VkImageView depthView, VkImageView resolveView, uint width, uint height)
+        VkImageView colorView, VkImageView depthView, VkImageView resolveView, uint width, uint height,
+        bool? multisampled = null)
     {
-        var msaa = MsaaSamples != VkSampleCountFlags.Count1;
+        // A single-sample pass beside a multisampled device's own has two attachments, not three.
+        var msaa = multisampled ?? MsaaSamples != VkSampleCountFlags.Count1;
         Span<VkImageView> attachments = stackalloc VkImageView[3];
         attachments[0] = colorView;
         attachments[1] = depthView;

@@ -127,6 +127,7 @@ public sealed unsafe partial class VulkanContext
             depthView: _depthImageView,
             resolveView: _offscreenImageView,
             width, height);
+        CreateSingleSampleOffscreenTarget(width, height);
     }
 
     /// <summary>
@@ -219,19 +220,22 @@ public sealed unsafe partial class VulkanContext
     /// Binds the offscreen framebuffer and starts the render pass with a clear.
     /// Mirrors <see cref="BeginRenderPass"/> for the swapchain path.
     /// </summary>
-    public void BeginOffscreenRenderPass(VkCommandBuffer cmd, float clearR, float clearG, float clearB, float clearA)
+    public void BeginOffscreenRenderPass(VkCommandBuffer cmd, float clearR, float clearG, float clearB, float clearA,
+        bool singleSample = false)
     {
         if (!_isOffscreen) throw new InvalidOperationException("BeginOffscreenRenderPass requires CreateOffscreen");
 
         Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
         FillClearValues(clears, clearR, clearG, clearB, clearA);
+        var single = singleSample && SingleSampleMainPassAvailable;
+        LastFrameSingleSampled = single;
 
         fixed (VkClearValue* pClears = clears)
         {
             VkRenderPassBeginInfo rpBI = new()
             {
-                renderPass = RenderPass,
-                framebuffer = _offscreenFramebuffer,
+                renderPass = single ? SingleSampleRenderPass : RenderPass,
+                framebuffer = single ? _offscreenSingleSampleFramebuffer : _offscreenFramebuffer,
                 renderArea = new VkRect2D(0, 0, _offscreenWidth, _offscreenHeight),
                 clearValueCount = ClearValueCount,
                 pClearValues = pClears
@@ -452,6 +456,7 @@ public sealed unsafe partial class VulkanContext
 
     private void CleanupOffscreenTarget()
     {
+        CleanupSingleSampleOffscreenTarget();
         if (_offscreenFramebuffer != VkFramebuffer.Null)
             DeviceApi.vkDestroyFramebuffer(_offscreenFramebuffer);
         if (_offscreenImageView != VkImageView.Null)

@@ -71,14 +71,19 @@ public sealed unsafe partial class VulkanContext
     /// geometry the app submits is in surface coordinates, so shrinking the viewport would squash the
     /// whole frame into the region instead of cropping it to it.
     /// </remarks>
-    public void BeginFrameRenderPass(VkCommandBuffer cmd, float clearR, float clearG, float clearB, float clearA)
+    public void BeginFrameRenderPass(VkCommandBuffer cmd, float clearR, float clearG, float clearB, float clearA,
+        bool singleSample = false)
     {
         var idx = (int)_currentImageIndex;
+        var single = singleSample && SingleSampleMainPassAvailable;
+        // A single-sampled frame loads the swapchain image itself, so it can keep what is there even on a
+        // device whose multisampled pass cannot (see VulkanContext.SingleSample.cs).
+        var loadPass = single ? _singleSampleLoadRenderPass : _loadRenderPass;
 
         // TryTake CLEARS as it reads, so it must be asked exactly once per frame whichever path is
         // taken -- the image is about to be painted either way.
         var partial = _damage.TryTake(idx, out var dx, out var dy, out var dw, out var dh)
-            && _loadRenderPass != VkRenderPass.Null;
+            && loadPass != VkRenderPass.Null;
         // ...unless the frame never reaches the GPU, in which case nothing was painted and what the image
         // owed is gone with the take: repaint it in full on its next turn (OnFrameDropped). A cached
         // delegate over a field, because this runs every frame and a closure per frame is garbage per
@@ -89,7 +94,7 @@ public sealed unsafe partial class VulkanContext
 
         if (!partial)
         {
-            BeginRenderPass(cmd, clearR, clearG, clearB, clearA);
+            BeginRenderPass(cmd, clearR, clearG, clearB, clearA, single);
             LastFrameWasPartial = false;
             LastFrameRegion = new VkRect2D(0, 0, SwapchainWidth, SwapchainHeight);
             return;
@@ -106,8 +111,8 @@ public sealed unsafe partial class VulkanContext
         {
             VkRenderPassBeginInfo rpBI = new()
             {
-                renderPass = _loadRenderPass,
-                framebuffer = _framebuffers[idx],
+                renderPass = loadPass,
+                framebuffer = single ? _singleSampleFramebuffers[idx] : _framebuffers[idx],
                 renderArea = region,
                 clearValueCount = ClearValueCount,
                 pClearValues = pClears
@@ -115,6 +120,7 @@ public sealed unsafe partial class VulkanContext
             DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
         }
         _renderPassBegun = true;
+        LastFrameSingleSampled = single;
 
         VkViewport viewport = new(0, 0, SwapchainWidth, SwapchainHeight, 0, 1);
         DeviceApi.vkCmdSetViewport(cmd, 0, viewport);

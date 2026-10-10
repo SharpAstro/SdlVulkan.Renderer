@@ -7,6 +7,39 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.60
+
+**A frame's main pass can run single-sampled on a device that multisamples.** `VkRenderer.SingleSampleMainPass`
+is read when the next main pass begins, so a consumer decides it per frame, as late as its `OnPreRenderPass`
+hook, once it knows what the frame draws. It is for a frame that only blits a cached layer (antialiased
+when it was drawn, in its own multisampled pass, which is untouched) and draws chrome over it. Such a frame
+gained nothing from multisampling the whole window, and on a tiling GPU paid for it: in a PDF viewer on an
+Adreno X1-85 at 2880x1814 an idle frame was 3.11 ms of GPU at 4x and is 2.24 ms single-sampled (three runs
+alternated in one window).
+
+- **What draws the same either way:** text, rounded boxes, ellipses, textured quads, axis-aligned
+  rectangles, and now lines (below). In that viewer the whole window differed between the two in 67
+  pixels, all of them the pan icon's triangle heads, which DIR.Lib 11.10 draws as pixel strips instead.
+- **What does not:** geometry that takes its edges from MSAA (`DrawTriangles`, persistent fills and
+  strokes, meshes) aliases in such a frame; that is why it is the consumer's call.
+- **What it costs:** a single-sample render pass on the device (`VulkanDevice.SingleSampleRenderPass`),
+  single-sample framebuffers over the images the multisampled pass already resolves into, a single-sample
+  depth image, and a second pipeline set per renderer, about 50 ms of driver compile, built off the render
+  thread (`SingleSampleMainPassReady`). `VulkanContext.LastFrameSingleSampled` says what a frame did.
+- **What it gives back:** the damage path's partial repaint, which a multisampled pass cannot do (its
+  transient image cannot be reloaded), now works for single-sampled frames.
+
+**Lines are antialiased in the shader.** `DrawLine`, `DrawPolyline` and `DrawPolylineDashed` drew flat
+triangles, smooth only where MSAA made them so. They now draw a box per segment through the rounded-box
+pipeline with no rounding, whose coverage is a distance in the box's own frame, so a line comes out the same
+at any sample count. A batched polyline still draws as one draw call, and still matches its segments drawn
+one by one.
+
+`SingleSampleMainPassTests` holds a frame of chrome to the same pixels single-sampled as at 4x (it fails
+with the old lines), a layer drawn at 4x to the same blit either way, triangles to aliasing when
+single-sampled, and frames that switch sample count, with a cached layer and a resize between them, to
+silence under the validation layer.
+
 ## 7.59
 
 **A frame that outgrows the vertex ring keeps its draws.** The per-frame ring grows on demand, but it
