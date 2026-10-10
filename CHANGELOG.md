@@ -7,6 +7,20 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.58
+
+**A window can tell, and show, that it is taking input; and stay unmaximized.** Additions to
+`SdlVulkanWindow`, for an app that draws its own chrome (a borderless, always-on-top player, say), which
+until now reached past the renderer to SDL and Win32 for them:
+
+- `IsActive`: the window is the active one, the one keys go to. On Windows it is the foreground window,
+  so it holds while an embedded web view has the keyboard focus; elsewhere SDL's input focus. Read it
+  from `OnLoopIteration`.
+- `SetMaximizable(bool)`: on Windows, the maximize box, which also decides whether a double-click on a
+  hit-test draggable area maximizes the window. A no-op elsewhere.
+- `SetMinimumSize(w, h)` and `TryGetUsableDisplayBounds(...)`: SDL's minimum size, and the display's
+  area less its taskbar, for a window that resizes itself and must stay on screen.
+
 ## 7.57
 
 **A web view can patch the pages it loads, and keep its sign-in.** Two additions to
