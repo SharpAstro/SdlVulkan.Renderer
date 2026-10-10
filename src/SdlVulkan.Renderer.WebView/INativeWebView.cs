@@ -51,6 +51,14 @@ public interface INativeWebView : IDisposable
     /// <summary>Evaluates <paramref name="javaScript"/> in the page and returns its JSON result.</summary>
     Task<string> ExecuteScriptAsync(string javaScript);
 
+    /// <summary>Calls a Chrome DevTools Protocol <paramref name="method"/> (for example
+    /// <c>Input.dispatchMouseEvent</c>) with <paramref name="parametersAsJson"/>, a JSON object, and
+    /// returns its JSON result. The way to give a page input it treats as the user's own: a click from
+    /// a page script is untrusted (<c>event.isTrusted</c> is false) and some sites ignore it, while one
+    /// sent through the protocol is trusted. WebView2 only: WebKitGTK has no DevTools protocol, so the
+    /// task faults with <see cref="PlatformNotSupportedException"/> there.</summary>
+    Task<string> CallDevToolsProtocolMethodAsync(string method, string parametersAsJson);
+
     /// <summary>Posts <paramref name="json"/> to the page (.NET → JS). The page receives it on
     /// <c>window.chrome.webview</c>'s <c>message</c> event as <c>event.data</c>. Must be valid JSON.
     /// Pairs with <see cref="MessageReceived"/> for a two-way host↔page channel.</summary>

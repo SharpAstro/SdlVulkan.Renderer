@@ -379,6 +379,10 @@ internal sealed class GtkWebView(NativeWebViewOptions options) : INativeWebView
         return tcs.Task;
     }
 
+    public Task<string> CallDevToolsProtocolMethodAsync(string method, string parametersAsJson)
+        => Task.FromException<string>(new PlatformNotSupportedException(
+            "WebKitGTK has no Chrome DevTools Protocol; CallDevToolsProtocolMethodAsync is WebView2 only."));
+
     public void PostMessage(string json)
     {
         ArgumentNullException.ThrowIfNull(json);

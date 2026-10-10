@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using DIR.Lib;
 using SdlVulkan.Renderer;
 using SdlVulkan.Renderer.WebView;
@@ -91,7 +93,25 @@ internal static partial class Program
         </script>
         """;
 
-    private enum Scenario { Navigate, Messaging, AutoSize, DocStart }
+    // `cdp`/`assert-cdp` mode (WebView2): the page reports where its button is and the host clicks it
+    // through the DevTools protocol. The click must reach the page TRUSTED (event.isTrusted), which a
+    // page script's own click() never is. WebKitGTK has no such protocol, so there the scenario SKIPs.
+    private const string CdpTestHtml = """
+        <!doctype html><meta charset="utf-8"><title>cdp-test</title>
+        <button id="target" style="position:absolute;left:100px;top:100px;width:200px;height:80px">click me</button>
+        <script>
+          var b = document.getElementById('target');
+          b.addEventListener('click', function (e) {
+            window.chrome.webview.postMessage({ clicked: true, trusted: e.isTrusted });
+          });
+          window.addEventListener('load', function () {
+            var r = b.getBoundingClientRect();
+            window.chrome.webview.postMessage({ button: { x: r.x + r.width / 2, y: r.y + r.height / 2 } });
+          });
+        </script>
+        """;
+
+    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp }
 
     private static void Log(string line)
     {
@@ -120,16 +140,19 @@ internal static partial class Program
         var arg0 = args.Length > 0 ? args[0] : "https://example.com";
         // Modes: `assert` = messaging self-test, exit 0/1 (CI). `assert-autosize` = content-sizer
         // self-test, exit 0/1 (CI). `assert-docstart` = document-start script self-test, exit 0/1 (CI).
-        // `messaging`/`autosize`/`docstart` = the same self-tests but interactive.
+        // `assert-cdp` = a DevTools-protocol click arrives trusted, exit 0/1 (WebView2; SKIPs on WebKitGTK).
+        // `messaging`/`autosize`/`docstart`/`cdp` = the same self-tests but interactive.
         // Anything else = navigate to that URL.
         var (scenario, assertMode) = arg0.ToLowerInvariant() switch
         {
             "assert" => (Scenario.Messaging, true),
             "assert-autosize" => (Scenario.AutoSize, true),
             "assert-docstart" => (Scenario.DocStart, true),
+            "assert-cdp" => (Scenario.Cdp, true),
             "messaging" => (Scenario.Messaging, false),
             "autosize" => (Scenario.AutoSize, false),
             "docstart" => (Scenario.DocStart, false),
+            "cdp" => (Scenario.Cdp, false),
             _ => (Scenario.Navigate, false),
         };
         Log($"[smoke] process arch = {RuntimeInformation.ProcessArchitecture}, scenario = {scenario}");
@@ -196,6 +219,9 @@ internal static partial class Program
             case Scenario.DocStart:
                 failReason = WireDocStart(webView, assertMode, Pass);
                 break;
+            case Scenario.Cdp:
+                failReason = WireCdp(webView, assertMode, Pass);
+                break;
             case Scenario.Navigate:
                 WireNavigateProbe(webView);
                 break;
@@ -222,6 +248,12 @@ internal static partial class Program
                     ? "[smoke] assert mode: document-start script self-test (expecting the script ahead of the page, and its CSS applied)."
                     : "[smoke] document-start script self-test (NavigateToString) — close the window to exit.");
                 webView.NavigateToString(DocStartTestHtml);
+                break;
+            case Scenario.Cdp:
+                Log(assertMode
+                    ? "[smoke] assert mode: DevTools-protocol click self-test (expecting a trusted click on the page's button)."
+                    : "[smoke] DevTools-protocol click self-test (NavigateToString) — close the window to exit.");
+                webView.NavigateToString(CdpTestHtml);
                 break;
             case Scenario.Navigate:
                 webView.Navigate(navigateUrl);
@@ -306,6 +338,52 @@ internal static partial class Program
     // Two-way messaging: log page→host messages, bounce a reply (host→page), and prove JS execution on
     // each completed navigation. In assert mode, PASS once page->host, host->page, and a navigation are
     // all observed. Returns the failure-reason provider used when the signals don't arrive in time.
+    // DevTools-protocol click: the page says where its button is, the host clicks it there. In assert mode,
+    // PASS once the page reports a TRUSTED click; SKIP where the backend has no protocol (WebKitGTK).
+    private static Func<string> WireCdp(INativeWebView webView, bool assertMode, Action pass)
+    {
+        string? report = null;
+        webView.MessageReceived += json =>
+        {
+            Log($"[smoke] page -> host: {json}");
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("button", out var button))
+            {
+                ClickAsync(webView, button.GetProperty("x").GetDouble(), button.GetProperty("y").GetDouble())
+                    .ContinueWith(t =>
+                    {
+                        var error = t.Exception?.GetBaseException();
+                        if (error is PlatformNotSupportedException && assertMode)
+                        {
+                            Log($"SMOKE: SKIP ({error.Message})");
+                            FastExit(0);
+                        }
+                        else if (error is not null)
+                            report = $"the protocol click failed: {error.Message}";
+                    }, TaskScheduler.Default);
+            }
+            else if (root.TryGetProperty("clicked", out _))
+            {
+                report = $"page reported {json}";
+                if (assertMode && root.TryGetProperty("trusted", out var trusted) && trusted.GetBoolean())
+                    pass();
+            }
+        };
+        return () => report ?? "the page never reported a click";
+    }
+
+    // A left click at (x, y) in the page's CSS pixels, as the DevTools protocol's input events. All three
+    // calls are issued here, on the UI thread, which WebView2 requires; they reach the page in order.
+    private static Task ClickAsync(INativeWebView webView, double x, double y)
+    {
+        var at = $"\"x\":{x.ToString(CultureInfo.InvariantCulture)},\"y\":{y.ToString(CultureInfo.InvariantCulture)}";
+        return Task.WhenAll(
+            webView.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", $"{{\"type\":\"mouseMoved\",{at}}}"),
+            webView.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", $"{{\"type\":\"mousePressed\",{at},\"button\":\"left\",\"clickCount\":1}}"),
+            webView.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", $"{{\"type\":\"mouseReleased\",{at},\"button\":\"left\",\"clickCount\":1}}"));
+    }
+
     private static Func<string> WireMessaging(INativeWebView webView, bool assertMode, Action pass)
     {
         var gotPageMessage = false;

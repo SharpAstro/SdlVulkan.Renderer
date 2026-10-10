@@ -21,6 +21,13 @@ until now reached past the renderer to SDL and Win32 for them:
 - `SetMinimumSize(w, h)` and `TryGetUsableDisplayBounds(...)`: SDL's minimum size, and the display's
   area less its taskbar, for a window that resizes itself and must stay on screen.
 
+**And a web view can give its page input the page trusts.** `INativeWebView.CallDevToolsProtocolMethodAsync
+(method, json)` calls a Chrome DevTools Protocol method: `Input.dispatchMouseEvent` clicks with
+`event.isTrusted` true, which a page script's own `click()` never is, and which some sites (YouTube's ad
+Skip button) insist on. WebView2 only; on WebKitGTK the task faults with `PlatformNotSupportedException`.
+A class implementing `INativeWebView` outside this package must add the method.
+`tools/WebViewSmoke assert-cdp` checks the click arrives trusted (Windows; SKIPs on WebKitGTK).
+
 ## 7.57
 
 **A web view can patch the pages it loads, and keep its sign-in.** Two additions to
