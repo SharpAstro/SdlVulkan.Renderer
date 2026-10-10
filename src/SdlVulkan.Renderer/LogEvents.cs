@@ -43,6 +43,10 @@ internal static partial class LogEvents
     [LoggerMessage(107, LogLevel.Warning, "[SdlEventLoop] GPU fence stuck for {StuckMs}ms (window {WindowId}); escalating to full recovery.")]
     public static partial void GpuFenceStuckEscalating(this ILogger logger, long stuckMs, uint windowId);
 
+    [LoggerMessage(119, LogLevel.Information, "[SdlEventLoop] frame {Frame} (window {WindowId}): {FrameMs:F2}ms = begin {BeginMs:F2} + hooks {HooksMs:F2} + render {RenderMs:F2} + end {EndMs:F2}; GPU frame {GpuFrame}: {GpuMs:F2}ms ({GpuSections})")]
+    public static partial void FrameTiming(this ILogger logger, uint windowId, long frame, double frameMs, double beginMs,
+        double hooksMs, double renderMs, double endMs, long gpuFrame, double gpuMs, string gpuSections);
+
     [LoggerMessage(108, LogLevel.Error, "[SdlEventLoop] wedge breadcrumb (window {WindowId}): {AtlasBreadcrumb}; {ChurnBreadcrumb}; {Ledger}; {CleanFrameAge}")]
     public static partial void WedgeBreadcrumb(this ILogger logger, uint windowId, string atlasBreadcrumb, string churnBreadcrumb, string ledger, string cleanFrameAge);
 

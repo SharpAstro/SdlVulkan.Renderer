@@ -76,6 +76,13 @@ public sealed unsafe partial class VulkanContext
     public bool CachedLayerTargetReady => _layerTargetReady;
 
     /// <summary>
+    /// The GPU section (<see cref="LastGpuSections"/>) every cached-layer pass is recorded under. Its
+    /// timestamps sit outside the pass, so unlike a section inside the main pass it is a measurement on a
+    /// tiling GPU as well. Opening it closes any section the caller still had open, sections not nesting.
+    /// </summary>
+    public const string CachedLayerGpuSection = "cached layer";
+
+    /// <summary>
     /// The slot the frame being recorded must render into and sample from. It is the frame-in-flight
     /// index, so consecutive frames alternate and no frame writes a target another may still be reading.
     /// </summary>
@@ -256,6 +263,10 @@ public sealed unsafe partial class VulkanContext
         if (!_layerTargetReady || _inLayerPass) return false;
         if (w == 0 || h == 0 || w > _layerTargetW || h > _layerTargetH) return false;
 
+        // The pass is timed as its own GPU section, opened before the pass begins and closed after it
+        // ends, so on a tiling GPU too it brackets work that has really run (see VulkanContext.GpuTiming.cs).
+        BeginGpuSection(CachedLayerGpuSection);
+
         Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
         FillClearValues(clears, clearColor.Red / 255f, clearColor.Green / 255f,
             clearColor.Blue / 255f, clearColor.Alpha / 255f);
@@ -290,6 +301,7 @@ public sealed unsafe partial class VulkanContext
     {
         if (!_inLayerPass) return;
         DeviceApi.vkCmdEndRenderPass(cmd);
+        EndGpuSection();
         _inLayerPass = false;
 
         // Provisional until the frame reaches the queue (OnFrameDropped). A slot never rendered is still

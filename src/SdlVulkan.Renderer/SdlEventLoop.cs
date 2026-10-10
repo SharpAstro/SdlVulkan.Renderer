@@ -66,6 +66,20 @@ public sealed class SdlEventLoop
     private const int DeadDeviceRecoveryLimit = 8;
     private const long DeadDeviceWindowMs = 5000;
 
+    // SDLVK_FRAME_LOG=1: one line for every frame drawn, in every build, which is what measures a frame
+    // rather than catching a spike (frame.slow below fires only on one). Read once; off, it costs a
+    // branch a frame.
+    private static readonly bool FrameLog = Environment.GetEnvironmentVariable("SDLVK_FRAME_LOG") is "1" or "true";
+
+    private static void LogFrame(SdlWindowView v, double frameMs, double beginMs, double hooksMs, double renderMs,
+        double endMs)
+    {
+        var ctx = v.Renderer.Context;
+        var gpuMs = ctx.LastGpuFrameMs;
+        SdlVulkanLog.Logger.FrameTiming(v.Window.WindowId, ctx.FramesBegun, frameMs, beginMs, hooksMs, renderMs, endMs,
+            ctx.LastGpuFrameOrdinal, double.IsFinite(gpuMs) ? gpuMs : 0, ctx.DescribeLastGpuSections());
+    }
+
 #if DEBUG
     // Slow-frame diagnostics: a rolling average of real frame time (BeginFrame->EndFrame) plus a
     // threshold, so ANY stall (atlas evict/grow drain, heavy tessellation, a present hitch) logs one
@@ -463,9 +477,7 @@ public sealed class SdlEventLoop
 
         try
         {
-#if DEBUG
             var frameStart = Stopwatch.GetTimestamp();
-#endif
             if (!renderer.BeginFrame(v.BackgroundColor))
             {
                 v.Window.GetSizeInPixels(out var sw, out var sh);
@@ -478,34 +490,41 @@ public sealed class SdlEventLoop
                 return false;
             }
 
-#if DEBUG
             var beginDone = Stopwatch.GetTimestamp();
-#endif
             v.OnRender?.Invoke();
-#if DEBUG
             var renderDone = Stopwatch.GetTimestamp();
-#endif
 
             renderer.EndFrame();
 
+            // Whole-frame time, split so a slow frame is attributable at a glance: 'begin' is
+            // BeginFrame's own work (in-flight fence wait + acquire + atlas evict/grow drain) - a high
+            // value here means the GPU is the bottleneck (the fence from MaxFramesInFlight ago hadn't
+            // signaled yet), not the app. 'hooks' is the consumer's work inside BeginFrame
+            // (OnPreFlush + OnPreRenderPass: glyph pre-warm, uploads, a cached layer's draw), which
+            // used to be counted as 'begin' and read as the GPU. 'render' is the consumer's OnRender
+            // (app-side CPU work: tessellation, overlay math, text). 'end' is EndFrame (submit +
+            // present).
+            var frameDone = Stopwatch.GetTimestamp();
+            var frameMs = Stopwatch.GetElapsedTime(frameStart, frameDone).TotalMilliseconds;
+            var hooksMs = renderer.LastPreFlushMs + renderer.LastPreRenderPassMs;
+            if (FrameLog)
+                LogFrame(v, frameMs, Stopwatch.GetElapsedTime(frameStart, beginDone).TotalMilliseconds - hooksMs,
+                    hooksMs, Stopwatch.GetElapsedTime(beginDone, renderDone).TotalMilliseconds,
+                    Stopwatch.GetElapsedTime(renderDone, frameDone).TotalMilliseconds);
+
 #if DEBUG
-            // Whole-frame time, split into the three sections so a slow frame is attributable
-            // at a glance: 'begin' is BeginFrame (in-flight fence wait + acquire + atlas
-            // evict/grow drain) - a high value here means the GPU is the bottleneck (the fence
-            // from MaxFramesInFlight ago hadn't signaled yet), not the app. 'render' is the
-            // consumer's OnRender (app-side CPU work: tessellation, overlay math, text).
-            // 'end' is EndFrame (submit + present). Flag a frame that's over the floor AND a
-            // big spike over the rolling average, or any hard freeze.
-            var frameMs = Stopwatch.GetElapsedTime(frameStart).TotalMilliseconds;
+            // Flag a frame that's over the floor AND a big spike over the rolling average, or any hard
+            // freeze. A steady slow frame never spikes, so it never shows here: SDLVK_FRAME_LOG is
+            // what measures one.
             var prevAvg = _frameAvgMs;
             _frameAvgMs = prevAvg <= 0 ? frameMs : prevAvg * 0.9 + frameMs * 0.1;
             if (frameMs > SlowFrameFloorMs && (prevAvg <= 0 || frameMs > prevAvg * SlowFrameFactor || frameMs > HardStallMs))
             {
-                var beginMs = Stopwatch.GetElapsedTime(frameStart, beginDone).TotalMilliseconds;
+                var beginMs = Stopwatch.GetElapsedTime(frameStart, beginDone).TotalMilliseconds - hooksMs;
                 var renderMs = Stopwatch.GetElapsedTime(beginDone, renderDone).TotalMilliseconds;
-                var endMs = Stopwatch.GetElapsedTime(renderDone).TotalMilliseconds;
+                var endMs = Stopwatch.GetElapsedTime(renderDone, frameDone).TotalMilliseconds;
                 RenderDiag.Log("frame.slow",
-                    $"{frameMs:F0}ms (begin={beginMs:F0} render={renderMs:F0} end={endMs:F0}) avg={prevAvg:F0}ms");
+                    $"{frameMs:F0}ms (begin={beginMs:F0} hooks={hooksMs:F0} render={renderMs:F0} end={endMs:F0}) avg={prevAvg:F0}ms");
             }
 #endif
 

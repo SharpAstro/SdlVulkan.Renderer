@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using DIR.Lib;
@@ -264,11 +265,29 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public Action<VkCommandBuffer>? OnPreRenderPass { get; set; }
 
     /// <summary>
+    /// CPU time, in milliseconds, that the last <see cref="BeginFrame"/> or <see cref="BeginOffscreenFrame"/>
+    /// spent in <see cref="OnPreFlush"/>. Zero when that frame did not reach the hook.
+    /// </summary>
+    public double LastPreFlushMs { get; private set; }
+
+    /// <summary>
+    /// CPU time, in milliseconds, that the last <see cref="BeginFrame"/> or <see cref="BeginOffscreenFrame"/>
+    /// spent in <see cref="OnPreRenderPass"/>. Zero when that frame did not reach the hook.
+    /// <para>This is the consumer's own work, timed inside the renderer's: a consumer that renders a
+    /// cached layer does it here, and a consumer that times only its draw callback leaves that out of its
+    /// frame time, while a timer around <see cref="BeginFrame"/> reads it as the renderer waiting on the
+    /// GPU.</para>
+    /// </summary>
+    public double LastPreRenderPassMs { get; private set; }
+
+    /// <summary>
     /// Begins a new frame. Must be called before any draw calls.
     /// Returns false if the swapchain needs recreation (caller should resize and retry).
     /// </summary>
     public bool BeginFrame(DIR.Lib.RGBAColor32 clearColor)
     {
+        LastPreFlushMs = 0;
+        LastPreRenderPassMs = 0;
         ForgetCachedLayer();
         _currentCmd = Surface.BeginFrame(out var resized);
         if (resized || _currentCmd == VkCommandBuffer.Null)
@@ -289,13 +308,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _fontAtlas?.BeginFrame();
         _sdfFontAtlas?.BeginFrame();
         _sdfFontAtlasLarge?.BeginFrame();
-        OnPreFlush?.Invoke();
+        InvokePreFlush();
         _fontAtlas?.Flush(_currentCmd);
         _sdfFontAtlas?.Flush(_currentCmd);
         _sdfFontAtlasLarge?.Flush(_currentCmd);
 
         // Record pending texture uploads before the render pass (transfers can't happen inside)
-        OnPreRenderPass?.Invoke(_currentCmd);
+        InvokePreRenderPass();
 
         // Preserves the previous contents and confines painting to the accumulated damage when the
         // caller supplied any, otherwise clears and paints in full. Sets _damageRegion so every clip
@@ -313,6 +332,22 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void EndFrame()
     {
         Surface.EndFrame(_currentCmd);
+    }
+
+    private void InvokePreFlush()
+    {
+        if (OnPreFlush is not { } hook) return;
+        var start = Stopwatch.GetTimestamp();
+        hook();
+        LastPreFlushMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+    }
+
+    private void InvokePreRenderPass()
+    {
+        if (OnPreRenderPass is not { } hook) return;
+        var start = Stopwatch.GetTimestamp();
+        hook(_currentCmd);
+        LastPreRenderPassMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
     }
 
     // ---- Live-device thumbnail capture (see VulkanContext.ThumbnailCapture.cs) ----
@@ -654,6 +689,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public bool BeginOffscreenFrame(DIR.Lib.RGBAColor32 clearColor)
     {
+        LastPreFlushMs = 0;
+        LastPreRenderPassMs = 0;
         ForgetCachedLayer();
         _currentCmd = Surface.BeginOffscreenFrame();
         if (_currentCmd == VkCommandBuffer.Null) return false;
@@ -663,12 +700,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _fontAtlas?.BeginFrame();
         _sdfFontAtlas?.BeginFrame();
         _sdfFontAtlasLarge?.BeginFrame();
-        OnPreFlush?.Invoke();
+        InvokePreFlush();
         _fontAtlas?.Flush(_currentCmd);
         _sdfFontAtlas?.Flush(_currentCmd);
         _sdfFontAtlasLarge?.Flush(_currentCmd);
 
-        OnPreRenderPass?.Invoke(_currentCmd);
+        InvokePreRenderPass();
 
         Surface.BeginOffscreenRenderPass(_currentCmd,
             clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f);

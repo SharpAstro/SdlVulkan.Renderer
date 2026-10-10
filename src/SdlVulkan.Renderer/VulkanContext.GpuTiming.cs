@@ -22,7 +22,9 @@ public readonly record struct GpuSectionTime(string Name, double Milliseconds);
 // orders correctly. Section timestamps sit INSIDE the render pass, where a tiling GPU (the Adreno, any
 // Mali or PowerVR) may bin the whole pass and report section boundaries that do not correspond to when
 // that work ran. On an immediate-mode desktop GPU they are accurate. Read them as attribution on a
-// desktop and as a hint on a tiler, never as a measurement there.
+// desktop and as a hint on a tiler, never as a measurement there. The exception is a section recorded
+// between passes, as every cached-layer pass is (CachedLayerGpuSection): its timestamps bracket a whole
+// pass, which a tiler orders as it does the frame's, so that one is a measurement everywhere.
 //
 // Cost. Two timestamps per frame plus two per section, one reset, and one non-blocking readback of a
 // slot whose fence has already been waited, so the results are there and nothing stalls. The strings
@@ -217,13 +219,14 @@ public sealed unsafe partial class VulkanContext
         if (frameMs > SlowGpuFrameBudgetMs)
         {
             SlowGpuFrames++;
-            SdlVulkanLog.Logger.GpuFrameSlow(LastGpuFrameOrdinal, frameMs, SlowGpuFrameBudgetMs, DescribeLastSections());
+            SdlVulkanLog.Logger.GpuFrameSlow(LastGpuFrameOrdinal, frameMs, SlowGpuFrameBudgetMs, DescribeLastGpuSections());
         }
     }
 
     private double ToMs(ulong begin, ulong end) => ((end - begin) & _timestampMask) * _timestampPeriodNs / 1e6;
 
-    private string DescribeLastSections()
+    // Allocates; for a log line, never for a frame that is not being logged.
+    internal string DescribeLastGpuSections()
     {
         if (_lastSectionCount == 0)
             return "none recorded";

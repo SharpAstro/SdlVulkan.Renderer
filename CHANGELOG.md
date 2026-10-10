@@ -22,6 +22,16 @@ the part in the old buffer when the ring moves under it. `VulkanContext.VertexRi
 the moves. `VertexRingGrowthTests` holds a frame that grew, and a bitmap glyph batch that straddled the
 move, to the pixels of a frame that fitted; without the batch's split it draws the wrong glyphs.
 
+**Frames are timed whole.** `VkRenderer.LastPreFlushMs` and `LastPreRenderPassMs` are the CPU time the
+last `BeginFrame` spent in the consumer's two hooks. A consumer that draws a cached layer does it in
+`OnPreRenderPass`, so a frame timed around its draw callback left the layer out, and `frame.slow`
+reported it as `begin`, which reads as the GPU. It now reports `hooks` separately. `SDLVK_FRAME_LOG=1`
+logs one line for every frame drawn, in every build: begin, hooks, render and end on the CPU, and the
+GPU time and sections of the latest frame to complete. `frame.slow` catches spikes only, so a steady
+25 ms frame never showed there. Every cached-layer pass is now its own GPU section
+(`VulkanContext.CachedLayerGpuSection`), recorded outside the pass, so it is a measurement on a tiling
+GPU too. Opening it closes any section the caller still had open.
+
 ## 7.58
 
 **A window can tell, and show, that it is taking input; and stay unmaximized.** Additions to
