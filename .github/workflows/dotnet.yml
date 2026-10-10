@@ -123,10 +123,11 @@ jobs:
     - name: Test
       run: dotnet test src/SdlVulkan.Renderer.Tests -c $BUILD_CONF --no-build --logger "console;verbosity=detailed"
 
-  # Headless functional smoke for the Linux WebView backend (GtkWebView / WebKitGTK). Runs two
+  # Headless functional smoke for the Linux WebView backend (GtkWebView / WebKitGTK). Runs three
   # network-free self-tests (tools/WebViewSmoke) inside a real SDL X11 window under Xvfb: `assert`
-  # (two-way messaging: page->host + host->page + navigation + JS execution) and `assert-autosize`
-  # (the WebViewContentSizer content->host channel). Each exits 0/1 deterministically (it _exit()s
+  # (two-way messaging: page->host + host->page + navigation + JS execution), `assert-autosize`
+  # (the WebViewContentSizer content->host channel) and `assert-docstart` (document-start scripts).
+  # Each exits 0/1 deterministically (it _exit()s
   # past WebKitGTK's atexit teardown, which otherwise aborts with 134). The harness SKIPs (exit 0)
   # when the display / WebKitGTK / Vulkan stack is
   # unavailable, mirroring BlendOpRegressionTests' Assert.Skip-on-no-ICD. Non-gating for now (not
@@ -180,6 +181,13 @@ jobs:
         xvfb-run -a -s "-screen 0 1280x800x24"
         env SDL_VIDEODRIVER=x11
         dotnet run --project tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0 -c $BUILD_CONF assert-autosize
+    - name: WebView document-start script self-test (headless via Xvfb)
+      # Exercises INativeWebView.AddScriptAtDocumentStart and a NativeWebViewOptions.UserDataFolder: a
+      # script registered before attach must run ahead of the page's own and its CSS must apply.
+      run: >-
+        xvfb-run -a -s "-screen 0 1280x800x24"
+        env SDL_VIDEODRIVER=x11
+        dotnet run --project tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0 -c $BUILD_CONF assert-docstart
 
   publish-nuget:
     timeout-minutes: 15

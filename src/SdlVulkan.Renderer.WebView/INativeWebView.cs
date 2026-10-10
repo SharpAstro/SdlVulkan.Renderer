@@ -35,6 +35,14 @@ public interface INativeWebView : IDisposable
     /// <summary>Shows or hides the webview child surface.</summary>
     void SetVisible(bool visible);
 
+    /// <summary>Registers <paramref name="javaScript"/> to run at the start of every document this
+    /// webview loads from now on (top-level page and frames), before any of the page's own scripts.
+    /// Use it to restyle or patch a site you do not control: inject CSS, hook <c>history</c>, observe
+    /// the DOM. May be called before <see cref="AttachToWindow"/>; scripts registered then apply from the
+    /// first navigation. A script registered later does not reach the document already loaded, only the
+    /// next one (pair it with <see cref="ExecuteScriptAsync"/> to cover the current page too).</summary>
+    void AddScriptAtDocumentStart(string javaScript);
+
     /// <summary>Evaluates <paramref name="javaScript"/> in the page and returns its JSON result.</summary>
     Task<string> ExecuteScriptAsync(string javaScript);
 
@@ -73,21 +81,43 @@ public interface INativeWebView : IDisposable
     event Action<string>? PageError;
 }
 
+/// <summary>Creation options for <see cref="NativeWebView.Create(NativeWebViewOptions)"/>.</summary>
+public sealed record NativeWebViewOptions
+{
+    /// <summary>Where the browser keeps its profile, so cookies (and with them a site sign-in)
+    /// survive a restart. Created if missing.
+    /// <list type="bullet">
+    /// <item>Windows: the WebView2 user data folder (cookies, cache, local storage). Null keeps
+    /// WebView2's default, a <c>&lt;exe&gt;.WebView2</c> folder beside the executable, which already
+    /// persists.</item>
+    /// <item>Linux: cookies go to <c>cookies.sqlite</c> in this folder. Null keeps WebKitGTK's default,
+    /// where cookies live only as long as the process. The cookie store belongs to WebKit's default
+    /// context, so it is process-wide: the first view created with a folder sets it for every view.</item>
+    /// </list></summary>
+    public string? UserDataFolder { get; init; }
+}
+
 /// <summary>
 /// Factory that creates the appropriate <see cref="INativeWebView"/> backend for the
 /// running platform. Isolates the single point of platform dispatch.
 /// </summary>
 public static class NativeWebView
 {
+    /// <summary>Creates the platform's native webview backend with default options.</summary>
+    /// <exception cref="PlatformNotSupportedException">No backend exists for this platform,
+    /// or this is the base (non-Windows) build running on Windows.</exception>
+    public static INativeWebView Create() => Create(new NativeWebViewOptions());
+
     /// <summary>Creates the platform's native webview backend.</summary>
     /// <exception cref="PlatformNotSupportedException">No backend exists for this platform,
     /// or this is the base (non-Windows) build running on Windows.</exception>
-    public static INativeWebView Create()
+    public static INativeWebView Create(NativeWebViewOptions options)
     {
+        ArgumentNullException.ThrowIfNull(options);
         if (OperatingSystem.IsWindows())
         {
 #if WINDOWS
-            return new Win32WebView();
+            return new Win32WebView(options);
 #else
             throw new PlatformNotSupportedException(
                 "Win32WebView is only present in the net10.0-windows build of " +
@@ -99,7 +129,7 @@ public static class NativeWebView
             return new CocoaWebView();
 
         if (OperatingSystem.IsLinux())
-            return new GtkWebView();
+            return new GtkWebView(options);
 
         throw new PlatformNotSupportedException(
             $"No INativeWebView backend for this platform ({RuntimeInformation.OSDescription}).");

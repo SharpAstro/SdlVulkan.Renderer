@@ -26,7 +26,7 @@ namespace SdlVulkan.Renderer.WebView;
 /// Calls made before the controller is ready (e.g. an early <see cref="Navigate"/>) are queued.
 /// WebView2 requires an STA thread.
 /// </remarks>
-internal sealed class Win32WebView : INativeWebView
+internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebView
 {
     private SdlVulkanWindow? _window;
     private ComObject<ICoreWebView2Controller>? _controller;
@@ -37,6 +37,7 @@ internal sealed class Win32WebView : INativeWebView
     private string? _pendingNavigateHtml;
     private RectInt? _bounds;
     private bool _visible = true;
+    private readonly List<string> _pendingDocumentStartScripts = [];
 
     // Event-handler wrappers must be kept alive for as long as they're subscribed: the COM side
     // holds the only ref to the CCW, and dropping the managed object would break the callback.
@@ -91,7 +92,14 @@ internal sealed class Win32WebView : INativeWebView
             _bounds = new RectInt(new PointInt(w, h), new PointInt(0, 0));
         }
 
-        WebView2.Functions.CreateCoreWebView2EnvironmentWithOptions(PWSTR.Null, PWSTR.Null, null!,
+        var userDataFolder = PWSTR.Null;
+        if (options.UserDataFolder is { } folder)
+        {
+            Directory.CreateDirectory(folder);
+            userDataFolder = PWSTR.From(Path.GetFullPath(folder));
+        }
+
+        WebView2.Functions.CreateCoreWebView2EnvironmentWithOptions(PWSTR.Null, userDataFolder, null!,
             new CoreWebView2CreateCoreWebView2EnvironmentCompletedHandler((envResult, env) =>
             {
                 envResult.ThrowOnError();
@@ -107,6 +115,10 @@ internal sealed class Win32WebView : INativeWebView
                         WireTraceEvents(webView2);
                         EnableDiagnostics(webView2);
                         WireMessaging(webView2);
+                        // Before the first navigation, so the scripts reach its document.
+                        foreach (var script in _pendingDocumentStartScripts)
+                            AddDocumentStartScript(webView2, script);
+                        _pendingDocumentStartScripts.Clear();
                         ApplyPendingNavigation();
                     }));
             }));
@@ -320,6 +332,23 @@ internal sealed class Win32WebView : INativeWebView
         _visible = visible;
         _controller?.Object.put_IsVisible(visible).ThrowOnError();
     }
+
+    public void AddScriptAtDocumentStart(string javaScript)
+    {
+        ArgumentNullException.ThrowIfNull(javaScript);
+        if (_webView2 is null)
+            _pendingDocumentStartScripts.Add(javaScript);
+        else
+            AddDocumentStartScript(_webView2, javaScript);
+    }
+
+    private void AddDocumentStartScript(ICoreWebView2 webView2, string javaScript)
+        => webView2.AddScriptToExecuteOnDocumentCreated(PWSTR.From(javaScript),
+            new CoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler((errorCode, _) =>
+            {
+                if (errorCode.IsError)
+                    Trace?.Invoke($"add-document-start-script failed: HRESULT 0x{errorCode.Value:X8}");
+            })).ThrowOnError();
 
     public Task<string> ExecuteScriptAsync(string javaScript)
     {

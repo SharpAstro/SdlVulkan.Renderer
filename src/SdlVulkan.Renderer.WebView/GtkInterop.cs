@@ -44,6 +44,12 @@ internal static partial class GtkInterop
 
     // ---- WebKitGTK ----------------------------------------------------------
     [LibraryImport(Webkit)] internal static partial nint webkit_web_view_new();
+    [LibraryImport(Webkit)] internal static partial nint webkit_web_context_get_default();             // owned by WebKit
+    [LibraryImport(Webkit)] internal static partial nint webkit_web_context_get_website_data_manager(nint context);
+    [LibraryImport(Webkit)] internal static partial nint webkit_website_data_manager_get_cookie_manager(nint manager);
+    // storage = WebKitCookiePersistentStorage (0 = text, 1 = SQLite).
+    [LibraryImport(Webkit, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial void webkit_cookie_manager_set_persistent_storage(nint cookieManager, string filename, int storage);
     [LibraryImport(Webkit, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial void webkit_web_view_load_uri(nint webView, string uri);
     [LibraryImport(Webkit, StringMarshalling = StringMarshalling.Utf8)]

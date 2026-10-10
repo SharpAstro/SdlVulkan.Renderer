@@ -67,7 +67,31 @@ internal static partial class Program
     private const int AutoSizeShrinkToCssPx = 250;
     private const string AutoSizeShrinkMessage = "{\"setHeight\":250}";
 
-    private enum Scenario { Navigate, Messaging, AutoSize }
+    // `docstart`/`assert-docstart` mode: the host registers DocStartScript before attaching, the way an
+    // app restyles a site it doesn't control. It must run ahead of the page's own script: the page then
+    // reports whether the flag is set and whether the injected CSS hid #clutter.
+    private const string DocStartScript = """
+        window.__docStartRan = true;
+        document.addEventListener('DOMContentLoaded', function () {
+          var style = document.createElement('style');
+          style.textContent = '#clutter { display: none !important; }';
+          document.head.appendChild(style);
+        });
+        """;
+
+    private const string DocStartTestHtml = """
+        <!doctype html><meta charset="utf-8"><title>docstart-test</title>
+        <h1>Document-start script test</h1><div id="clutter">this should be hidden</div>
+        <script>
+          var ranFirst = window.__docStartRan === true;
+          window.addEventListener('load', function () {
+            var hidden = getComputedStyle(document.getElementById('clutter')).display === 'none';
+            window.chrome.webview.postMessage({ docStart: ranFirst, hidden: hidden });
+          });
+        </script>
+        """;
+
+    private enum Scenario { Navigate, Messaging, AutoSize, DocStart }
 
     private static void Log(string line)
     {
@@ -95,14 +119,17 @@ internal static partial class Program
     {
         var arg0 = args.Length > 0 ? args[0] : "https://example.com";
         // Modes: `assert` = messaging self-test, exit 0/1 (CI). `assert-autosize` = content-sizer
-        // self-test, exit 0/1 (CI). `messaging`/`autosize` = the same self-tests but interactive.
+        // self-test, exit 0/1 (CI). `assert-docstart` = document-start script self-test, exit 0/1 (CI).
+        // `messaging`/`autosize`/`docstart` = the same self-tests but interactive.
         // Anything else = navigate to that URL.
         var (scenario, assertMode) = arg0.ToLowerInvariant() switch
         {
             "assert" => (Scenario.Messaging, true),
             "assert-autosize" => (Scenario.AutoSize, true),
+            "assert-docstart" => (Scenario.DocStart, true),
             "messaging" => (Scenario.Messaging, false),
             "autosize" => (Scenario.AutoSize, false),
+            "docstart" => (Scenario.DocStart, false),
             _ => (Scenario.Navigate, false),
         };
         Log($"[smoke] process arch = {RuntimeInformation.ProcessArchitecture}, scenario = {scenario}");
@@ -134,7 +161,14 @@ internal static partial class Program
             return 1;
         }
 
-        using var webView = NativeWebView.Create();
+        // The docstart scenario also gives the view a profile folder, which exercises the persistent
+        // cookie store setup (on Linux, WebKit's default-context cookie manager) before the first load.
+        using var webView = scenario == Scenario.DocStart
+            ? NativeWebView.Create(new NativeWebViewOptions
+            {
+                UserDataFolder = Path.Combine(Path.GetTempPath(), $"webview-smoke-{Environment.ProcessId}"),
+            })
+            : NativeWebView.Create();
         Log($"[smoke] backend = {webView.GetType().Name}");
 
         // Common diagnostics: redirect/navigation trace, console output, uncaught JS errors.
@@ -159,6 +193,9 @@ internal static partial class Program
             case Scenario.AutoSize:
                 failReason = WireAutoSize(webView, window, assertMode, Pass);
                 break;
+            case Scenario.DocStart:
+                failReason = WireDocStart(webView, assertMode, Pass);
+                break;
             case Scenario.Navigate:
                 WireNavigateProbe(webView);
                 break;
@@ -179,6 +216,12 @@ internal static partial class Program
                     ? "[smoke] assert mode: content-sizer self-test (expecting an initial content height, then a smaller one after shrink)."
                     : "[smoke] content-sizer self-test (NavigateToString) — close the window to exit.");
                 webView.NavigateToString(AutoSizeTestHtml);
+                break;
+            case Scenario.DocStart:
+                Log(assertMode
+                    ? "[smoke] assert mode: document-start script self-test (expecting the script ahead of the page, and its CSS applied)."
+                    : "[smoke] document-start script self-test (NavigateToString) — close the window to exit.");
+                webView.NavigateToString(DocStartTestHtml);
                 break;
             case Scenario.Navigate:
                 webView.Navigate(navigateUrl);
@@ -237,6 +280,22 @@ internal static partial class Program
         Log("[smoke] exiting.");
         FastExit(0);
         return 0; // unreachable
+    }
+
+    // Document-start script: registered before AttachToWindow, so it must reach the first document.
+    // In assert mode, PASS once the page reports the script ran ahead of it and its CSS took effect.
+    private static Func<string> WireDocStart(INativeWebView webView, bool assertMode, Action pass)
+    {
+        string? report = null;
+        webView.AddScriptAtDocumentStart(DocStartScript);
+        webView.MessageReceived += json =>
+        {
+            Log($"[smoke] page -> host: {json}");
+            report = json.Replace(" ", "");
+            if (assertMode && report.Contains("\"docStart\":true") && report.Contains("\"hidden\":true"))
+                pass();
+        };
+        return () => report is null ? "the page never reported" : $"page reported {report}";
     }
 
     // Two-way messaging: log page→host messages, bounce a reply (host→page), and prove JS execution on
