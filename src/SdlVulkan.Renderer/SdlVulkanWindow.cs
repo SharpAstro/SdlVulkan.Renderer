@@ -298,6 +298,52 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// window turns this back on so it activates and gets a taskbar button like any normal window.</summary>
     public void SetFocusable(bool focusable) => SetWindowFocusable(Handle, focusable);
 
+    /// <summary>
+    /// True while this is the active window, the one keyboard input goes to: on Windows the foreground
+    /// window, elsewhere the window with SDL's input focus. It holds while a native child (an embedded
+    /// web view) has the keyboard focus, since the window stays the foreground one. Nothing signals a
+    /// change; read it from <see cref="SdlEventLoop.OnLoopIteration"/>, which runs at least every 16 ms.
+    /// </summary>
+    /// <remarks>For an app that wants to SHOW when it is taking input: an always-on-top or borderless
+    /// window has no OS title bar to light up, so its own chrome has to.</remarks>
+    public bool IsActive => OperatingSystem.IsWindows()
+        ? Win32Window.IsForeground(GetNativeWindowHandle())
+        : (GetWindowFlags(Handle) & WindowFlags.InputFocus) != 0;
+
+    /// <summary>
+    /// Allows or forbids maximizing. On Windows it sets the window's maximize box, which is also what
+    /// decides whether a double-click on a caption maximizes (including a borderless window's
+    /// draggable area under an SDL hit test, which Windows treats as a caption), and whether Win+Up or
+    /// a drag to the top edge do. Elsewhere it does nothing: SDL has no such flag, and a borderless
+    /// window has no maximize button to remove.
+    /// </summary>
+    /// <remarks>SDL rebuilds the window style when <see cref="SetBordered"/> or
+    /// <see cref="SetResizable"/> run, which puts the box back, so call this after them.</remarks>
+    public void SetMaximizable(bool maximizable)
+    {
+        if (OperatingSystem.IsWindows())
+            Win32Window.SetMaximizeBox(GetNativeWindowHandle(), maximizable);
+    }
+
+    /// <summary>The smallest size the user can resize the window to, in window coordinates. A window
+    /// already smaller grows to it.</summary>
+    public void SetMinimumSize(int width, int height) => SetWindowMinimumSize(Handle, width, height);
+
+    /// <summary>
+    /// The usable area of the display the window is on: the display less its taskbar, dock or panels,
+    /// in desktop coordinates. For keeping a window that moves or resizes itself on screen.
+    /// </summary>
+    public bool TryGetUsableDisplayBounds(out int x, out int y, out int width, out int height)
+    {
+        if (GetDisplayUsableBounds(GetDisplayForWindow(Handle), out var r))
+        {
+            (x, y, width, height) = (r.X, r.Y, r.W, r.H);
+            return true;
+        }
+        (x, y, width, height) = (0, 0, 0, 0);
+        return false;
+    }
+
     /// <summary>Brings the window to the front and gives it input focus. Used after a tear-out/relocate
     /// so the resulting window surfaces where the user dropped it (and isn't lost off-screen/behind).</summary>
     public void Raise() => RaiseWindow(Handle);
