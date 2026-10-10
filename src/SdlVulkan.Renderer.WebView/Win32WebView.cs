@@ -403,6 +403,28 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
         return tcs.Task;
     }
 
+    public Task<string> CallDevToolsProtocolMethodAsync(string method, string parametersAsJson)
+    {
+        ArgumentNullException.ThrowIfNull(method);
+        ArgumentNullException.ThrowIfNull(parametersAsJson);
+        var webView2 = _webView2
+            ?? throw new InvalidOperationException(
+                "WebView2 is not ready yet. Call AttachToWindow and wait for the first navigation.");
+
+        // Completed on the UI thread, as ExecuteScriptAsync's.
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        webView2.CallDevToolsProtocolMethod(PWSTR.From(method), PWSTR.From(parametersAsJson),
+            new CoreWebView2CallDevToolsProtocolMethodCompletedHandler((errorCode, result) =>
+            {
+                if (errorCode.IsError)
+                    tcs.TrySetException(
+                        new InvalidOperationException($"{method} failed (HRESULT 0x{errorCode.Value:X8})."));
+                else
+                    tcs.TrySetResult(result.ToString() ?? "{}");
+            })).ThrowOnError();
+        return tcs.Task;
+    }
+
     public void PostMessage(string json)
     {
         ArgumentNullException.ThrowIfNull(json);
