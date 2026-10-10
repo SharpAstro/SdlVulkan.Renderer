@@ -37,7 +37,11 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
     private string? _pendingNavigateHtml;
     private RectInt? _bounds;
     private bool _visible = true;
-    private readonly List<string> _pendingDocumentStartScripts = [];
+    private readonly List<(string Script, TaskCompletionSource Done)> _pendingDocumentStartScripts = [];
+    // Document-start scripts WebView2 has not confirmed yet. AddScriptToExecuteOnDocumentCreated
+    // applies asynchronously, and a navigation sent before its completion handler runs may miss the
+    // script, so ApplyPendingNavigation holds any navigation until this is back to zero.
+    private int _documentStartScriptsInFlight;
 
     // Event-handler wrappers must be kept alive for as long as they're subscribed: the COM side
     // holds the only ref to the CCW, and dropping the managed object would break the callback.
@@ -115,9 +119,10 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
                         WireTraceEvents(webView2);
                         EnableDiagnostics(webView2);
                         WireMessaging(webView2);
-                        // Before the first navigation, so the scripts reach its document.
-                        foreach (var script in _pendingDocumentStartScripts)
-                            AddDocumentStartScript(webView2, script);
+                        // Before the first navigation, so the scripts reach its document: the
+                        // navigation below is held until WebView2 confirms every one of them.
+                        foreach (var (script, done) in _pendingDocumentStartScripts)
+                            AddDocumentStartScript(webView2, script, done);
                         _pendingDocumentStartScripts.Clear();
                         ApplyPendingNavigation();
                     }));
@@ -142,7 +147,8 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
 
     private void ApplyPendingNavigation()
     {
-        if (_webView2 is null)
+        // The last document-start completion handler calls back in here to release a held navigation.
+        if (_webView2 is null || _documentStartScriptsInFlight > 0)
             return;
         if (_pendingNavigateUrl is { } url)
         {
@@ -333,22 +339,47 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
         _controller?.Object.put_IsVisible(visible).ThrowOnError();
     }
 
-    public void AddScriptAtDocumentStart(string javaScript)
+    public Task AddScriptAtDocumentStartAsync(string javaScript)
     {
         ArgumentNullException.ThrowIfNull(javaScript);
+        // Completed on the UI thread; RunContinuationsAsynchronously for the same reason as
+        // ExecuteScriptAsync.
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         if (_webView2 is null)
-            _pendingDocumentStartScripts.Add(javaScript);
+            _pendingDocumentStartScripts.Add((javaScript, done));
         else
-            AddDocumentStartScript(_webView2, javaScript);
+            AddDocumentStartScript(_webView2, javaScript, done);
+        return done.Task;
     }
 
-    private void AddDocumentStartScript(ICoreWebView2 webView2, string javaScript)
-        => webView2.AddScriptToExecuteOnDocumentCreated(PWSTR.From(javaScript),
+    private void AddDocumentStartScript(ICoreWebView2 webView2, string javaScript, TaskCompletionSource done)
+    {
+        _documentStartScriptsInFlight++;
+        var hr = webView2.AddScriptToExecuteOnDocumentCreated(PWSTR.From(javaScript),
             new CoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler((errorCode, _) =>
             {
                 if (errorCode.IsError)
-                    Trace?.Invoke($"add-document-start-script failed: HRESULT 0x{errorCode.Value:X8}");
-            })).ThrowOnError();
+                    Fail(errorCode.Value);
+                else
+                    done.TrySetResult();
+                _documentStartScriptsInFlight--;
+                ApplyPendingNavigation();
+            }));
+        // Refused outright, so the handler will not run: release the hold here instead. Any navigation
+        // held meanwhile waits on another script, whose handler releases it.
+        if (hr.IsError)
+        {
+            Fail(hr.Value);
+            _documentStartScriptsInFlight--;
+        }
+
+        void Fail(int hresult)
+        {
+            Trace?.Invoke($"add-document-start-script failed: HRESULT 0x{hresult:X8}");
+            done.TrySetException(new InvalidOperationException(
+                $"AddScriptToExecuteOnDocumentCreated failed (HRESULT 0x{hresult:X8})."));
+        }
+    }
 
     public Task<string> ExecuteScriptAsync(string javaScript)
     {
@@ -412,6 +443,10 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
         _webMessageHandler = null;
         _cdpHandlers.Clear();
         _cdpReceivers.Clear();
+        // Registered before an attach that never finished: they will never reach a browser.
+        foreach (var (_, done) in _pendingDocumentStartScripts)
+            done.TrySetCanceled();
+        _pendingDocumentStartScripts.Clear();
         _webView2 = null;
         _controller?.Dispose();
         _controller = null;

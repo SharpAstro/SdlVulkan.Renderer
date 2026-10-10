@@ -284,18 +284,23 @@ internal static partial class Program
 
     // Document-start script: registered before AttachToWindow, so it must reach the first document.
     // In assert mode, PASS once the page reports the script ran ahead of it and its CSS took effect.
+    // Its registration task cannot be awaited here, ahead of the attach; the first navigation waits for
+    // it instead, so by the time the page reports, the task must already have completed.
     private static Func<string> WireDocStart(INativeWebView webView, bool assertMode, Action pass)
     {
         string? report = null;
-        webView.AddScriptAtDocumentStart(DocStartScript);
+        var registered = webView.AddScriptAtDocumentStartAsync(DocStartScript);
         webView.MessageReceived += json =>
         {
-            Log($"[smoke] page -> host: {json}");
+            Log($"[smoke] page -> host: {json} (registration {registered.Status})");
             report = json.Replace(" ", "");
-            if (assertMode && report.Contains("\"docStart\":true") && report.Contains("\"hidden\":true"))
+            if (assertMode && registered.IsCompletedSuccessfully
+                && report.Contains("\"docStart\":true") && report.Contains("\"hidden\":true"))
                 pass();
         };
-        return () => report is null ? "the page never reported" : $"page reported {report}";
+        return () => report is null
+            ? $"the page never reported (registration {registered.Status})"
+            : $"page reported {report} (registration {registered.Status})";
     }
 
     // Two-way messaging: log page→host messages, bounce a reply (host→page), and prove JS execution on
