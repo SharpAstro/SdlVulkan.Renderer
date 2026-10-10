@@ -30,11 +30,12 @@ namespace SdlVulkan.Renderer.WebView;
 /// fast-exit past the C runtime's <c>atexit</c> handlers (e.g. <c>libc</c> <c>_exit</c>) rather than
 /// relying on normal process teardown.</para>
 /// </remarks>
-internal sealed class GtkWebView : INativeWebView
+internal sealed class GtkWebView(NativeWebViewOptions options) : INativeWebView
 {
     private const int GtkWindowToplevel = 0;
     private const int WebkitLoadStarted = 0, WebkitLoadRedirected = 1, WebkitLoadCommitted = 2, WebkitLoadFinished = 3;
     private const int WebkitInjectAllFrames = 0, WebkitInjectAtDocumentStart = 0;
+    private const int WebkitCookiePersistentStorageSqlite = 1;
     private const int InitTimeoutMs = 15000;
 
     // Injected at document-start so the page's JS API matches the Windows backend: page->host via
@@ -115,6 +116,8 @@ internal sealed class GtkWebView : INativeWebView
     // Queued/last-known state, applied once the view is ready.
     private RectInt? _bounds;
     private string? _pendingUrl, _pendingHtml;
+    // Guarded by itself: appended from the caller's thread, drained once on the GTK thread at init.
+    private readonly List<string> _pendingDocumentStartScripts = [];
 
     public event Action<string>? TitleChanged;
     public event Action<string>? NavigationCompleted;
@@ -171,6 +174,9 @@ internal sealed class GtkWebView : INativeWebView
             if (_x11Display == nint.Zero)
                 throw new InvalidOperationException("XOpenDisplay failed.");
 
+            if (options.UserDataFolder is { } folder)
+                UsePersistentCookies(folder);
+
             var web = webkit_web_view_new();
             var ucm = webkit_web_view_get_user_content_manager(web);
             webkit_user_content_manager_register_script_message_handler(ucm, "host");
@@ -184,6 +190,13 @@ internal sealed class GtkWebView : INativeWebView
             g_signal_connect_data(web, "load-failed", LoadFailedPtr, _selfPtr, nint.Zero, 0);
             AddUserScript(ucm, ChromeWebViewShim);
             AddUserScript(ucm, DiagnosticsScript);
+            lock (_pendingDocumentStartScripts)
+            {
+                foreach (var script in _pendingDocumentStartScripts)
+                    AddUserScript(ucm, script);
+                _pendingDocumentStartScripts.Clear();
+                _ucm = ucm; // published under the lock, so a later AddScriptAtDocumentStart sees it
+            }
 
             var (x, y, w, h) = ToXywh(_bounds!.Value);
             var gtkWin = gtk_window_new(GtkWindowToplevel);
@@ -202,7 +215,6 @@ internal sealed class GtkWebView : INativeWebView
             gtk_widget_show_all(gtkWin);
 
             _webView = web;
-            _ucm = ucm;
             _gtkWindow = gtkWin;
             _ready = true;
             _initEvent.Set();
@@ -214,6 +226,31 @@ internal sealed class GtkWebView : INativeWebView
             _initError = ex;
             _initEvent.Set();
         }
+    }
+
+    // The view is created on WebKit's default context, so its cookie manager is the one to point at
+    // the folder. Must run before the first load, which is why it sits ahead of webkit_web_view_new.
+    private static void UsePersistentCookies(string folder)
+    {
+        Directory.CreateDirectory(folder);
+        var dataManager = webkit_web_context_get_website_data_manager(webkit_web_context_get_default());
+        var cookieManager = webkit_website_data_manager_get_cookie_manager(dataManager);
+        webkit_cookie_manager_set_persistent_storage(cookieManager,
+            Path.Combine(Path.GetFullPath(folder), "cookies.sqlite"), WebkitCookiePersistentStorageSqlite);
+    }
+
+    public void AddScriptAtDocumentStart(string javaScript)
+    {
+        ArgumentNullException.ThrowIfNull(javaScript);
+        lock (_pendingDocumentStartScripts)
+        {
+            if (_ucm == nint.Zero)
+            {
+                _pendingDocumentStartScripts.Add(javaScript);
+                return;
+            }
+        }
+        RunOnGtk(() => AddUserScript(_ucm, javaScript));
     }
 
     private static void AddUserScript(nint ucm, string source)

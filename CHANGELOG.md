@@ -7,6 +7,25 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.57
+
+**A web view can patch the pages it loads, and keep its sign-in.** Two additions to
+`SdlVulkan.Renderer.WebView`, for an app that hosts a site it does not control (a YouTube player that
+hides Shorts, say):
+
+- `INativeWebView.AddScriptAtDocumentStart(js)` registers a script that runs at the start of every
+  document from then on, top-level and frames, before the page's own scripts: WebView2's
+  `AddScriptToExecuteOnDocumentCreated`, WebKitGTK's document-start user script. It may be called before
+  `AttachToWindow`; scripts registered then reach the first navigation. A class implementing
+  `INativeWebView` outside this package must add the method.
+- `NativeWebView.Create(NativeWebViewOptions)` with `UserDataFolder`, where the browser keeps its
+  profile. On Windows it is WebView2's user data folder (the default, beside the executable, already
+  persisted). On Linux cookies go to `cookies.sqlite` there; WebKitGTK's default kept them only for the
+  life of the process, so a sign-in did not survive a restart. `Create()` is unchanged.
+
+`tools/WebViewSmoke assert-docstart` checks both on Linux in CI: a script registered before attach runs
+ahead of the page and its CSS applies, with a profile folder set.
+
 ## 7.56
 
 **`MeasureText` remembers what it measured.** A measurement runs the whole shaper (GSUB, GPOS, bidi
