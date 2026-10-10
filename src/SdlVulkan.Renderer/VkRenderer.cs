@@ -1559,8 +1559,19 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         }
         ReadOnlySpan<float> vertices = verts;
 
+        var ringBefore = Surface.VertexBuffer;
         var vertOffset = Surface.WriteVertices(vertices);
         if (vertOffset == uint.MaxValue) return;
+
+        // The batch draws its glyphs as ONE range of the ring, and a write that did not fit has just
+        // moved the ring to a bigger buffer, leaving the run so far in the old one. Draw that run from
+        // there and start the range again at this glyph.
+        if (_glyphBatchStartOffset != uint.MaxValue && Surface.VertexBuffer != ringBefore)
+        {
+            DrawBitmapGlyphRun(ringBefore, _glyphBatchStartOffset, _glyphBatchVertexCount);
+            _glyphBatchStartOffset = uint.MaxValue;
+            _glyphBatchVertexCount = 0;
+        }
 
         if (_glyphBatchStartOffset == uint.MaxValue)
             _glyphBatchStartOffset = vertOffset;
@@ -1998,6 +2009,16 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         // Bitmap atlas path: a single contiguous vertex range, one draw (unchanged).
         if (_glyphBatchVertexCount == 0 || _glyphBatchStartOffset == uint.MaxValue) return;
+        DrawBitmapGlyphRun(Surface.VertexBuffer, _glyphBatchStartOffset, _glyphBatchVertexCount);
+    }
+
+    // One draw of a run of bitmap-atlas glyph vertices: TexturedPipeline, the atlas's descriptor set and
+    // the batch's push constants. EndGlyphBatch draws the run it ends; AddGlyph draws one early when the
+    // ring moved to a bigger buffer under it.
+    private void DrawBitmapGlyphRun(VkBuffer buffer, uint startOffset, int vertexCount)
+    {
+        var api = Surface.DeviceApi;
+        _pushConstants[20] = 0f; // sdfEdge, unused by a bitmap batch
         BindPipeline(_pipelines!.TexturedPipeline);
         var bmpDescriptor = Surface.DescriptorSet;
         api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
@@ -2005,10 +2026,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         fixed (float* pPC = _pushConstants)
             api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
                 VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
-        var bmpBuffer = Surface.VertexBuffer;
-        var bmpOffset = (ulong)_glyphBatchStartOffset;
-        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &bmpBuffer, &bmpOffset);
-        api.vkCmdDraw(_currentCmd, (uint)_glyphBatchVertexCount, 1, 0, 0);
+        var bmpOffset = (ulong)startOffset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &bmpOffset);
+        api.vkCmdDraw(_currentCmd, (uint)vertexCount, 1, 0, 0);
     }
 
     // Second flush pass for a tiered SDF batch: draws the small-tier placeholder glyphs accumulated in

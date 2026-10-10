@@ -7,6 +7,21 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.59
+
+**A frame that outgrows the vertex ring keeps its draws.** The per-frame ring grows on demand, but it
+used to grow only at the NEXT frame start: the frame that ran out dropped every draw after the write
+that did not fit, and was presented anyway. In a PDF viewer the first draw of a dense sheet, 98,425
+glyphs into a 16 MB ring, came up as an empty page for one frame and then came back, a flicker on every
+first visit. The slot a frame runs out in now moves to a bigger buffer there and then. The draws already
+recorded keep the old buffer, which `DeferDestroy` frees once the frame has retired, and the other slot
+takes the whole frame's demand at its own next start, where the swap is free. A write is dropped only
+past `VertexRingMaxBytes` (512 MB), as before. Every draw binds `VertexBuffer` after its own write, so
+none needed changing, except the bitmap glyph batch, which draws many writes as one range: it now draws
+the part in the old buffer when the ring moves under it. `VulkanContext.VertexRingGrownMidFrame` counts
+the moves. `VertexRingGrowthTests` holds a frame that grew, and a bitmap glyph batch that straddled the
+move, to the pixels of a frame that fitted; without the batch's split it draws the wrong glyphs.
+
 ## 7.58
 
 **A window can tell, and show, that it is taking input; and stay unmaximized.** Additions to
