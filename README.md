@@ -155,7 +155,7 @@ pass. Shipped as separate packages so core renderer consumers pull no webview de
 | Package | Purpose |
 | --- | --- |
 | [`SdlVulkan.Renderer.WebView`](https://www.nuget.org/packages/SdlVulkan.Renderer.WebView) | The `INativeWebView` abstraction + platform backends. Multi-targets `net10.0` (interface, factory + the Linux/WebKitGTK backend) and `net10.0-windows` (adds the Windows/WebView2 backend + its native dependency). |
-| [`SdlVulkan.Renderer.WebView.Native`](https://www.nuget.org/packages/SdlVulkan.Renderer.WebView.Native) | `WebView2Loader.dll` native assets per Windows RID (x64 / arm64 / x86). Pulled in transitively on Windows — no need to reference it directly. |
+| [`SdlVulkan.Renderer.WebView.Native`](https://www.nuget.org/packages/SdlVulkan.Renderer.WebView.Native) | `WebView2Loader.dll` native assets per Windows RID (x64 / arm64 / x86). Pulled in transitively on Windows — no need to reference it directly. The loader is Microsoft's: an app that ships it ships the package's `THIRD-PARTY-NOTICES.txt` too. |
 
 ```
 dotnet add package SdlVulkan.Renderer.WebView

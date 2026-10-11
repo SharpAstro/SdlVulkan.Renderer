@@ -6,6 +6,9 @@
     because the loader rarely changes. Sourced from the Microsoft.Web.WebView2
     package's runtimes/<rid>/native/ payload, vendored into this repo. The Edge
     WebView2 *runtime* is a system component and is NOT redistributed here.
+    The loader is Microsoft's, under that package's license (BSD-3-Clause), which a
+    binary redistribution must reproduce: THIRD-PARTY-NOTICES.txt carries it verbatim,
+    and names the version. Replace both together.
   -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -16,7 +19,7 @@
     <IsAotCompatible>true</IsAotCompatible>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageId>SdlVulkan.Renderer.WebView.Native</PackageId>
-    <Description>Native WebView2Loader.dll assets (win-x64 / win-arm64 / win-x86) for SdlVulkan.Renderer.WebView.</Description>
+    <Description>Native WebView2Loader.dll assets (win-x64 / win-arm64 / win-x86) for SdlVulkan.Renderer.WebView. The loader is Microsoft's, under the WebView2 SDK's license, included as THIRD-PARTY-NOTICES.txt.</Description>
     <PackageTags>webview2 native runtime loader windows win-arm64</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <RepositoryUrl>https://github.com/SharpAstro/SdlVulkan.Renderer.git</RepositoryUrl>
@@ -32,6 +35,7 @@
     <None Include="runtimes/win-x86/native/WebView2Loader.dll"   Pack="true" PackagePath="runtimes/win-x86/native/" />
     <None Include="_._" Pack="true" PackagePath="lib/net10.0/_._" />
     <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="/" />
   </ItemGroup>
 
 </Project>
