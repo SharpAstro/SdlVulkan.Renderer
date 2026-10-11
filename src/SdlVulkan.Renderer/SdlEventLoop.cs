@@ -162,6 +162,11 @@ public sealed class SdlEventLoop
     /// </summary>
     public Action? OnLoopIteration { get; set; }
 
+    /// <summary>A combination registered with <see cref="SdlVulkanWindow.TryRegisterGlobalHotKey"/> was pressed,
+    /// whichever app was active: its id. Runs on the loop's thread, where <see cref="SdlVulkanWindow.Raise"/> brings
+    /// the window to the front (the press is what lets it).</summary>
+    public Action<int>? OnGlobalHotKey { get; set; }
+
     // --- Single-window forwarding properties (delegate to the primary view) ---
 
     private SdlWindowView Primary => _primary
@@ -1028,6 +1033,11 @@ public sealed class SdlEventLoop
                         vd.NeedsRedraw = true;
                     }
                 }
+                break;
+
+            default:
+                if (SdlVulkanWindow.IsGlobalHotKey(evt, out var hotKey))
+                    OnGlobalHotKey?.Invoke(hotKey);
                 break;
         }
     }

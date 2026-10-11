@@ -22,6 +22,21 @@ internal static partial class Program
     [LibraryImport("libc", EntryPoint = "_exit")]
     private static partial void LibcExit(int status);
 
+    // `hotkey` mode: a real key press, injected as the keyboard would send it.
+    [LibraryImport("user32.dll", SetLastError = true)]
+    private static partial uint SendInput(uint count, [In] KeyInput[] inputs, int size);
+
+    [StructLayout(LayoutKind.Explicit, Size = 40)] // INPUT on 64-bit: the type, then the union, 32 bytes
+    private struct KeyInput
+    {
+        [FieldOffset(0)] public uint Type;      // INPUT_KEYBOARD = 1
+        [FieldOffset(8)] public ushort Vk;
+        [FieldOffset(10)] public ushort Scan;
+        [FieldOffset(12)] public uint Flags;    // KEYEVENTF_KEYUP = 2
+        [FieldOffset(16)] public uint Time;
+        [FieldOffset(24)] public nint Extra;
+    }
+
     // Self-test page for `messaging`/`assert` mode: posts to the host on load and reflects any host
     // reply into document.title (observable via TitleChanged), exercising both directions of the bridge.
     private const string MessagingTestHtml = """
@@ -93,6 +108,11 @@ internal static partial class Program
         </script>
         """;
 
+    // `hotkey`/`assert-hotkey` mode: a global hotkey (Ctrl+Alt+Shift+F24: nothing else uses it, and it types
+    // nothing if it lands elsewhere) is registered, refused a second time, then pressed for real with SendInput,
+    // and must come back through the host's own SDL loop as the hotkey's event. Windows only; SKIPs elsewhere.
+    private const int HotKeyId = 7;
+
     // `cdp`/`assert-cdp` mode (WebView2): the page reports where its button is and the host clicks it
     // through the DevTools protocol. The click must reach the page TRUSTED (event.isTrusted), which a
     // page script's own click() never is. WebKitGTK has no such protocol, so there the scenario SKIPs.
@@ -111,7 +131,7 @@ internal static partial class Program
         </script>
         """;
 
-    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp }
+    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp, HotKey }
 
     private static void Log(string line)
     {
@@ -141,7 +161,8 @@ internal static partial class Program
         // Modes: `assert` = messaging self-test, exit 0/1 (CI). `assert-autosize` = content-sizer
         // self-test, exit 0/1 (CI). `assert-docstart` = document-start script self-test, exit 0/1 (CI).
         // `assert-cdp` = a DevTools-protocol click arrives trusted, exit 0/1 (WebView2; SKIPs on WebKitGTK).
-        // `messaging`/`autosize`/`docstart`/`cdp` = the same self-tests but interactive.
+        // `assert-hotkey` = a global hotkey pressed for real reaches the loop, exit 0/1 (Windows; SKIPs elsewhere).
+        // `messaging`/`autosize`/`docstart`/`cdp`/`hotkey` = the same self-tests but interactive.
         // Anything else = navigate to that URL.
         var (scenario, assertMode) = arg0.ToLowerInvariant() switch
         {
@@ -149,10 +170,12 @@ internal static partial class Program
             "assert-autosize" => (Scenario.AutoSize, true),
             "assert-docstart" => (Scenario.DocStart, true),
             "assert-cdp" => (Scenario.Cdp, true),
+            "assert-hotkey" => (Scenario.HotKey, true),
             "messaging" => (Scenario.Messaging, false),
             "autosize" => (Scenario.AutoSize, false),
             "docstart" => (Scenario.DocStart, false),
             "cdp" => (Scenario.Cdp, false),
+            "hotkey" => (Scenario.HotKey, false),
             _ => (Scenario.Navigate, false),
         };
         Log($"[smoke] process arch = {RuntimeInformation.ProcessArchitecture}, scenario = {scenario}");
@@ -207,6 +230,7 @@ internal static partial class Program
         }
 
         Func<string> failReason = () => "no scenario signals tracked";
+        var hotKeyPending = false; // hotkey: registered, and its press is still to be sent
 
         switch (scenario)
         {
@@ -221,6 +245,9 @@ internal static partial class Program
                 break;
             case Scenario.Cdp:
                 failReason = WireCdp(webView, assertMode, Pass);
+                break;
+            case Scenario.HotKey:
+                failReason = RegisterHotKeys(window, assertMode, ref hotKeyPending);
                 break;
             case Scenario.Navigate:
                 WireNavigateProbe(webView);
@@ -255,6 +282,12 @@ internal static partial class Program
                     : "[smoke] DevTools-protocol click self-test (NavigateToString) — close the window to exit.");
                 webView.NavigateToString(CdpTestHtml);
                 break;
+            case Scenario.HotKey:
+                Log(assertMode
+                    ? "[smoke] assert mode: global hotkey self-test (expecting Ctrl+Alt+Shift+F24, pressed for real, back as the hotkey's event)."
+                    : "[smoke] global hotkey self-test: press Ctrl+Alt+Shift+F24 from any app — close the window to exit.");
+                webView.NavigateToString("<!doctype html><title>hotkey-test</title><p>Ctrl+Alt+Shift+F24</p>");
+                break;
             case Scenario.Navigate:
                 webView.Navigate(navigateUrl);
                 Log($"[smoke] navigating to {navigateUrl} — close the window to exit.");
@@ -274,6 +307,16 @@ internal static partial class Program
             if (exitAfterMs > 0 && Environment.TickCount64 - start >= exitAfterMs)
                 break;
 
+            // Once the loop runs, so the press is read by it like any other.
+            if (hotKeyPending && assertMode)
+            {
+                hotKeyPending = false;
+                var sent = PressHotKey();
+                Log($"[smoke] sent Ctrl+Alt+Shift+F24: {sent}");
+                if (sent != "ok")
+                    failReason = () => $"the press could not be sent ({sent})";
+            }
+
             // WaitEventTimeout pumps the event queue even when idle, so async backend callbacks
             // (WebView2 controller creation, navigation completion) get dispatched.
             if (WaitEventTimeout(out var evt, 16))
@@ -285,6 +328,12 @@ internal static partial class Program
                         case EventType.Quit:
                         case EventType.WindowCloseRequested:
                             running = false;
+                            break;
+
+                        case var _ when SdlVulkanWindow.IsGlobalHotKey(evt, out var hotKey):
+                            Log($"[smoke] global hotkey pressed: id {hotKey}");
+                            if (assertMode && hotKey == HotKeyId)
+                                Pass();
                             break;
 
                         case EventType.WindowResized:
@@ -312,6 +361,41 @@ internal static partial class Program
         Log("[smoke] exiting.");
         FastExit(0);
         return 0; // unreachable
+    }
+
+    // Global hotkey: the registration must succeed, a second one of the same combination must be refused (Windows
+    // holds each combination once), and the same id twice too. Off Windows nothing registers: SKIP.
+    private static Func<string> RegisterHotKeys(SdlVulkanWindow window, bool assertMode, ref bool pending)
+    {
+        const Keymod mods = Keymod.Ctrl | Keymod.Alt | Keymod.Shift;
+        var registered = window.TryRegisterGlobalHotKey(HotKeyId, mods, Keycode.F24);
+        Log($"[smoke] registered Ctrl+Alt+Shift+F24 as id {HotKeyId}: {registered}");
+        if (!registered && !OperatingSystem.IsWindows() && assertMode)
+        {
+            Log("SMOKE: SKIP (global hotkeys are Windows only)");
+            FastExit(0);
+        }
+        if (!registered)
+            return () => "the hotkey did not register (another app holds Ctrl+Alt+Shift+F24?)";
+        var again = window.TryRegisterGlobalHotKey(HotKeyId + 1, mods, Keycode.F24);
+        var sameId = window.TryRegisterGlobalHotKey(HotKeyId, Keymod.Ctrl | Keymod.Alt, Keycode.F23);
+        Log($"[smoke] the same combination again: {again}; the same id again: {sameId}");
+        if (again || sameId)
+            return () => $"a second registration was accepted (combination {again}, id {sameId})";
+        pending = true;
+        return () => "the hotkey's press never reached the loop";
+    }
+
+    // Ctrl, Alt and Shift down, F24 down and up, then the modifiers up: "ok", or why SendInput refused (it does on
+    // a locked desktop, and from a process below the foreground app's integrity level).
+    private static string PressHotKey()
+    {
+        ushort[] down = [0x11, 0x12, 0x10, 0x87]; // VK_CONTROL, VK_MENU, VK_SHIFT, VK_F24
+        var inputs = down.Select(vk => new KeyInput { Type = 1, Vk = vk })
+            .Concat(Enumerable.Reverse(down).Select(vk => new KeyInput { Type = 1, Vk = vk, Flags = 2 }))
+            .ToArray();
+        var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<KeyInput>());
+        return sent == inputs.Length ? "ok" : $"{sent} of {inputs.Length} sent, error {Marshal.GetLastPInvokeError()}";
     }
 
     // Document-start script: registered before AttachToWindow, so it must reach the first document.
