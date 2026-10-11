@@ -348,6 +348,54 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// so the resulting window surfaces where the user dropped it (and isn't lost off-screen/behind).</summary>
     public void Raise() => RaiseWindow(Handle);
 
+    private readonly HashSet<int> _globalHotKeys = [];
+
+    /// <summary>
+    /// Registers a key combination for the whole desktop: pressed while any app is active, it reaches this one, as
+    /// <see cref="SdlEventLoop.OnGlobalHotKey"/> with <paramref name="id"/> (a host running its own SDL loop reads it
+    /// with <see cref="IsGlobalHotKey"/>). Windows only for now; elsewhere it returns false.
+    /// </summary>
+    /// <param name="id">The app's own number for the combination, passed back on each press; 0 to 0xBFFF.</param>
+    /// <param name="modifiers">Any of <see cref="Keymod.Ctrl"/>, <see cref="Keymod.Shift"/>, <see cref="Keymod.Alt"/>
+    /// and <see cref="Keymod.GUI"/> (the Windows key).</param>
+    /// <param name="key">A character, such as <c>Keycode.Slash</c>, found on the keyboard layout active now (where the
+    /// layout needs Shift for it, Shift is added), or F1 to F24.</param>
+    /// <returns>False when another app holds the combination or Windows reserves it (Win+S, Win+F), when the layout
+    /// has no key for the character, or off Windows.</returns>
+    /// <remarks>
+    /// <para>Call it on the thread that created the window (Windows binds a hotkey to a window of the calling thread).
+    /// The registration lasts until <see cref="UnregisterGlobalHotKey"/> or <see cref="Dispose"/>.</para>
+    /// <para>A press is input to this app, so in its handler <see cref="Raise"/> can bring the window to the front
+    /// and take the keyboard, which an app in the background is otherwise refused.</para>
+    /// <para>On Windows this takes SDL's Windows message hook (<c>SDL_SetWindowsMessageHook</c>), of which there is
+    /// one per process: an app that sets its own replaces this one.</para>
+    /// </remarks>
+    public bool TryRegisterGlobalHotKey(int id, Keymod modifiers, Keycode key)
+    {
+        if (!OperatingSystem.IsWindows() || _globalHotKeys.Contains(id)
+            || !GlobalHotKeys.TryRegister(GetNativeWindowHandle(), id, modifiers, key))
+            return false;
+        _globalHotKeys.Add(id);
+        return true;
+    }
+
+    /// <summary>Gives back a combination registered with <see cref="TryRegisterGlobalHotKey"/>.</summary>
+    public void UnregisterGlobalHotKey(int id)
+    {
+        if (OperatingSystem.IsWindows() && _globalHotKeys.Remove(id))
+            GlobalHotKeys.Unregister(GetNativeWindowHandle(), id);
+    }
+
+    /// <summary>For a host that runs its own SDL event loop: whether <paramref name="evt"/> is the press of a
+    /// combination registered with <see cref="TryRegisterGlobalHotKey"/>, and its id.
+    /// <see cref="SdlEventLoop"/> does this itself and calls <see cref="SdlEventLoop.OnGlobalHotKey"/>.</summary>
+    public static bool IsGlobalHotKey(in Event evt, out int id)
+    {
+        var isHotKey = GlobalHotKeys.EventType != 0 && evt.Type == GlobalHotKeys.EventType;
+        id = isHotKey ? evt.User.Code : 0;
+        return isHotKey;
+    }
+
     /// <summary>The global mouse position in desktop coordinates (across all displays), as integer
     /// pixels. Used to place a torn-out window under the cursor.</summary>
     public static void GetGlobalMousePosition(out int x, out int y)
@@ -391,6 +439,8 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
 
     public void Dispose()
     {
+        foreach (var id in _globalHotKeys.ToArray())
+            UnregisterGlobalHotKey(id);
         lock (_cursorLock)
         {
             foreach (var handle in _cursorCache.Values)

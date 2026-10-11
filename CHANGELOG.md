@@ -7,6 +7,25 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.62
+
+**A key combination can reach the app from anywhere on the desktop.** For a small, always-on-top window (a
+player, say) that should come forward at a keystroke, whichever app is active:
+
+- `SdlVulkanWindow.TryRegisterGlobalHotKey(id, modifiers, key)` registers a combination: Ctrl, Shift, Alt and
+  the Windows key (`Keymod.GUI`), with a character found on the keyboard layout active now (Shift added where
+  the layout needs it: `/` is Shift+7 on a German one) or F1 to F24. It returns false when another app holds
+  the combination or Windows reserves it (Win+S, Win+F), or for a character the layout has no key for.
+  `UnregisterGlobalHotKey(id)` gives it back, and so does disposing the window.
+- A press arrives as `SdlEventLoop.OnGlobalHotKey(id)`, on the loop's thread. The press is input to the app,
+  so there `Raise()` brings the window to the front and takes the keyboard, which an app in the background is
+  otherwise refused. A host with its own SDL loop reads presses with `SdlVulkanWindow.IsGlobalHotKey(evt, out id)`.
+
+Windows only for now: elsewhere registration returns false. It takes SDL's Windows message hook, of which a
+process has one, to turn `WM_HOTKEY` into an SDL user event. `tools/WebViewSmoke assert-hotkey` registers
+Ctrl+Alt+Shift+F24, checks a second registration is refused, presses it for real with `SendInput`, and
+expects it back in the loop (Windows; SKIPs elsewhere).
+
 ## 7.61
 
 **Text can be laid out once and drawn every frame from a persistent buffer.** On DIR.Lib 11.12.
