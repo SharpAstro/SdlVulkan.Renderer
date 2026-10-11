@@ -37,6 +37,35 @@ internal static partial class Program
         [FieldOffset(24)] public nint Extra;
     }
 
+    // `caption` mode: a real double-click, injected as the mouse would send it, on the title bar.
+    [LibraryImport("user32.dll", EntryPoint = "SendInput", SetLastError = true)]
+    private static partial uint SendMouseInput(uint count, [In] MouseInput[] inputs, int size);
+
+    [StructLayout(LayoutKind.Explicit, Size = 40)] // INPUT on 64-bit, as KeyInput
+    private struct MouseInput
+    {
+        [FieldOffset(0)] public uint Type;      // INPUT_MOUSE = 0
+        [FieldOffset(8)] public int Dx;
+        [FieldOffset(12)] public int Dy;
+        [FieldOffset(16)] public uint MouseData;
+        [FieldOffset(20)] public uint Flags;    // MOUSEEVENTF_LEFTDOWN = 2, MOUSEEVENTF_LEFTUP = 4
+        [FieldOffset(24)] public uint Time;
+        [FieldOffset(32)] public nint Extra;
+    }
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetCursorPos(out CursorPoint point);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetCursorPos(int x, int y);
+
+    private struct CursorPoint
+    {
+        public int X, Y;
+    }
+
     // Self-test page for `messaging`/`assert` mode: posts to the host on load and reflects any host
     // reply into document.title (observable via TitleChanged), exercising both directions of the bridge.
     private const string MessagingTestHtml = """
@@ -111,7 +140,12 @@ internal static partial class Program
     // `hotkey`/`assert-hotkey` mode: a global hotkey (Ctrl+Alt+Shift+F24: nothing else uses it, and it types
     // nothing if it lands elsewhere) is registered, refused a second time, then pressed for real with SendInput,
     // and must come back through the host's own SDL loop as the hotkey's event. Windows only; SKIPs elsewhere.
+    // In assert mode the window is hidden before the press, as an app summoned by a hotkey is, and shown on it.
     private const int HotKeyId = 7;
+
+    // `caption`/`assert-caption` mode: the window asks for its caption's double-clicks, and gets one, clicked for
+    // real with SendInput on the middle of its title bar. It may not maximize, so the double-click must leave it
+    // as it was. Windows only; SKIPs elsewhere.
 
     // `cdp`/`assert-cdp` mode (WebView2): the page reports where its button is and the host clicks it
     // through the DevTools protocol. The click must reach the page TRUSTED (event.isTrusted), which a
@@ -131,7 +165,7 @@ internal static partial class Program
         </script>
         """;
 
-    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp, HotKey, FileDialog }
+    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp, HotKey, FileDialog, Caption }
 
     private static void Log(string line)
     {
@@ -164,7 +198,8 @@ internal static partial class Program
         // `assert-hotkey` = a global hotkey pressed for real reaches the loop, exit 0/1 (Windows; SKIPs elsewhere).
         // `assert-filedialog` = a file dialog closed with a real Escape answers on the loop, and one whose token is
         // cancelled completes cancelled, exit 0/1 (Windows; SKIPs elsewhere).
-        // `messaging`/`autosize`/`docstart`/`cdp`/`hotkey`/`filedialog` = the same self-tests but interactive.
+        // `assert-caption` = a double-click on the title bar reaches the loop, exit 0/1 (Windows; SKIPs elsewhere).
+        // `messaging`/`autosize`/`docstart`/`cdp`/`hotkey`/`filedialog`/`caption` = the same self-tests but interactive.
         // Anything else = navigate to that URL.
         var (scenario, assertMode) = arg0.ToLowerInvariant() switch
         {
@@ -174,12 +209,14 @@ internal static partial class Program
             "assert-cdp" => (Scenario.Cdp, true),
             "assert-hotkey" => (Scenario.HotKey, true),
             "assert-filedialog" => (Scenario.FileDialog, true),
+            "assert-caption" => (Scenario.Caption, true),
             "messaging" => (Scenario.Messaging, false),
             "autosize" => (Scenario.AutoSize, false),
             "docstart" => (Scenario.DocStart, false),
             "cdp" => (Scenario.Cdp, false),
             "hotkey" => (Scenario.HotKey, false),
             "filedialog" => (Scenario.FileDialog, false),
+            "caption" => (Scenario.Caption, false),
             _ => (Scenario.Navigate, false),
         };
         Log($"[smoke] process arch = {RuntimeInformation.ProcessArchitecture}, scenario = {scenario}");
@@ -236,6 +273,8 @@ internal static partial class Program
         Func<string> failReason = () => "no scenario signals tracked";
         var hotKeyPending = false; // hotkey: registered, and its press is still to be sent
         FileDialogCheck? dialogCheck = null;
+        var hiddenForPress = false; // hotkey: the window was hidden before the press, as it must be
+        long captionClickAt = 0; // caption: when to double-click (once the window is up), 0 once done
 
         switch (scenario)
         {
@@ -263,6 +302,10 @@ internal static partial class Program
                 }
                 dialogCheck = new FileDialogCheck(window, Pass);
                 failReason = dialogCheck.FailReason;
+                break;
+            case Scenario.Caption:
+                failReason = ReportCaptionDoubleClicks(window, assertMode);
+                captionClickAt = assertMode ? Environment.TickCount64 + 1500 : 0;
                 break;
             case Scenario.Navigate:
                 WireNavigateProbe(webView);
@@ -309,6 +352,12 @@ internal static partial class Program
                     : "[smoke] file dialog self-test: the dialog opens, press Escape — close the window to exit.");
                 webView.NavigateToString("<!doctype html><title>filedialog-test</title><p>File dialog self-test</p>");
                 break;
+            case Scenario.Caption:
+                Log(assertMode
+                    ? "[smoke] assert mode: caption double-click self-test (expecting a double-click on the title bar, clicked for real, back as the window's event)."
+                    : "[smoke] caption double-click self-test: double-click the title bar — close the window to exit.");
+                webView.NavigateToString("<!doctype html><title>caption-test</title><p>Double-click the title bar</p>");
+                break;
             case Scenario.Navigate:
                 webView.Navigate(navigateUrl);
                 Log($"[smoke] navigating to {navigateUrl} — close the window to exit.");
@@ -332,6 +381,10 @@ internal static partial class Program
             if (hotKeyPending && assertMode)
             {
                 hotKeyPending = false;
+                // Hidden first: a hotkey is how an app hidden this way comes back, so its press must still arrive.
+                window.Hide();
+                hiddenForPress = window.IsHidden;
+                Log($"[smoke] hidden before the press: {hiddenForPress}");
                 var sent = PressHotKey();
                 Log($"[smoke] sent Ctrl+Alt+Shift+F24: {sent}");
                 if (sent != "ok")
@@ -339,6 +392,14 @@ internal static partial class Program
             }
 
             dialogCheck?.Tick(assertMode);
+            if (captionClickAt != 0 && Environment.TickCount64 >= captionClickAt)
+            {
+                captionClickAt = 0;
+                var sent = DoubleClickTitleBar(window);
+                Log($"[smoke] double-clicked the title bar: {sent}");
+                if (sent != "ok")
+                    failReason = () => $"the double-click could not be sent ({sent})";
+            }
 
             // WaitEventTimeout pumps the event queue even when idle, so async backend callbacks
             // (WebView2 controller creation, navigation completion) get dispatched.
@@ -361,7 +422,23 @@ internal static partial class Program
                         case var _ when SdlVulkanWindow.IsGlobalHotKey(evt, out var hotKey):
                             Log($"[smoke] global hotkey pressed: id {hotKey}");
                             if (assertMode && hotKey == HotKeyId)
+                            {
+                                window.Show();
+                                window.Raise();
+                                Log($"[smoke] shown again: {!window.IsHidden}");
+                                if (hiddenForPress && !window.IsHidden)
+                                    Pass();
+                                failReason = () => $"hidden before the press {hiddenForPress}, shown after it {!window.IsHidden}";
+                                running = false;
+                            }
+                            break;
+
+                        case var _ when window.IsCaptionDoubleClick(evt):
+                            Log($"[smoke] caption double-clicked; maximized: {window.IsMaximized}");
+                            if (assertMode && !window.IsMaximized)
                                 Pass();
+                            failReason = () => "the double-click maximized a window that may not maximize";
+                            running = !assertMode;
                             break;
 
                         case EventType.WindowResized:
@@ -541,6 +618,43 @@ internal static partial class Program
             .ToArray();
         var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<KeyInput>());
         return sent == inputs.Length ? "ok" : $"{sent} of {inputs.Length} sent, error {Marshal.GetLastPInvokeError()}";
+    }
+
+    // Caption double-click: asked for (it can only fail off Windows: SKIP there). The window may not maximize, so a
+    // double-click on its title bar is the app's alone, and it stays on top, so the click lands on it.
+    private static Func<string> ReportCaptionDoubleClicks(SdlVulkanWindow window, bool assertMode)
+    {
+        var reported = window.TryReportCaptionDoubleClicks();
+        Log($"[smoke] caption double-clicks reported: {reported}");
+        if (!reported && !OperatingSystem.IsWindows() && assertMode)
+        {
+            Log("SMOKE: SKIP (caption double-clicks are Windows only)");
+            FastExit(0);
+        }
+        if (!reported)
+            return () => "the window's caption double-clicks could not be asked for";
+        window.SetMaximizable(false);
+        window.SetAlwaysOnTop(true);
+        return () => "the double-click never reached the loop";
+    }
+
+    // Two left clicks on the middle of the title bar, then the cursor back where it was: "ok", or why SendInput
+    // refused. The title bar is the window's top border (SDL's position is the client area's).
+    private static string DoubleClickTitleBar(SdlVulkanWindow window)
+    {
+        window.GetPosition(out var x, out var y);
+        GetWindowSize(window.Handle, out var w, out _);
+        if (!GetWindowBordersSize(window.Handle, out var top, out _, out _, out _) || top <= 0)
+            return "the window has no title bar to click";
+        var restore = GetCursorPos(out var was);
+        SetCursorPos(x + w / 2, y - top / 2);
+        MouseInput[] inputs = [new() { Flags = 2 }, new() { Flags = 4 }, new() { Flags = 2 }, new() { Flags = 4 }];
+        var sent = SendMouseInput((uint)inputs.Length, inputs, Marshal.SizeOf<MouseInput>());
+        var error = Marshal.GetLastPInvokeError();
+        Thread.Sleep(100); // the clicks are read from the input queue; moving away before then would move them
+        if (restore)
+            SetCursorPos(was.X, was.Y);
+        return sent == inputs.Length ? "ok" : $"{sent} of {inputs.Length} sent, error {error}";
     }
 
     // Document-start script: registered before AttachToWindow, so it must reach the first document.

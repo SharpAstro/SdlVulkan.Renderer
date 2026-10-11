@@ -51,13 +51,15 @@ public sealed class SdlVulkanApp : IDisposable
     /// <summary>
     /// Opens a new OS window with its own Vulkan surface. The first call also creates the shared
     /// device from this window's surface. Build the window's context with
-    /// <see cref="VulkanContext.CreateForSharedDevice"/> passing <see cref="Device"/>.
+    /// <see cref="VulkanContext.CreateForSharedDevice"/> passing <see cref="Device"/>. A <paramref name="hidden"/>
+    /// window stays off screen (and off the taskbar) until <see cref="SdlVulkanWindow.Show"/>: an app that starts in
+    /// the background, to be brought up by a global hotkey, starts this way.
     /// </summary>
     public SdlVulkanWindow CreateWindow(string title, int width, int height, bool maximized = true,
-        bool borderless = false, bool alwaysOnTop = false, bool focusable = true)
+        bool borderless = false, bool alwaysOnTop = false, bool focusable = true, bool hidden = false)
     {
         var window = SdlVulkanWindow.CreateForApp(Instance, title, width, height,
-            maximized, borderless, alwaysOnTop, focusable);
+            maximized, borderless, alwaysOnTop, focusable, hidden);
         // The app owns the instance, so the shared device must not destroy it (ownsInstance: false) —
         // it outlives any single device and backs every window's surface.
         _device ??= VulkanDevice.Create(Instance, window.Surface, _msaaSamples, ownsInstance: false);

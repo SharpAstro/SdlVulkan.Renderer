@@ -7,6 +7,29 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.65
+
+**A window can hide, off the taskbar too, and come back.** For an app that lives in the background between uses
+and is brought up by a global hotkey (7.62):
+
+- `SdlVulkanWindow.Hide()` takes the window off the screen, the taskbar and Alt+Tab (`Minimize` leaves it on the
+  taskbar); `Show()` brings it back where it was, and `IsHidden` says which. A hidden window keeps its global
+  hotkeys, and the event loop draws nothing for it, as for a minimized one, until it is shown. Android is as it
+  was: the loop there still skips only a minimized window, so the resume fix's surface rebuild, which runs in the
+  render pass, cannot be held off by a hidden flag SDL failed to clear.
+- `SdlVulkanApp.CreateWindow(..., hidden: true)` creates it hidden, for an app that starts in the background.
+
+**A double-click on a window's caption reaches the app.** The caption is the OS title bar, or on a borderless
+window the area its SDL hit test calls draggable, which Windows treats as one. SDL gives the app neither click:
+Windows takes them, to move the window. `SdlVulkanWindow.TryReportCaptionDoubleClicks()` asks for them, and each
+arrives as `SdlWindowView.OnCaptionDoubleClick` (`SdlEventLoop.OnCaptionDoubleClick` for the primary window); a host
+with its own SDL loop reads them with `window.IsCaptionDoubleClick(evt)`. Windows' own handling goes ahead too, so
+a window that wants the double-click for itself (a player folding to its strip) calls `SetMaximizable(false)`.
+
+Windows only for now: elsewhere it returns false. Like global hotkeys, it rides on SDL's Windows message hook, now
+shared by both. `tools/WebViewSmoke assert-caption` double-clicks the smoke window's title bar for real with
+`SendInput` and expects the event, with the window not maximized; `assert-hotkey` now hides the window before its
+press and shows it on it.
 ## 7.64
 
 **A file dialog starts in the folder it was asked to, not the one above.** `SdlFileDialogs` gives a start folder a

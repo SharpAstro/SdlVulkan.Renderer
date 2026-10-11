@@ -167,6 +167,10 @@ public sealed class SdlEventLoop
     /// the window to the front (the press is what lets it).</summary>
     public Action<int>? OnGlobalHotKey { get; set; }
 
+    /// <summary>A double-click on the primary window's caption (<see cref="SdlVulkanWindow.TryReportCaptionDoubleClicks"/>);
+    /// see <see cref="SdlWindowView.OnCaptionDoubleClick"/>.</summary>
+    public Action? OnCaptionDoubleClick { get => Primary.OnCaptionDoubleClick; set => Primary.OnCaptionDoubleClick = value; }
+
     // --- Single-window forwarding properties (delegate to the primary view) ---
 
     private SdlWindowView Primary => _primary
@@ -279,14 +283,14 @@ public sealed class SdlEventLoop
             // A window with a redraw pending but not yet due (frame pacing) must not force PollEvent
             // either, or the loop busy-spins until it is due; it waits for exactly that long instead.
             var waitMs = 16;
-            // A minimized window is excluded here (and skipped in the render pass below) so it never
+            // A minimized (or hidden) window is excluded here (and skipped in the render pass below) so it never
             // forces the non-blocking PollEvent path: its surface is 0x0, so rendering it would just
             // busy-spin through failed acquire/present + swapchain recreation for frames nobody sees.
             // Falling through to WaitEventTimeout lets the loop idle until a restore/expose event. A
             // window whose GPU is wedged never renders again, so it never forces the poll path either.
             foreach (var v in _viewList)
             {
-                if (v.IsGpuWedged || !v.NeedsRedraw || nowTick < v.NextRenderAttemptTick || v.Window.IsMinimized) continue;
+                if (v.IsGpuWedged || !v.NeedsRedraw || nowTick < v.NextRenderAttemptTick || v.Window.IsMinimizedOrHidden) continue;
                 if (nowStamp >= v.NextFrameDueTimestamp) { anyNeedsRedraw = true; break; }
                 var dueMs = (int)Math.Ceiling((v.NextFrameDueTimestamp - nowStamp) * 1000.0 / Stopwatch.Frequency);
                 waitMs = Math.Clamp(Math.Min(waitMs, dueMs), 1, 16);
@@ -321,10 +325,11 @@ public sealed class SdlEventLoop
             {
                 var v = _viewList[i];
                 if (v.IsGpuWedged || !v.NeedsRedraw) continue;
-                // Minimized: skip render + swapchain recreation entirely (see the IsMinimized guard
+                // Minimized: skip render + swapchain recreation entirely (see the IsMinimizedOrHidden guard
                 // above). Leave NeedsRedraw armed so the window repaints the instant it is restored,
-                // without waiting for a fresh expose/resize event to re-arm it.
-                if (v.Window.IsMinimized) continue;
+                // without waiting for a fresh expose/resize event to re-arm it. Hidden, likewise: there is
+                // nothing on screen to draw into until it is shown.
+                if (v.Window.IsMinimizedOrHidden) continue;
                 // Inside a retry/recovery backoff: keep NeedsRedraw armed and skip this iteration —
                 // events were already dispatched above, so the window stays responsive while waiting.
                 if (Environment.TickCount64 < v.NextRenderAttemptTick) continue;
@@ -808,6 +813,10 @@ public sealed class SdlEventLoop
 
             case EventType.WindowRestored:
             case EventType.WindowExposed:
+#if !ANDROID
+            // Shown after a Hide: the same re-arm, for a window that was idle when it went.
+            case EventType.WindowShown:
+#endif
                 // Un-minimize / re-expose: re-arm a repaint. Covers the case where the window was idle
                 // (NeedsRedraw already false) when it got minimized, so the render pass's "keep
                 // NeedsRedraw armed" has nothing to resume from.
@@ -1038,6 +1047,12 @@ public sealed class SdlEventLoop
             default:
                 if (SdlVulkanWindow.IsGlobalHotKey(evt, out var hotKey))
                     OnGlobalHotKey?.Invoke(hotKey);
+                else if (WindowsMessageHook.CaptionDoubleClickEvent != 0 && evt.Type == WindowsMessageHook.CaptionDoubleClickEvent
+                         && TryView(evt.User.WindowID, out var vcap) && vcap.OnCaptionDoubleClick is not null)
+                {
+                    vcap.OnCaptionDoubleClick();
+                    vcap.NeedsRedraw = true;
+                }
                 // A file dialog's answer: completes its task here, on the loop's thread.
                 else
                     SdlFileDialogs.TryDeliver(evt);
