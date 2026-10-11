@@ -144,9 +144,16 @@ public sealed unsafe partial class SdlFileDialogs(SdlVulkanWindow? owner) : IFil
     /// Where the dialog starts. SDL takes one location, a folder or a file: a save dialog is given the suggested
     /// name inside the start folder, so the name field is filled in; the others the folder alone.
     /// </summary>
+    /// <remarks>
+    /// A folder is given a trailing separator, which is how SDL tells one from a file. Without it the Windows
+    /// dialog took the last component for a file name and opened in the folder ABOVE: asked to start in
+    /// <c>…\Tests\Assets</c>, it showed <c>…\Tests</c> with "Assets" in the name box.
+    /// </remarks>
     internal static string? Location(int kind, FileDialogRequest request)
     {
-        var folder = request.InitialDirectory is { Length: > 0 } dir ? dir : null;
+        var folder = request.InitialDirectory is { Length: > 0 } dir
+            ? Path.EndsInDirectorySeparator(dir) ? dir : dir + Path.DirectorySeparatorChar
+            : null;
         if (kind == SaveFile && request.SuggestedFileName is { Length: > 0 } name)
         {
             return folder is null ? name : Path.Combine(folder, name);

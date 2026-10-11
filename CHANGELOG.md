@@ -7,6 +7,13 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.64
+
+**A file dialog starts in the folder it was asked to, not the one above.** `SdlFileDialogs` gives a start folder a
+trailing separator, which is how SDL tells a folder from a file. Without one the Windows dialog took the last
+component for a file name: asked to start in `…\Tests\Assets`, it opened `…\Tests` with "Assets" in the name box.
+Found by the first real use, in the PDF viewer; checked there against the live dialog.
+
 ## 7.63
 
 **The platform's file dialogs, without blocking the window.** `SdlFileDialogs` implements DIR.Lib 11.17's

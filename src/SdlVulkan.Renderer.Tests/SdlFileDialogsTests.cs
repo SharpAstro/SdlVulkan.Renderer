@@ -21,12 +21,20 @@ public class SdlFileDialogsTests
         SdlFileDialogs.Pattern(new FileDialogFilter("All files", "")).ShouldBe("*");
 
     [Fact]
-    public void AnOpenDialogStartsInTheFolder()
+    public void AnOpenDialogStartsInTheFolderAndNotTheOneAbove()
     {
+        // The trailing separator is what makes SDL read the location as the folder to show. Without it the
+        // Windows dialog opened in /data with "frames" in the name box.
         var request = new FileDialogRequest { InitialDirectory = "/data/frames", SuggestedFileName = "ignored.fits" };
-        SdlFileDialogs.Location(SdlFileDialogs.OpenFile, request).ShouldBe("/data/frames");
-        SdlFileDialogs.Location(SdlFileDialogs.OpenFolder, request).ShouldBe("/data/frames");
+        var expected = $"/data/frames{Path.DirectorySeparatorChar}";
+        SdlFileDialogs.Location(SdlFileDialogs.OpenFile, request).ShouldBe(expected);
+        SdlFileDialogs.Location(SdlFileDialogs.OpenFolder, request).ShouldBe(expected);
     }
+
+    [Fact]
+    public void AFolderThatAlreadyEndsInASeparatorKeepsIt() =>
+        SdlFileDialogs.Location(SdlFileDialogs.OpenFile, new FileDialogRequest { InitialDirectory = "/data/frames/" })
+            .ShouldBe("/data/frames/");
 
     [Fact]
     public void ASaveDialogStartsOnTheSuggestedNameInsideTheFolder()
