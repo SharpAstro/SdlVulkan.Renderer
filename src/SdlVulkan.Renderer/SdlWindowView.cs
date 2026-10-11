@@ -184,6 +184,13 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     public Action? OnCloseRequested { get; set; }
 
     /// <summary>
+    /// Called on a double-click on this window's caption: its OS title bar, or a borderless window's draggable area.
+    /// Only for a window that asked, with <see cref="SdlVulkanWindow.TryReportCaptionDoubleClicks"/> (Windows only
+    /// for now). A redraw follows.
+    /// </summary>
+    public Action? OnCaptionDoubleClick { get; set; }
+
+    /// <summary>
     /// Called each loop iteration before checking redraw for this window. Return true to force a
     /// redraw (external state changes: background task completions, cursor blink, etc.).
     /// </summary>

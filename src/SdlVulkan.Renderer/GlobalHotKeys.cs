@@ -1,5 +1,3 @@
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using static SDL3.SDL;
 
@@ -9,31 +7,22 @@ namespace SdlVulkan.Renderer;
 /// Key combinations that reach the app whichever app is active (<see cref="SdlVulkanWindow.TryRegisterGlobalHotKey"/>),
 /// which SDL has no API for. On Windows a press arrives as <c>WM_HOTKEY</c> in the window thread's queue; SDL's
 /// Windows message hook sees it there, ahead of SDL's own handling, and turns it into an SDL user event, so it wakes
-/// a waiting event loop and is handled on the loop's thread like any other event, not inside SDL's message pump.
+/// a waiting event loop and is handled on the loop's thread like any other event, not inside SDL's message pump
+/// (<see cref="WindowsMessageHook"/>).
 /// </summary>
-internal static unsafe partial class GlobalHotKeys
+internal static class GlobalHotKeys
 {
-    private const uint WmHotKey = 0x0312;
     private const uint ModAlt = 0x0001, ModControl = 0x0002, ModShift = 0x0004, ModWin = 0x0008, ModNoRepeat = 0x4000;
     private const uint ScancodeMask = 1u << 30; // SDLK_SCANCODE_MASK: a keycode with no character
 
-    /// <summary>The SDL event type a press arrives as; 0 until the first registration asks SDL for one.</summary>
-    internal static uint EventType { get; private set; }
+    /// <summary>The SDL event type a press arrives as; 0 until the first registration installs the hook.</summary>
+    internal static uint EventType => WindowsMessageHook.HotKeyEvent;
 
     [SupportedOSPlatform("windows")]
     internal static bool TryRegister(nint hwnd, int id, Keymod modifiers, Keycode key)
     {
-        if (hwnd == nint.Zero || !TryResolve(modifiers, key, out var mods, out var vk))
+        if (hwnd == nint.Zero || !TryResolve(modifiers, key, out var mods, out var vk) || !WindowsMessageHook.TryInstall())
             return false;
-        if (EventType == 0)
-        {
-            var type = RegisterEvents(1);
-            if (type == 0)
-                return false;
-            EventType = type;
-            // The hook is SDL's one Windows message hook for the process: this library takes it.
-            SetWindowsMessageHook(&OnWindowsMessage, nint.Zero);
-        }
         // NOREPEAT: holding the keys down is one press, not a stream of them.
         return Win32Window.RegisterHotKey(hwnd, id, mods | ModNoRepeat, vk);
     }
@@ -78,34 +67,4 @@ internal static unsafe partial class GlobalHotKeys
             vk = 0x7C + (scancode - (uint)Scancode.F13); // VK_F13
         return vk != 0;
     }
-
-    // Every message SDL takes from the window thread's queue passes through here before SDL handles it. Keep it to
-    // the one comparison for everything else: it runs for each mouse move.
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static byte OnWindowsMessage(nint userdata, Msg* msg)
-    {
-        if (msg->Message != WmHotKey)
-            return 1;
-        var evt = default(Event);
-        evt.User.Type = EventType;
-        evt.User.Code = (int)msg->WParam; // the id it was registered with
-        PushEvent(ref evt);
-        return 0; // SDL has no use for it
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Msg
-    {
-        public nint Hwnd;
-        public uint Message;
-        public nuint WParam;
-        public nint LParam;
-        public uint Time;
-        public int X, Y;
-    }
-
-    // SDL3-CS binds the hook as a marshalled delegate; a function pointer to an UnmanagedCallersOnly method needs no
-    // marshalling under native AOT and nothing the GC could collect while SDL holds it.
-    [LibraryImport("SDL3", EntryPoint = "SDL_SetWindowsMessageHook")]
-    private static partial void SetWindowsMessageHook(delegate* unmanaged[Cdecl]<nint, Msg*, byte> callback, nint userdata);
 }

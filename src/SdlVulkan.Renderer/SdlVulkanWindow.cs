@@ -57,16 +57,19 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// <paramref name="maximized"/> defaults true (the main window). A tab being torn out is dragged as
     /// a small <paramref name="borderless"/> + <paramref name="alwaysOnTop"/> + non-<paramref
     /// name="focusable"/> "chip" window that <see cref="SetBordered"/>/<see cref="SetAlwaysOnTop"/>-morphs
-    /// into a normal document window on drop.
+    /// into a normal document window on drop. A <paramref name="hidden"/> window stays off screen until
+    /// <see cref="Show"/>.
     /// </summary>
     internal static SdlVulkanWindow CreateForApp(VkInstance instance, string title, int width, int height,
-        bool maximized = true, bool borderless = false, bool alwaysOnTop = false, bool focusable = true)
+        bool maximized = true, bool borderless = false, bool alwaysOnTop = false, bool focusable = true,
+        bool hidden = false)
         => CreateInternal(instance, title, width, height, ownsSdl: false,
-            maximized: maximized, borderless: borderless, alwaysOnTop: alwaysOnTop, focusable: focusable);
+            maximized: maximized, borderless: borderless, alwaysOnTop: alwaysOnTop, focusable: focusable,
+            hidden: hidden);
 
     private static SdlVulkanWindow CreateInternal(VkInstance instance, string title, int width, int height,
         bool ownsSdl, bool maximized = true, bool borderless = false, bool alwaysOnTop = false,
-        bool focusable = true, bool fullscreen = false)
+        bool focusable = true, bool fullscreen = false, bool hidden = false)
     {
         var flags = WindowFlags.Vulkan;
         if (fullscreen)
@@ -83,6 +86,7 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
             if (borderless) flags |= WindowFlags.Borderless;
             if (alwaysOnTop) flags |= WindowFlags.AlwaysOnTop;
             if (!focusable) flags |= WindowFlags.NotFocusable;
+            if (hidden) flags |= WindowFlags.Hidden;
         }
         var window = CreateWindow(title, width, height, flags);
         if (window == nint.Zero)
@@ -263,6 +267,39 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// </summary>
     public bool IsMinimized => (GetWindowFlags(Handle) & WindowFlags.Minimized) != 0;
 
+    /// <summary>
+    /// True while the window is hidden (<see cref="Hide"/>, or created hidden): not on screen, and not on the taskbar
+    /// or in Alt+Tab either. The event loop draws nothing for it, as for a minimized one.
+    /// </summary>
+    public bool IsHidden => (GetWindowFlags(Handle) & WindowFlags.Hidden) != 0;
+
+    /// <summary>Minimized or hidden: nothing of the window is on screen, so the event loop draws nothing for it.</summary>
+    /// <remarks>On Android, minimized only, as before hiding was added. There the loop pauses a backgrounded window
+    /// itself and rebuilds its surface on return, in the render pass (the black-screen-on-resume fix); a device that
+    /// reported the window hidden and then only restored would leave SDL's hidden flag set, and a render pass that
+    /// skipped hidden windows would never reach that rebuild.</remarks>
+    internal bool IsMinimizedOrHidden =>
+#if ANDROID
+        IsMinimized;
+#else
+        (GetWindowFlags(Handle) & (WindowFlags.Minimized | WindowFlags.Hidden)) != 0;
+#endif
+
+    /// <summary>
+    /// Hides the window until <see cref="Show"/>: off the screen, the taskbar and Alt+Tab, unlike
+    /// <see cref="Minimize"/>, which leaves it on the taskbar. It keeps its size and place, and its global hotkeys,
+    /// which are how an app hidden like this is usually brought back. A native child (an embedded web view) goes
+    /// with it, and the event loop stops drawing it.
+    /// </summary>
+    public void Hide() => HideWindow(Handle);
+
+    /// <summary>
+    /// Shows a hidden window again, where it was. Whether it also comes to the front with the keyboard is the OS's
+    /// call: an app in the background is refused that, except in answer to the user's input, such as the press of
+    /// a global hotkey (<see cref="SdlEventLoop.OnGlobalHotKey"/>), where <see cref="Raise"/> after this does it.
+    /// </summary>
+    public void Show() => ShowWindow(Handle);
+
     /// <summary>Restores the window to its floating (un-maximized / un-minimized) size and position.</summary>
     public void Restore() => RestoreWindow(Handle);
 
@@ -396,6 +433,29 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         return isHotKey;
     }
 
+    /// <summary>
+    /// Reports each double-click on the window's caption, as <see cref="SdlWindowView.OnCaptionDoubleClick"/> (a host
+    /// running its own SDL loop reads it with <see cref="IsCaptionDoubleClick"/>). The caption is the OS title bar,
+    /// or on a borderless window the area its SDL hit test calls draggable, which Windows treats as one. SDL gives
+    /// the app neither click: Windows takes them, to move the window. Windows only for now; elsewhere it returns false.
+    /// </summary>
+    /// <remarks>
+    /// <para>Windows' own handling goes ahead as well: a window that may maximize does. One that wants the
+    /// double-click for itself calls <see cref="SetMaximizable"/>(false).</para>
+    /// <para>On Windows this takes SDL's Windows message hook, as <see cref="TryRegisterGlobalHotKey"/> does: one per
+    /// process, so an app that sets its own replaces this one. It lasts until <see cref="Dispose"/>.</para>
+    /// </remarks>
+    public bool TryReportCaptionDoubleClicks()
+        => OperatingSystem.IsWindows()
+           && WindowsMessageHook.TryReportCaptionDoubleClicks(GetNativeWindowHandle(), WindowId);
+
+    /// <summary>For a host that runs its own SDL event loop: whether <paramref name="evt"/> is a double-click on this
+    /// window's caption (<see cref="TryReportCaptionDoubleClicks"/>). <see cref="SdlEventLoop"/> does this itself and
+    /// calls <see cref="SdlWindowView.OnCaptionDoubleClick"/>.</summary>
+    public bool IsCaptionDoubleClick(in Event evt)
+        => WindowsMessageHook.CaptionDoubleClickEvent != 0 && evt.Type == WindowsMessageHook.CaptionDoubleClickEvent
+           && evt.User.WindowID == WindowId;
+
     /// <summary>The global mouse position in desktop coordinates (across all displays), as integer
     /// pixels. Used to place a torn-out window under the cursor.</summary>
     public static void GetGlobalMousePosition(out int x, out int y)
@@ -441,6 +501,8 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     {
         foreach (var id in _globalHotKeys.ToArray())
             UnregisterGlobalHotKey(id);
+        if (OperatingSystem.IsWindows())
+            WindowsMessageHook.StopReportingCaptionDoubleClicks(GetNativeWindowHandle());
         lock (_cursorLock)
         {
             foreach (var handle in _cursorCache.Values)
