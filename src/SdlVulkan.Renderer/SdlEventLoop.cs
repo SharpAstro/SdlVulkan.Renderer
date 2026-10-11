@@ -1038,6 +1038,9 @@ public sealed class SdlEventLoop
             default:
                 if (SdlVulkanWindow.IsGlobalHotKey(evt, out var hotKey))
                     OnGlobalHotKey?.Invoke(hotKey);
+                // A file dialog's answer: completes its task here, on the loop's thread.
+                else
+                    SdlFileDialogs.TryDeliver(evt);
                 break;
         }
     }

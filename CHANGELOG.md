@@ -7,6 +7,27 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.63
+
+**The platform's file dialogs, without blocking the window.** `SdlFileDialogs` implements DIR.Lib 11.17's
+`IFileDialogs` over SDL's dialogs (the common item dialog on Windows, the desktop portal or zenity on Linux,
+NSOpenPanel on macOS): `new SdlFileDialogs(window)` and then `OpenAsync`, `SaveAsync` or `OpenFolderAsync` with a
+title, filters, a start folder, a suggested save name and, for open, many files. Call it on the main thread (SDL
+requires it). The call returns at once, and the task completes on the event loop's thread: SDL may answer on any
+thread, so the answer comes back as an SDL user event, which `SdlEventLoop` delivers itself and a host with its own
+loop passes to `SdlFileDialogs.TryDeliver(evt)`. A cancelled token completes the task as cancelled and drops the
+dialog's late answer (SDL cannot close a dialog it has shown). A save path is given the filter's extension when the
+user typed none, on every platform.
+
+Nothing is marshalled: SDL keeps the filter array until it calls back, which SDL3-CS's array overload does not
+guarantee, so the filters, their strings and the properties stay in native memory until then, and the callback is
+an `UnmanagedCallersOnly` function pointer, as AOT needs. `SdlFileDialogsTests` covers the filter patterns and where
+the dialog starts. `tools/WebViewSmoke assert-filedialog` shows the real thing through a host's own loop: a dialog
+closed with an Escape pressed by `SendInput` answers with no paths on the loop's thread, and one whose token is
+cancelled completes cancelled at once while its late answer is delivered and dropped (Windows; SKIPs elsewhere).
+
+DIR.Lib 11.17.
+
 ## 7.62
 
 **A key combination can reach the app from anywhere on the desktop.** For a small, always-on-top window (a

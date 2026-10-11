@@ -5,6 +5,7 @@ SDL3 + Vortice.Vulkan rendering library built on [DIR.Lib](https://github.com/Sh
 ## Types
 
 - **`SdlVulkanWindow`** — SDL3 window with Vulkan instance and surface lifecycle. Creates maximized, resizable windows with Vulkan surface.
+- **`SdlFileDialogs`** — DIR.Lib's `IFileDialogs` over the platform's own open, save and folder dialogs (`new SdlFileDialogs(window)`). Never blocks the window; the task completes on the event loop's thread, which `SdlEventLoop` arranges itself and a host with its own loop arranges with `SdlFileDialogs.TryDeliver(evt)`.
 - **`VulkanContext`** — Vulkan device, command buffers, sync management. `MaxFramesInFlight = 2` with per-frame vertex buffers. Two construction modes:
   - `VulkanContext.Create(instance, surface, w, h, ...)` — on-screen path with a swapchain tied to an `SdlVulkanWindow`.
   - `VulkanContext.CreateOffscreen(instance, w, h, ...)` — headless path rendering to a standalone `VkImage`; no surface, no swapchain, no SDL window. See **Headless / offscreen rendering** below.

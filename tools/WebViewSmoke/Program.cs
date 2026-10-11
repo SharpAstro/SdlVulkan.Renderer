@@ -131,7 +131,7 @@ internal static partial class Program
         </script>
         """;
 
-    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp, HotKey }
+    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp, HotKey, FileDialog }
 
     private static void Log(string line)
     {
@@ -162,7 +162,9 @@ internal static partial class Program
         // self-test, exit 0/1 (CI). `assert-docstart` = document-start script self-test, exit 0/1 (CI).
         // `assert-cdp` = a DevTools-protocol click arrives trusted, exit 0/1 (WebView2; SKIPs on WebKitGTK).
         // `assert-hotkey` = a global hotkey pressed for real reaches the loop, exit 0/1 (Windows; SKIPs elsewhere).
-        // `messaging`/`autosize`/`docstart`/`cdp`/`hotkey` = the same self-tests but interactive.
+        // `assert-filedialog` = a file dialog closed with a real Escape answers on the loop, and one whose token is
+        // cancelled completes cancelled, exit 0/1 (Windows; SKIPs elsewhere).
+        // `messaging`/`autosize`/`docstart`/`cdp`/`hotkey`/`filedialog` = the same self-tests but interactive.
         // Anything else = navigate to that URL.
         var (scenario, assertMode) = arg0.ToLowerInvariant() switch
         {
@@ -171,11 +173,13 @@ internal static partial class Program
             "assert-docstart" => (Scenario.DocStart, true),
             "assert-cdp" => (Scenario.Cdp, true),
             "assert-hotkey" => (Scenario.HotKey, true),
+            "assert-filedialog" => (Scenario.FileDialog, true),
             "messaging" => (Scenario.Messaging, false),
             "autosize" => (Scenario.AutoSize, false),
             "docstart" => (Scenario.DocStart, false),
             "cdp" => (Scenario.Cdp, false),
             "hotkey" => (Scenario.HotKey, false),
+            "filedialog" => (Scenario.FileDialog, false),
             _ => (Scenario.Navigate, false),
         };
         Log($"[smoke] process arch = {RuntimeInformation.ProcessArchitecture}, scenario = {scenario}");
@@ -231,6 +235,7 @@ internal static partial class Program
 
         Func<string> failReason = () => "no scenario signals tracked";
         var hotKeyPending = false; // hotkey: registered, and its press is still to be sent
+        FileDialogCheck? dialogCheck = null;
 
         switch (scenario)
         {
@@ -248,6 +253,16 @@ internal static partial class Program
                 break;
             case Scenario.HotKey:
                 failReason = RegisterHotKeys(window, assertMode, ref hotKeyPending);
+                break;
+            case Scenario.FileDialog:
+                if (assertMode && !OperatingSystem.IsWindows())
+                {
+                    // The Escape that closes the dialog is sent with SendInput.
+                    Log("SMOKE: SKIP (the file dialog self-test presses keys with SendInput, Windows only)");
+                    FastExit(0);
+                }
+                dialogCheck = new FileDialogCheck(window, Pass);
+                failReason = dialogCheck.FailReason;
                 break;
             case Scenario.Navigate:
                 WireNavigateProbe(webView);
@@ -288,6 +303,12 @@ internal static partial class Program
                     : "[smoke] global hotkey self-test: press Ctrl+Alt+Shift+F24 from any app — close the window to exit.");
                 webView.NavigateToString("<!doctype html><title>hotkey-test</title><p>Ctrl+Alt+Shift+F24</p>");
                 break;
+            case Scenario.FileDialog:
+                Log(assertMode
+                    ? "[smoke] assert mode: file dialog self-test (expecting a dialog Escape closes to answer on the loop's thread, and an abandoned one to complete cancelled)."
+                    : "[smoke] file dialog self-test: the dialog opens, press Escape — close the window to exit.");
+                webView.NavigateToString("<!doctype html><title>filedialog-test</title><p>File dialog self-test</p>");
+                break;
             case Scenario.Navigate:
                 webView.Navigate(navigateUrl);
                 Log($"[smoke] navigating to {navigateUrl} — close the window to exit.");
@@ -317,6 +338,8 @@ internal static partial class Program
                     failReason = () => $"the press could not be sent ({sent})";
             }
 
+            dialogCheck?.Tick(assertMode);
+
             // WaitEventTimeout pumps the event queue even when idle, so async backend callbacks
             // (WebView2 controller creation, navigation completion) get dispatched.
             if (WaitEventTimeout(out var evt, 16))
@@ -328,6 +351,11 @@ internal static partial class Program
                         case EventType.Quit:
                         case EventType.WindowCloseRequested:
                             running = false;
+                            break;
+
+                        // A host with its own loop hands file dialogs their answers itself.
+                        case var _ when SdlFileDialogs.TryDeliver(evt):
+                            dialogCheck?.Delivered();
                             break;
 
                         case var _ when SdlVulkanWindow.IsGlobalHotKey(evt, out var hotKey):
@@ -384,6 +412,123 @@ internal static partial class Program
             return () => $"a second registration was accepted (combination {again}, id {sameId})";
         pending = true;
         return () => "the hotkey's press never reached the loop";
+    }
+
+    // File dialogs, through the host's own loop (SdlFileDialogs.TryDeliver), in two steps.
+    // 1. A dialog the user cancels: Escape, pressed for real, closes it, and the task must complete with no paths
+    //    (the user's Cancel) and do so on the loop's thread, where a continuation that stays put runs.
+    // 2. A dialog the caller abandons: its token is cancelled while it is up, so the task must complete cancelled at
+    //    once; Escape then closes the dialog, and its late answer must arrive and be dropped.
+    // Escape is resent every second until the dialog answers: how long the platform takes to show one varies.
+    private sealed class FileDialogCheck(SdlVulkanWindow window, Action pass)
+    {
+        private readonly SdlFileDialogs _dialogs = new(window);
+        private readonly int _loopThread = Environment.CurrentManagedThreadId;
+        private int _step;
+        private long _nextEscape;
+        private Task<FileDialogResult>? _cancelled, _abandoned;
+        private int _cancelledOn = -1;
+        private int _deliveries, _deliveriesBefore;
+        private string _state = "the first dialog was never shown";
+
+        public string FailReason() => _state;
+
+        public void Delivered() => _deliveries++;
+
+        public void Tick(bool assertMode)
+        {
+            var now = Environment.TickCount64;
+            switch (_step)
+            {
+                case 0:
+                    _cancelled = _dialogs.OpenAsync(new FileDialogRequest
+                    {
+                        Title = "smoke: Escape closes this",
+                        Filters = [new FileDialogFilter("Text", "txt")],
+                    });
+                    _cancelled.ContinueWith(_ => _cancelledOn = Environment.CurrentManagedThreadId,
+                        TaskContinuationOptions.ExecuteSynchronously);
+                    _nextEscape = now + 1500;
+                    _state = "Escape never closed the first dialog";
+                    _step = 1;
+                    break;
+
+                case 1:
+                    if (!_cancelled!.IsCompleted)
+                    {
+                        PressEscapeWhenDue(now, assertMode);
+                        break;
+                    }
+
+                    if (!_cancelled.IsCompletedSuccessfully || !_cancelled.Result.Cancelled)
+                    {
+                        _state = $"the first dialog answered {Describe(_cancelled)}, not the user's Cancel";
+                        _step = 3;
+                        break;
+                    }
+
+                    if (_cancelledOn != _loopThread)
+                    {
+                        _state = $"the first answer completed on thread {_cancelledOn}, not the loop's ({_loopThread})";
+                        _step = 3;
+                        break;
+                    }
+
+                    Log("[smoke] first dialog: Escape cancelled it, answered on the loop's thread");
+                    using (var abandon = new CancellationTokenSource())
+                    {
+                        _deliveriesBefore = _deliveries;
+                        _abandoned = _dialogs.OpenAsync(new FileDialogRequest { Title = "smoke: abandoned" }, abandon.Token);
+                        abandon.Cancel();
+                    }
+
+                    _nextEscape = now + 1500;
+                    _state = "the abandoned dialog's late answer never arrived";
+                    _step = 2;
+                    break;
+
+                case 2:
+                    if (!_abandoned!.IsCanceled)
+                    {
+                        _state = $"the abandoned dialog's task is {_abandoned.Status}, not cancelled";
+                        _step = 3;
+                        break;
+                    }
+
+                    if (_deliveries == _deliveriesBefore)
+                    {
+                        PressEscapeWhenDue(now, assertMode);
+                        break;
+                    }
+
+                    Log("[smoke] second dialog: cancelled by its token, its late answer delivered and dropped");
+                    if (assertMode)
+                        pass();
+                    _step = 3;
+                    break;
+            }
+        }
+
+        private void PressEscapeWhenDue(long now, bool assertMode)
+        {
+            if (!assertMode || now < _nextEscape)
+                return;
+            _nextEscape = now + 1000;
+            Log($"[smoke] sent Escape: {PressEscape()}");
+        }
+
+        private static string Describe(Task<FileDialogResult> task) => task.Status switch
+        {
+            TaskStatus.RanToCompletion => $"{task.Result.Paths.Count} path(s), error {task.Result.Error ?? "none"}",
+            _ => task.Status.ToString(),
+        };
+    }
+
+    private static string PressEscape()
+    {
+        KeyInput[] inputs = [new() { Type = 1, Vk = 0x1B }, new() { Type = 1, Vk = 0x1B, Flags = 2 }]; // VK_ESCAPE
+        var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<KeyInput>());
+        return sent == inputs.Length ? "ok" : $"{sent} of {inputs.Length} sent, error {Marshal.GetLastPInvokeError()}";
     }
 
     // Ctrl, Alt and Shift down, F24 down and up, then the modifiers up: "ok", or why SendInput refused (it does on
