@@ -831,7 +831,17 @@ public sealed class SdlEventLoop
                     ve.NeedsSurfaceRebuild = true;
 #endif
                     ve.NeedsRedraw = true;
+                    // Restoring a minimized window, SDL rebuilt its style, maximize box included: put back a
+                    // SetMaximizable(false). Shown, too, as a show can rebuild it (a window shown into fullscreen).
+                    if (evt.Type != (uint)EventType.WindowExposed)
+                        ve.Window.ApplyMaximizable();
                 }
+                break;
+
+            case EventType.WindowLeaveFullscreen:
+                // Leaving fullscreen, SDL rebuilt the window's style: put back a SetMaximizable(false).
+                if (TryView(evt.Window.WindowID, out var vlf))
+                    vlf.Window.ApplyMaximizable();
                 break;
 
 #if ANDROID

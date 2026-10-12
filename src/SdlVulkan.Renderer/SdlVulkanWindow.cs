@@ -321,14 +321,22 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
 
     /// <summary>Adds or removes the OS window border/title bar. Used to morph a borderless drag "chip"
     /// into a normal bordered document window when a torn-out tab is dropped.</summary>
-    public void SetBordered(bool bordered) => SetWindowBordered(Handle, bordered);
+    public void SetBordered(bool bordered)
+    {
+        SetWindowBordered(Handle, bordered);
+        ApplyMaximizable(); // SDL rebuilt the style
+    }
 
     /// <summary>Toggles the always-on-top flag. The drag chip floats on top; dropped, it drops back to
     /// normal stacking.</summary>
     public void SetAlwaysOnTop(bool onTop) => SetWindowAlwaysOnTop(Handle, onTop);
 
     /// <summary>Toggles whether the window is user-resizable.</summary>
-    public void SetResizable(bool resizable) => SetWindowResizable(Handle, resizable);
+    public void SetResizable(bool resizable)
+    {
+        SetWindowResizable(Handle, resizable);
+        ApplyMaximizable(); // SDL rebuilt the style
+    }
 
     /// <summary>Toggles whether the window can take input focus. A drag chip is created non-focusable
     /// (so it doesn't steal focus mid-drag and stays off the taskbar); morphing it into a real document
@@ -354,11 +362,25 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// a drag to the top edge do. Elsewhere it does nothing: SDL has no such flag, and a borderless
     /// window has no maximize button to remove.
     /// </summary>
-    /// <remarks>SDL rebuilds the window style when <see cref="SetBordered"/> or
-    /// <see cref="SetResizable"/> run, which puts the box back, so call this after them.</remarks>
+    /// <remarks>The choice is kept. SDL rebuilds a resizable window's style, maximize box included, when it
+    /// restores the window from minimized, leaves fullscreen, or runs <see cref="SetBordered"/> or
+    /// <see cref="SetResizable"/>. Those two put the choice back themselves, and <see cref="SdlEventLoop"/> does
+    /// on the events that follow the others (restored, shown, left fullscreen). Before it did, a window minimized
+    /// and restored had its box back, and a double-click on its caption maximized it. A host with its own SDL loop
+    /// calls this again after those events.</remarks>
     public void SetMaximizable(bool maximizable)
     {
-        if (OperatingSystem.IsWindows())
+        _maximizable = maximizable;
+        ApplyMaximizable();
+    }
+
+    // SetMaximizable's choice, null until it is made: SDL's own style stands until then.
+    private bool? _maximizable;
+
+    /// <summary>Puts <see cref="SetMaximizable"/>'s choice back after SDL rebuilt the window's style.</summary>
+    internal void ApplyMaximizable()
+    {
+        if (_maximizable is { } maximizable && OperatingSystem.IsWindows())
             Win32Window.SetMaximizeBox(GetNativeWindowHandle(), maximizable);
     }
 
