@@ -7,6 +7,20 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.67
+
+**`SetMaximizable(false)` stays set.** SDL rebuilds a resizable window's style, maximize box included, when it
+restores the window from minimized, leaves fullscreen, or sets it bordered or resizable. So a window minimized
+(Win+D, its taskbar button) and restored had its maximize box back. A double-click on its caption then maximized it,
+and for a window that also reports caption double-clicks (7.65), did what the app does with one as well. YtPlayer's
+player ended up maximized to the screen and folded to its strip at once.
+
+The choice is now kept. `SetBordered` and `SetResizable` put it back themselves, and `SdlEventLoop` does on the
+events that follow SDL's other rebuilds: restored, shown, left fullscreen. A host with its own SDL loop calls
+`SetMaximizable` again after those. Checked with a window minimized and restored through posted `SC_MINIMIZE` and
+`SC_RESTORE`: before, the box came back and a posted caption double-click maximized it; now the box stays off and the
+double-click only reaches the app.
+
 ## 7.66
 
 **A host hears when the page goes fullscreen.** A video's fullscreen button fills only the view, which in a small
