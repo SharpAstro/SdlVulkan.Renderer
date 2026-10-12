@@ -67,6 +67,17 @@ public interface INativeWebView : IDisposable
     /// <summary>Raised when the document title changes.</summary>
     event Action<string>? TitleChanged;
 
+    /// <summary>
+    /// Raised when the page enters fullscreen (<c>element.requestFullscreen()</c>: a video player's fullscreen
+    /// button) or leaves it: true while it is. The page's fullscreen fills only the view, so a host that wants it
+    /// to fill the screen makes its window fullscreen and the view's bounds the window's, and puts both back on
+    /// false.
+    /// </summary>
+    /// <remarks>On WebView2 it is raised on the window's thread (WebView2's events arrive in the window's message
+    /// loop), so the handler can resize the window and the view directly. Windows only for now: the WebKitGTK and
+    /// WKWebView backends never raise it.</remarks>
+    event Action<bool>? FullscreenChanged;
+
     /// <summary>Raised when a navigation completes; carries the final URL.</summary>
     event Action<string>? NavigationCompleted;
 

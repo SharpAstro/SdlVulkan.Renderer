@@ -7,6 +7,21 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.66
+
+**A host hears when the page goes fullscreen.** A video's fullscreen button fills only the view, which in a small
+window is not much. `INativeWebView.FullscreenChanged(bool)` says when the page enters fullscreen and when it leaves,
+so a host can make its window fullscreen and the view's bounds the window's, and put both back.
+
+On WebView2 it is raised on the window's thread, so the handler can resize the window and the view directly. In
+YtPlayer, YouTube's F (which makes the document element fullscreen) now fills the screen and stays until F again. A
+page that moves its fullscreen element when the view grows drops out of fullscreen, as any page would: asking for
+fullscreen on YouTube's `#movie_player` directly did that, and is not what YouTube itself does.
+
+Windows only for now: the WebKitGTK and WKWebView backends never raise it. `tools/WebViewSmoke assert-fullscreen`
+puts a box fullscreen through the DevTools protocol (with a user gesture), resizes the view in the handler, and expects
+the page to stay fullscreen until it is asked to leave, then the event again (WebView2; SKIPs elsewhere).
+
 ## 7.65
 
 **A window can hide, off the taskbar too, and come back.** For an app that lives in the background between uses

@@ -49,10 +49,12 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
     private CoreWebView2SourceChangedEventHandler? _sourceChangedHandler;
     private CoreWebView2NavigationCompletedEventHandler? _navCompletedHandler;
     private CoreWebView2DocumentTitleChangedEventHandler? _titleChangedHandler;
+    private CoreWebView2ContainsFullScreenElementChangedEventHandler? _fullscreenHandler;
     private EventRegistrationToken _navStartingToken;
     private EventRegistrationToken _sourceChangedToken;
     private EventRegistrationToken _navCompletedToken;
     private EventRegistrationToken _titleChangedToken;
+    private EventRegistrationToken _fullscreenToken;
 
     // Diagnostics: renderer-crash handler + the DevTools-Protocol receivers/handlers that feed
     // console/exception/log capture. All kept alive for the lifetime of the subscription.
@@ -66,6 +68,7 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
     private EventRegistrationToken _webMessageToken;
 
     public event Action<string>? TitleChanged;
+    public event Action<bool>? FullscreenChanged;
     public event Action<string>? NavigationCompleted;
     public event Action<string>? MessageReceived;
     public event Action<nint, uint, nint, nint>? WndProcOverride; // not surfaced via this backend yet
@@ -203,6 +206,16 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
             TitleChanged?.Invoke(text);
         });
         webView2.add_DocumentTitleChanged(_titleChangedHandler, ref _titleChangedToken).ThrowOnError();
+
+        // The page's fullscreen, entered or left; raised on the window's thread (see INativeWebView.FullscreenChanged).
+        _fullscreenHandler = new CoreWebView2ContainsFullScreenElementChangedEventHandler((sender, _) =>
+        {
+            var contains = default(BOOL);
+            sender.get_ContainsFullScreenElement(ref contains);
+            Trace?.Invoke($"fullscreen: {(bool)contains}");
+            FullscreenChanged?.Invoke(contains);
+        });
+        webView2.add_ContainsFullScreenElementChanged(_fullscreenHandler, ref _fullscreenToken).ThrowOnError();
     }
 
     // Captures in-page diagnostics that WebView2 only exposes through the DevTools Protocol:
@@ -461,6 +474,7 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
         _sourceChangedHandler = null;
         _navCompletedHandler = null;
         _titleChangedHandler = null;
+        _fullscreenHandler = null;
         _processFailedHandler = null;
         _webMessageHandler = null;
         _cdpHandlers.Clear();
