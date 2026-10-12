@@ -14,6 +14,7 @@ internal sealed class CocoaWebView : INativeWebView
     private SdlVulkanWindow? _window;
 
     public event Action<string>? TitleChanged;
+    public event Action<bool>? FullscreenChanged;
     public event Action<string>? NavigationCompleted;
     public event Action<string>? MessageReceived;
     public event Action<nint, uint, nint, nint>? WndProcOverride; // always null on macOS

@@ -1,4 +1,4 @@
-#pragma warning disable CS0067 // WndProcOverride is HWND-only; never raised on the Linux backend.
+#pragma warning disable CS0067 // WndProcOverride is HWND-only, and FullscreenChanged not wired yet: never raised here.
 
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
@@ -120,6 +120,7 @@ internal sealed class GtkWebView(NativeWebViewOptions options) : INativeWebView
     private readonly List<(string Script, TaskCompletionSource Done)> _pendingDocumentStartScripts = [];
 
     public event Action<string>? TitleChanged;
+    public event Action<bool>? FullscreenChanged;
     public event Action<string>? NavigationCompleted;
     public event Action<string>? MessageReceived;
     public event Action<nint, uint, nint, nint>? WndProcOverride; // always null on Linux

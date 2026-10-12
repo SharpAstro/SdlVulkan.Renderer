@@ -165,7 +165,16 @@ internal static partial class Program
         </script>
         """;
 
-    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp, HotKey, FileDialog, Caption }
+    // `fullscreen`/`assert-fullscreen` mode (WebView2): see FullscreenCheck.
+    private const string FullscreenTestHtml = """
+        <!doctype html><meta charset="utf-8"><title>fullscreen-test</title>
+        <div id="box" style="width:200px;height:120px;background:#c22"></div>
+        <script>
+          window.addEventListener('load', function () { window.chrome.webview.postMessage({ ready: true }); });
+        </script>
+        """;
+
+    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp, HotKey, FileDialog, Caption, Fullscreen }
 
     private static void Log(string line)
     {
@@ -199,6 +208,8 @@ internal static partial class Program
         // `assert-filedialog` = a file dialog closed with a real Escape answers on the loop, and one whose token is
         // cancelled completes cancelled, exit 0/1 (Windows; SKIPs elsewhere).
         // `assert-caption` = a double-click on the title bar reaches the loop, exit 0/1 (Windows; SKIPs elsewhere).
+        // `assert-fullscreen` = the page's fullscreen is reported, survives the host resizing the view in the handler,
+        // and its end is reported too, exit 0/1 (WebView2; SKIPs elsewhere).
         // `messaging`/`autosize`/`docstart`/`cdp`/`hotkey`/`filedialog`/`caption` = the same self-tests but interactive.
         // Anything else = navigate to that URL.
         var (scenario, assertMode) = arg0.ToLowerInvariant() switch
@@ -210,6 +221,7 @@ internal static partial class Program
             "assert-hotkey" => (Scenario.HotKey, true),
             "assert-filedialog" => (Scenario.FileDialog, true),
             "assert-caption" => (Scenario.Caption, true),
+            "assert-fullscreen" => (Scenario.Fullscreen, true),
             "messaging" => (Scenario.Messaging, false),
             "autosize" => (Scenario.AutoSize, false),
             "docstart" => (Scenario.DocStart, false),
@@ -217,6 +229,7 @@ internal static partial class Program
             "hotkey" => (Scenario.HotKey, false),
             "filedialog" => (Scenario.FileDialog, false),
             "caption" => (Scenario.Caption, false),
+            "fullscreen" => (Scenario.Fullscreen, false),
             _ => (Scenario.Navigate, false),
         };
         Log($"[smoke] process arch = {RuntimeInformation.ProcessArchitecture}, scenario = {scenario}");
@@ -275,6 +288,7 @@ internal static partial class Program
         FileDialogCheck? dialogCheck = null;
         var hiddenForPress = false; // hotkey: the window was hidden before the press, as it must be
         long captionClickAt = 0; // caption: when to double-click (once the window is up), 0 once done
+        FullscreenCheck? fullscreenCheck = null;
 
         switch (scenario)
         {
@@ -306,6 +320,10 @@ internal static partial class Program
             case Scenario.Caption:
                 failReason = ReportCaptionDoubleClicks(window, assertMode);
                 captionClickAt = assertMode ? Environment.TickCount64 + 1500 : 0;
+                break;
+            case Scenario.Fullscreen:
+                fullscreenCheck = new FullscreenCheck(webView, window, assertMode, Pass);
+                failReason = fullscreenCheck.FailReason;
                 break;
             case Scenario.Navigate:
                 WireNavigateProbe(webView);
@@ -358,6 +376,12 @@ internal static partial class Program
                     : "[smoke] caption double-click self-test: double-click the title bar — close the window to exit.");
                 webView.NavigateToString("<!doctype html><title>caption-test</title><p>Double-click the title bar</p>");
                 break;
+            case Scenario.Fullscreen:
+                Log(assertMode
+                    ? "[smoke] assert mode: page fullscreen self-test (expecting FullscreenChanged true, kept through a resize in its handler, then false when asked to leave)."
+                    : "[smoke] page fullscreen self-test: the box goes fullscreen, then leaves — close the window to exit.");
+                webView.NavigateToString(FullscreenTestHtml);
+                break;
             case Scenario.Navigate:
                 webView.Navigate(navigateUrl);
                 Log($"[smoke] navigating to {navigateUrl} — close the window to exit.");
@@ -392,6 +416,8 @@ internal static partial class Program
             }
 
             dialogCheck?.Tick(assertMode);
+            fullscreenCheck?.Tick();
+
             if (captionClickAt != 0 && Environment.TickCount64 >= captionClickAt)
             {
                 captionClickAt = 0;
@@ -618,6 +644,77 @@ internal static partial class Program
             .ToArray();
         var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<KeyInput>());
         return sent == inputs.Length ? "ok" : $"{sent} of {inputs.Length} sent, error {Marshal.GetLastPInvokeError()}";
+    }
+
+    // The page's fullscreen: the box asks for it through the protocol with a user gesture (as a click on a video's
+    // fullscreen button would), FullscreenChanged(true) must follow, and the handler resizes the view as a host
+    // filling the screen with its window does. The page must stay fullscreen through that; a second later the host
+    // asks it to leave, and FullscreenChanged(false) must follow. A false before then is the page dropping out on
+    // its own. WebView2 only (WebKitGTK has no protocol and does not raise the event yet): SKIP there.
+    private sealed class FullscreenCheck
+    {
+        private readonly INativeWebView _webView;
+        private readonly bool _assertMode;
+        private long _leaveAt;
+        private bool _entered, _leaveAsked;
+        private string? _problem;
+
+        public FullscreenCheck(INativeWebView webView, SdlVulkanWindow window, bool assertMode, Action pass)
+        {
+            _webView = webView;
+            _assertMode = assertMode;
+            webView.MessageReceived += json =>
+            {
+                if (json.Contains("\"ready\""))
+                    Evaluate("document.getElementById('box').requestFullscreen().then(() => 'ok')", userGesture: true);
+            };
+            webView.FullscreenChanged += full =>
+            {
+                Log($"[smoke] FullscreenChanged({full})");
+                if (full)
+                {
+                    _entered = true;
+                    window.GetSizeInPixels(out var w, out var h);
+                    webView.SetBounds(new RectInt(new PointInt(w / 2, h / 2), new PointInt(0, 0)));
+                    _leaveAt = Environment.TickCount64 + 1000;
+                }
+                else if (!_leaveAsked)
+                    _problem = "the page left fullscreen on its own once the handler resized the view";
+                else if (assertMode && _entered)
+                    pass();
+            };
+        }
+
+        public string FailReason() => _problem
+            ?? (_entered ? "FullscreenChanged(false) never came after the page was asked to leave" : "FullscreenChanged(true) never came");
+
+        public void Tick()
+        {
+            if (_leaveAt == 0 || Environment.TickCount64 < _leaveAt)
+                return;
+            _leaveAt = 0;
+            _leaveAsked = true;
+            Evaluate("document.exitFullscreen().then(() => 'ok')", userGesture: false);
+        }
+
+        // On the UI thread, as WebView2 requires; no protocol on WebKitGTK, which SKIPs.
+        private void Evaluate(string expression, bool userGesture)
+        {
+            var parameters = $"{{\"expression\":\"{expression}\",\"awaitPromise\":true,\"userGesture\":{(userGesture ? "true" : "false")}}}";
+            _webView.CallDevToolsProtocolMethodAsync("Runtime.evaluate", parameters).ContinueWith(t =>
+            {
+                var error = t.Exception?.GetBaseException();
+                if (error is PlatformNotSupportedException && _assertMode)
+                {
+                    Log($"SMOKE: SKIP ({error.Message})");
+                    FastExit(0);
+                }
+                else if (error is not null)
+                    _problem = $"Runtime.evaluate failed: {error.Message}";
+                else
+                    Log($"[smoke] {expression[..Math.Min(40, expression.Length)]}…: {t.Result}");
+            }, TaskScheduler.Default);
+        }
     }
 
     // Caption double-click: asked for (it can only fail off Windows: SKIP there). The window may not maximize, so a
