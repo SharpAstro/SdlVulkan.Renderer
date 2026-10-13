@@ -191,6 +191,13 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     public Action? OnCaptionDoubleClick { get; set; }
 
     /// <summary>
+    /// Called on a press of this window's media controls: a button of the system's media flyout or lock screen, or a
+    /// media key. Only for a window that has them, from <see cref="SdlVulkanWindow.TryGetMediaControls"/> (Windows only
+    /// for now). A redraw follows.
+    /// </summary>
+    public Action<MediaButton>? OnMediaButton { get; set; }
+
+    /// <summary>
     /// Called each loop iteration before checking redraw for this window. Return true to force a
     /// redraw (external state changes: background task completions, cursor blink, etc.).
     /// </summary>

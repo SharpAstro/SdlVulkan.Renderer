@@ -537,6 +537,33 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         => WindowsMessageHook.CaptionDoubleClickEvent != 0 && evt.Type == WindowsMessageHook.CaptionDoubleClickEvent
            && evt.User.WindowID == WindowId;
 
+    private MediaControls? _mediaControls;
+    private bool _mediaControlsAsked;
+
+    /// <summary>
+    /// The window's entry in the system's media controls (the media flyout, the lock screen, the keyboard's media
+    /// keys; see <see cref="MediaControls"/>), made on the first call and gone with the window. Its presses arrive as
+    /// <see cref="SdlWindowView.OnMediaButton"/> (a host running its own SDL loop reads them with
+    /// <see cref="IsMediaButton"/>). Windows only for now; elsewhere, or when the system refuses, null.
+    /// </summary>
+    /// <remarks>Call it on the window's thread, as every <see cref="MediaControls"/> call after it.</remarks>
+    public MediaControls? TryGetMediaControls()
+    {
+        if (!_mediaControlsAsked)
+        {
+            _mediaControlsAsked = true;
+            if (OperatingSystem.IsWindows())
+                _mediaControls = MediaControls.TryCreate(GetNativeWindowHandle(), WindowId);
+        }
+        return _mediaControls;
+    }
+
+    /// <summary>For a host that runs its own SDL event loop: whether <paramref name="evt"/> is a press of this
+    /// window's media controls (<see cref="TryGetMediaControls"/>), and which button. <see cref="SdlEventLoop"/> does
+    /// this itself and calls <see cref="SdlWindowView.OnMediaButton"/>.</summary>
+    public bool IsMediaButton(in Event evt, out MediaButton button)
+        => MediaControls.IsPress(evt, out var windowId, out button) && windowId == WindowId;
+
     /// <summary>The global mouse position in desktop coordinates (across all displays), as integer
     /// pixels. Used to place a torn-out window under the cursor.</summary>
     public static void GetGlobalMousePosition(out int x, out int y)
@@ -584,6 +611,8 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
             UnregisterGlobalHotKey(id);
         if (OperatingSystem.IsWindows())
             WindowsMessageHook.StopReportingCaptionDoubleClicks(GetNativeWindowHandle());
+        // Out of the media controls before the HWND they were made for goes.
+        _mediaControls?.Dispose();
         lock (_cursorLock)
         {
             foreach (var handle in _cursorCache.Values)

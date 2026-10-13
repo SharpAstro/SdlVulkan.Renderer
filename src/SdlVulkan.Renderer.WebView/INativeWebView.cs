@@ -120,6 +120,16 @@ public sealed record NativeWebViewOptions
     /// view, and the last one wins.</item>
     /// </list></summary>
     public string? UserDataFolder { get; init; }
+
+    /// <summary>Whether the browser puts the page's media in the system's media controls itself. True, the default,
+    /// keeps the browser's own: WebView2 shows the page's media in Windows' media flyout, under the name
+    /// "Unknown app", and takes the media keys. An app that shows its own entry, for its window and under its own name
+    /// (<c>SdlVulkanWindow.TryGetMediaControls</c>), sets it false, so there are not two. WebView2 only (Chromium's
+    /// <c>--disable-features=HardwareMediaKeyHandling</c>); the other backends publish none of their own, and ignore
+    /// it.</summary>
+    /// <remarks>Every web view sharing a <see cref="UserDataFolder"/> must agree: WebView2 runs one browser per folder,
+    /// and refuses a second view whose browser arguments differ.</remarks>
+    public bool SystemMediaControls { get; init; } = true;
 }
 
 /// <summary>

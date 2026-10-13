@@ -31,6 +31,7 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
     private SdlVulkanWindow? _window;
     private ComObject<ICoreWebView2Controller>? _controller;
     private ICoreWebView2? _webView2;
+    private CoreWebView2EnvironmentOptions? _environmentOptions;
 
     // Queued state applied once the controller/CoreWebView2 become ready.
     private string? _pendingNavigateUrl;
@@ -106,7 +107,16 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
             userDataFolder = PWSTR.From(Path.GetFullPath(folder));
         }
 
-        WebView2.Functions.CreateCoreWebView2EnvironmentWithOptions(PWSTR.Null, userDataFolder, null!,
+        // Browser arguments go in environment options; none are passed when there are none, which is WebView2's own
+        // default. The options object stays referenced while the environment is created (asynchronously).
+        if (!options.SystemMediaControls)
+        {
+            _environmentOptions = new CoreWebView2EnvironmentOptions();
+            // Chromium's media keys and its entry in the system's media controls, one feature.
+            _environmentOptions.put_AdditionalBrowserArguments(PWSTR.From("--disable-features=HardwareMediaKeyHandling")).ThrowOnError();
+        }
+
+        WebView2.Functions.CreateCoreWebView2EnvironmentWithOptions(PWSTR.Null, userDataFolder, _environmentOptions!,
             new CoreWebView2CreateCoreWebView2EnvironmentCompletedHandler((envResult, env) =>
             {
                 envResult.ThrowOnError();
@@ -486,5 +496,7 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
         _webView2 = null;
         _controller?.Dispose();
         _controller = null;
+        _environmentOptions?.Dispose();
+        _environmentOptions = null;
     }
 }
