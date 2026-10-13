@@ -1,5 +1,5 @@
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.Marshalling;
 using System.Runtime.Versioning;
 using static SDL3.SDL;
 
@@ -32,28 +32,21 @@ public enum MediaButton
 /// without one the entry is "Unknown app".</para>
 /// <para>A web view that publishes its own entry (WebView2 does, for its page's media) puts a second one beside this:
 /// SdlVulkan.Renderer.WebView's <c>NativeWebViewOptions.SystemMediaControls</c> turns that off.</para>
-/// <para>Underneath are WinRT's SystemMediaTransportControls for the window's HWND, called by vtable slot rather than
-/// through a WinRT projection, which would be megabytes for a dozen calls. The thumbnail goes over as a URL that
-/// Windows reads itself, so no image is decoded in this process.</para>
+/// <para>Underneath are WinRT's SystemMediaTransportControls for the window's HWND, called through interfaces declared
+/// for the COM source generator (MediaControls.Interop.cs) rather than through a WinRT projection, which would be
+/// megabytes for a dozen calls. The thumbnail goes over as a URL that Windows reads itself, so no image is decoded in
+/// this process.</para>
 /// </remarks>
-public sealed unsafe partial class MediaControls : IDisposable
+public sealed partial class MediaControls : IDisposable
 {
-    private static readonly Guid IidInterop = new("ddb0472d-c911-4a1f-86d9-dc3d71a95f5a");
-    private static readonly Guid IidControls = new("99fa3ff4-1742-42a6-902e-087d41f965ec");
-    private static readonly Guid IidUriFactory = new("44a9796f-723e-4fdf-a218-033e75b0c084");
-    private static readonly Guid IidStreamReferenceStatics = new("857309dc-3fbf-4e7d-986f-ef3b1a07a964");
-
-    // ISystemMediaTransportControls, ISystemMediaTransportControlsDisplayUpdater and IMusicDisplayProperties: the
-    // slots used here, after IUnknown's three and IInspectable's three.
-    private const int PutPlaybackStatus = 7, GetDisplayUpdater = 8, PutIsEnabled = 11, PutIsPlayEnabled = 13,
-        PutIsPauseEnabled = 17, PutIsPreviousEnabled = 25, PutIsNextEnabled = 27, AddButtonPressed = 32,
-        RemoveButtonPressed = 33;
-    private const int PutType = 7, PutThumbnail = 11, GetMusicProperties = 12, ClearAll = 16, Update = 17;
-    private const int PutTitle = 7, PutArtist = 11;
     private const int MediaPlaybackTypeMusic = 1, MediaPlaybackStatusPlaying = 3, MediaPlaybackStatusPaused = 4;
 
-    private nint _controls;
-    private nint _updater;
+    // Wraps what RoGetActivationFactory hands back; everything else is wrapped by the generated marshallers. Made on
+    // first use, on Windows: ComWrappers does not exist on Android.
+    private static StrategyBasedComWrappers? s_wrappers;
+
+    private ISystemMediaTransportControls? _controls;
+    private ISystemMediaTransportControlsDisplayUpdater? _updater;
     private long _token;
     private bool _enabled;
 
@@ -61,7 +54,7 @@ public sealed unsafe partial class MediaControls : IDisposable
     /// <c>User.Code</c>); 0 until a window first has media controls.</summary>
     internal static uint EventType { get; private set; }
 
-    private MediaControls(nint controls, nint updater)
+    private MediaControls(ISystemMediaTransportControls controls, ISystemMediaTransportControlsDisplayUpdater updater)
     {
         _controls = controls;
         _updater = updater;
@@ -73,69 +66,68 @@ public sealed unsafe partial class MediaControls : IDisposable
     {
         ArgumentNullException.ThrowIfNull(title);
         ArgumentNullException.ThrowIfNull(artist);
-        if (_controls == 0)
+        // Only ever non-null on Windows; the platform check says so to the analyzer.
+        if (_controls is null || _updater is null || !OperatingSystem.IsWindows())
             return;
         // The details are best effort: a call the system refuses leaves the entry as it was.
-        Invoke(_updater, PutType, MediaPlaybackTypeMusic);
-        nint music;
-        if (((delegate* unmanaged[Stdcall]<nint, nint*, int>)Slot(_updater, GetMusicProperties))(_updater, &music) >= 0)
+        _updater.put_Type(MediaPlaybackTypeMusic);
+        if (_updater.get_MusicProperties(out var music) >= 0 && music is not null)
         {
-            SetString(music, PutTitle, title);
-            SetString(music, PutArtist, artist);
+            using (var h = new HString(title))
+                music.put_Title(h.Handle);
+            using (var h = new HString(artist))
+                music.put_Artist(h.Handle);
             Release(music);
         }
         var thumbnail = thumbnailUrl is not null && Uri.TryCreate(thumbnailUrl, UriKind.Absolute, out _)
             ? StreamReference(thumbnailUrl)
-            : 0;
-        ((delegate* unmanaged[Stdcall]<nint, nint, int>)Slot(_updater, PutThumbnail))(_updater, thumbnail);
+            : null;
+        _updater.put_Thumbnail(thumbnail);
         Release(thumbnail);
-        ((delegate* unmanaged[Stdcall]<nint, int>)Slot(_updater, Update))(_updater);
+        _updater.Update();
         if (!_enabled)
         {
             _enabled = true;
-            Invoke(_controls, PutIsEnabled, 1);
+            _controls.put_IsEnabled(true);
         }
     }
 
     /// <summary>Whether the media plays (true) or is paused. A play/pause key sends <see cref="MediaButton.Pause"/>
     /// while it plays and <see cref="MediaButton.Play"/> while it does not.</summary>
     public void SetPlaying(bool playing)
-    {
-        if (_controls != 0)
-            Invoke(_controls, PutPlaybackStatus, playing ? MediaPlaybackStatusPlaying : MediaPlaybackStatusPaused);
-    }
+        => _controls?.put_PlaybackStatus(playing ? MediaPlaybackStatusPlaying : MediaPlaybackStatusPaused);
 
     /// <summary>Which of the previous and next buttons are offered. Neither is, at first.</summary>
     public void SetSkipEnabled(bool previous, bool next)
     {
-        if (_controls == 0)
+        if (_controls is null)
             return;
-        Invoke(_controls, PutIsPreviousEnabled, previous ? 1 : 0);
-        Invoke(_controls, PutIsNextEnabled, next ? 1 : 0);
+        _controls.put_IsPreviousEnabled(previous);
+        _controls.put_IsNextEnabled(next);
     }
 
     /// <summary>Takes the entry out of the controls, until the next <see cref="SetTrack"/>: nothing is playing, nor
     /// about to.</summary>
     public void Clear()
     {
-        if (_controls == 0 || !_enabled)
+        if (_controls is null || _updater is null || !_enabled)
             return;
         _enabled = false;
-        ((delegate* unmanaged[Stdcall]<nint, int>)Slot(_updater, ClearAll))(_updater);
-        Invoke(_controls, PutIsEnabled, 0);
+        _updater.ClearAll();
+        _controls.put_IsEnabled(false);
     }
 
     /// <summary>Takes the entry out of the controls for good. The window does this when it goes.</summary>
     public void Dispose()
     {
-        if (_controls == 0)
+        if (_controls is null)
             return;
-        ((delegate* unmanaged[Stdcall]<nint, long, int>)Slot(_controls, RemoveButtonPressed))(_controls, _token);
-        Invoke(_controls, PutIsEnabled, 0);
+        _controls.remove_ButtonPressed(_token);
+        _controls.put_IsEnabled(false);
         Release(_updater);
         Release(_controls);
-        _controls = 0;
-        _updater = 0;
+        _controls = null;
+        _updater = null;
     }
 
     /// <summary>The window's controls, or null when the system has none to give.</summary>
@@ -147,39 +139,37 @@ public sealed unsafe partial class MediaControls : IDisposable
         // WinRT needs COM on this thread. A UI thread is normally a single-threaded apartment already ([STAThread],
         // which a WebView2 host must be); one that is nothing yet becomes one, and one that is multithreaded stays so.
         CoInitializeEx(0, 2 /* COINIT_APARTMENTTHREADED */);
-        if (!TryGetFactory("Windows.Media.SystemMediaTransportControls", IidInterop, out var interop))
+        if (TryGetFactory<ISystemMediaTransportControlsInterop>("Windows.Media.SystemMediaTransportControls",
+                ISystemMediaTransportControlsInterop.Iid) is not { } interop)
             return null;
-        nint controls = 0, updater = 0, handler = 0;
+        ISystemMediaTransportControls? controls = null;
+        ISystemMediaTransportControlsDisplayUpdater? updater = null;
         try
         {
-            var iid = IidControls;
-            // ISystemMediaTransportControlsInterop::GetForWindow
-            if (((delegate* unmanaged[Stdcall]<nint, nint, Guid*, nint*, int>)Slot(interop, 6))(interop, hwnd, &iid, &controls) < 0
-                || ((delegate* unmanaged[Stdcall]<nint, nint*, int>)Slot(controls, GetDisplayUpdater))(controls, &updater) < 0)
+            if (interop.GetForWindow(hwnd, new Guid(ISystemMediaTransportControls.Iid), out controls) < 0 || controls is null
+                || controls.get_DisplayUpdater(out updater) < 0 || updater is null)
             {
+                Release(updater);
                 Release(controls);
                 return null;
             }
             if (EventType == 0)
                 EventType = RegisterEvents(1);
-            handler = ButtonHandler.Create(windowId);
-            long token;
-            if (EventType == 0
-                || ((delegate* unmanaged[Stdcall]<nint, nint, long*, int>)Slot(controls, AddButtonPressed))(controls, handler, &token) < 0)
+            // The controls hold the handler's only reference while it is registered.
+            if (EventType == 0 || controls.add_ButtonPressed(new ButtonHandler(windowId), out var token) < 0)
             {
                 Release(updater);
                 Release(controls);
                 return null;
             }
             // Out of the controls until there is a track: a window's controls start out enabled, an empty entry.
-            Invoke(controls, PutIsEnabled, 0);
-            Invoke(controls, PutIsPlayEnabled, 1);
-            Invoke(controls, PutIsPauseEnabled, 1);
+            controls.put_IsEnabled(false);
+            controls.put_IsPlayEnabled(true);
+            controls.put_IsPauseEnabled(true);
             return new MediaControls(controls, updater) { _token = token };
         }
         finally
         {
-            Release(handler); // the controls hold their own reference while it is registered
             Release(interop);
         }
     }
@@ -205,70 +195,67 @@ public sealed unsafe partial class MediaControls : IDisposable
         _ => null,
     };
 
-    private static nint StreamReference(string url)
+    [SupportedOSPlatform("windows")]
+    private static IRandomAccessStreamReference? StreamReference(string url)
     {
-        if (!TryGetFactory("Windows.Foundation.Uri", IidUriFactory, out var uriFactory))
-            return 0;
-        if (!TryGetFactory("Windows.Storage.Streams.RandomAccessStreamReference", IidStreamReferenceStatics, out var statics))
+        if (TryGetFactory<IUriRuntimeClassFactory>("Windows.Foundation.Uri", IUriRuntimeClassFactory.Iid) is not { } uriFactory)
+            return null;
+        if (TryGetFactory<IRandomAccessStreamReferenceStatics>("Windows.Storage.Streams.RandomAccessStreamReference",
+                IRandomAccessStreamReferenceStatics.Iid) is not { } statics)
         {
             Release(uriFactory);
-            return 0;
+            return null;
         }
-        nint uri = 0, reference = 0;
-        var h = CreateString(url);
-        // IUriRuntimeClassFactory::CreateUri, then IRandomAccessStreamReferenceStatics::CreateFromUri
-        if (h != 0 && ((delegate* unmanaged[Stdcall]<nint, nint, nint*, int>)Slot(uriFactory, 6))(uriFactory, h, &uri) >= 0)
-            ((delegate* unmanaged[Stdcall]<nint, nint, nint*, int>)Slot(statics, 7))(statics, uri, &reference);
-        WindowsDeleteString(h);
+        IUriRuntimeClass? uri = null;
+        IRandomAccessStreamReference? reference = null;
+        using (var h = new HString(url))
+        {
+            if (h.Handle != 0 && uriFactory.CreateUri(h.Handle, out uri) >= 0 && uri is not null)
+                statics.CreateFromUri(uri, out reference);
+        }
         Release(uri);
         Release(statics);
         Release(uriFactory);
         return reference;
     }
 
-    private static void SetString(nint target, int slot, string value)
+    // An activation factory (or statics) for a runtime class, as the interface asked for; null when the system has none.
+    [SupportedOSPlatform("windows")]
+    private static T? TryGetFactory<T>(string className, string iid) where T : class
     {
-        var h = CreateString(value);
-        ((delegate* unmanaged[Stdcall]<nint, nint, int>)Slot(target, slot))(target, h);
-        WindowsDeleteString(h);
+        using var h = new HString(className);
+        var id = new Guid(iid);
+        if (h.Handle == 0 || RoGetActivationFactory(h.Handle, in id, out var factory) < 0 || factory == 0)
+            return null;
+        // A unique wrapper of its own, which takes a reference of its own: Release drops it, and this one goes now.
+        var wrapper = (s_wrappers ??= new()).GetOrCreateObjectForComInstance(factory, CreateObjectFlags.UniqueInstance);
+        Marshal.Release(factory);
+        return (T)wrapper;
     }
 
-    private static bool TryGetFactory(string className, Guid iid, out nint factory)
+    // Drops the wrapper's reference now rather than at finalization. Every wrapper here is unique (see the interop
+    // declarations), so no one else holds it.
+    private static void Release(object? wrapper)
     {
-        nint f = 0;
-        var h = CreateString(className);
-        var ok = h != 0 && RoGetActivationFactory(h, &iid, &f) >= 0;
-        WindowsDeleteString(h);
-        factory = ok ? f : 0;
-        return ok;
+        if (wrapper is ComObject com)
+            com.FinalRelease();
     }
 
-    // An HSTRING; 0 for the empty string, which is what WinRT takes it to be.
-    private static nint CreateString(string s)
+    // An HSTRING for the length of a using; 0 for the empty string, which is what WinRT takes it to be.
+    private readonly ref struct HString
     {
-        nint h;
-        fixed (char* p = s)
-            return WindowsCreateString(p, (uint)s.Length, &h) >= 0 ? h : 0;
-    }
+        public readonly nint Handle;
 
-    // A put_ of an enum or a boolean: both go over as a 32-bit value (a WinRT boolean is a byte, zero-extended by the
-    // calling convention the same way).
-    private static void Invoke(nint target, int slot, int value)
-        => ((delegate* unmanaged[Stdcall]<nint, int, int>)Slot(target, slot))(target, value);
+        public HString(string s) => Handle = WindowsCreateString(s, (uint)s.Length, out var h) >= 0 ? h : 0;
 
-    private static void* Slot(nint unknown, int slot) => (*(void***)unknown)[slot];
-
-    private static void Release(nint unknown)
-    {
-        if (unknown != 0)
-            ((delegate* unmanaged[Stdcall]<nint, uint>)Slot(unknown, 2))(unknown);
+        public void Dispose() => WindowsDeleteString(Handle);
     }
 
     [LibraryImport("combase.dll")]
-    private static partial int RoGetActivationFactory(nint classId, Guid* iid, nint* factory);
+    private static partial int RoGetActivationFactory(nint classId, in Guid iid, out nint factory);
 
-    [LibraryImport("combase.dll")]
-    private static partial int WindowsCreateString(char* s, uint length, nint* hstring);
+    [LibraryImport("combase.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int WindowsCreateString(string s, uint length, out nint hstring);
 
     [LibraryImport("combase.dll")]
     private static partial int WindowsDeleteString(nint hstring);
@@ -278,78 +265,26 @@ public sealed unsafe partial class MediaControls : IDisposable
 
     /// <summary>
     /// The ButtonPressed handler (a <c>TypedEventHandler&lt;SystemMediaTransportControls,
-    /// SystemMediaTransportControlsButtonPressedEventArgs&gt;</c>): a COM object of our own, IUnknown and Invoke, that
-    /// turns each press into an SDL user event for its window. The controls call it on a thread of their own, so it
-    /// says it is agile (callable from any thread), and touches nothing but SDL's thread-safe event queue.
+    /// SystemMediaTransportControlsButtonPressedEventArgs&gt;</c>), as a COM object the generator builds the vtable for,
+    /// that turns each press into an SDL user event for its window. The controls call it on a thread of their own, so
+    /// it says it is agile (callable from any thread), and touches nothing but SDL's thread-safe event queue.
     /// </summary>
-    private struct ButtonHandler
+    [GeneratedComClass]
+    private sealed partial class ButtonHandler(uint windowId) : IButtonPressedHandler, IAgileObject
     {
-        private static readonly Guid IidHandler = new("0557e996-7b23-5bae-aa81-ea0d671143a4");
-        private static readonly Guid IidUnknown = new("00000000-0000-0000-c000-000000000046");
-        private static readonly Guid IidAgileObject = new("94ea2b94-e9cc-49e0-c0ff-ee64ca8f5b90");
-        private static readonly void** Vtable = CreateVtable();
-
-        private void** _vtable;
-        private int _references;
-        private uint _windowId;
-
-        public static nint Create(uint windowId)
+        public int Invoke(nint sender, ISystemMediaTransportControlsButtonPressedEventArgs? args)
         {
-            var handler = (ButtonHandler*)NativeMemory.Alloc((nuint)sizeof(ButtonHandler));
-            handler->_vtable = Vtable;
-            handler->_references = 1;
-            handler->_windowId = windowId;
-            return (nint)handler;
-        }
-
-        private static void** CreateVtable()
-        {
-            var vtable = (void**)NativeMemory.Alloc(4, (nuint)sizeof(void*));
-            vtable[0] = (delegate* unmanaged[Stdcall]<ButtonHandler*, Guid*, void**, int>)&QueryInterface;
-            vtable[1] = (delegate* unmanaged[Stdcall]<ButtonHandler*, uint>)&AddRef;
-            vtable[2] = (delegate* unmanaged[Stdcall]<ButtonHandler*, uint>)&ReleaseHandler;
-            vtable[3] = (delegate* unmanaged[Stdcall]<ButtonHandler*, nint, nint, int>)&Invoke;
-            return vtable;
-        }
-
-        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
-        private static int QueryInterface(ButtonHandler* self, Guid* iid, void** result)
-        {
-            if (*iid == IidHandler || *iid == IidUnknown || *iid == IidAgileObject)
-            {
-                Interlocked.Increment(ref self->_references);
-                *result = self;
+            if (args is null)
                 return 0;
-            }
-            *result = null;
-            return unchecked((int)0x80004002); // E_NOINTERFACE
-        }
-
-        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
-        private static uint AddRef(ButtonHandler* self) => (uint)Interlocked.Increment(ref self->_references);
-
-        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
-        private static uint ReleaseHandler(ButtonHandler* self)
-        {
-            var references = Interlocked.Decrement(ref self->_references);
-            if (references == 0)
-                NativeMemory.Free(self);
-            return (uint)references;
-        }
-
-        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
-        private static int Invoke(ButtonHandler* self, nint sender, nint args)
-        {
-            int pressed; // ISystemMediaTransportControlsButtonPressedEventArgs::get_Button
-            if (((delegate* unmanaged[Stdcall]<nint, int*, int>)Slot(args, 6))(args, &pressed) >= 0
-                && FromSystemButton(pressed) is { } button)
+            if (args.get_Button(out var pressed) >= 0 && FromSystemButton(pressed) is { } button)
             {
                 var evt = default(Event);
                 evt.User.Type = EventType;
-                evt.User.WindowID = self->_windowId;
+                evt.User.WindowID = windowId;
                 evt.User.Code = (int)button;
                 PushEvent(ref evt);
             }
+            Release(args);
             return 0;
         }
     }
