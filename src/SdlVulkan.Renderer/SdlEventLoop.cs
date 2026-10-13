@@ -171,6 +171,10 @@ public sealed class SdlEventLoop
     /// see <see cref="SdlWindowView.OnCaptionDoubleClick"/>.</summary>
     public Action? OnCaptionDoubleClick { get => Primary.OnCaptionDoubleClick; set => Primary.OnCaptionDoubleClick = value; }
 
+    /// <summary>A press of the primary window's media controls (<see cref="SdlVulkanWindow.TryGetMediaControls"/>); see
+    /// <see cref="SdlWindowView.OnMediaButton"/>.</summary>
+    public Action<MediaButton>? OnMediaButton { get => Primary.OnMediaButton; set => Primary.OnMediaButton = value; }
+
     // --- Single-window forwarding properties (delegate to the primary view) ---
 
     private SdlWindowView Primary => _primary
@@ -1062,6 +1066,15 @@ public sealed class SdlEventLoop
                 {
                     vcap.OnCaptionDoubleClick();
                     vcap.NeedsRedraw = true;
+                }
+                // A media key or a button of the system's media controls, pushed from the thread they called on.
+                else if (MediaControls.IsPress(evt, out var mediaWindow, out var mediaButton))
+                {
+                    if (TryView(mediaWindow, out var vmedia) && vmedia.OnMediaButton is not null)
+                    {
+                        vmedia.OnMediaButton(mediaButton);
+                        vmedia.NeedsRedraw = true;
+                    }
                 }
                 // A file dialog's answer: completes its task here, on the loop's thread.
                 else

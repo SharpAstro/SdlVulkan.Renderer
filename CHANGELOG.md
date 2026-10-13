@@ -7,6 +7,25 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.69
+
+**A window can have its own entry in the system's media controls.** YtPlayer's video showed in Windows' media flyout
+as "Unknown app": the entry was WebView2's, published from its own process, under its executable's name.
+
+- `SdlVulkanWindow.TryGetMediaControls()` gives the window's entry in the system's media controls (Windows' media
+  flyout, the lock screen, the keyboard's media keys): `SetTrack(title, artist, thumbnailUrl)`, `SetPlaying`,
+  `SetSkipEnabled`, `Clear`. The presses arrive on the loop's thread as `SdlWindowView.OnMediaButton` (and
+  `SdlEventLoop.OnMediaButton` for the primary window), turned into SDL user events from the thread the system calls
+  on, as global hotkeys are; a host with its own loop reads them with `IsMediaButton`. Underneath are WinRT's
+  SystemMediaTransportControls for the HWND, called by vtable slot, so the package takes no WinRT projection (which
+  would be megabytes for a dozen calls), and the thumbnail goes over as a URL that Windows reads itself. Windows names
+  the entry after the process's app id, which SharpAstro.AppShell 1.2's `AppIdentity.Claim` sets (with the Start menu
+  shortcut that names it); this release takes AppShell 1.2. Null off Windows for now.
+- `NativeWebViewOptions.SystemMediaControls = false` keeps WebView2 out of the media controls (and off the media
+  keys), so an app that shows its own entry does not get two: Chromium's
+  `--disable-features=HardwareMediaKeyHandling`, passed in the environment options. Checked against a muted video:
+  without it Windows lists a session from `msedgewebview2.exe`; with it, none, and the video plays on.
+
 ## 7.68
 
 **A window sizes itself in design units, and resizes where it stands.** Two things YtPlayer did for itself, which any
