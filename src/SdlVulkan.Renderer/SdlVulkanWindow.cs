@@ -247,6 +247,23 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         }
     }
 
+    /// <summary>
+    /// A size in design units (DIR.Lib's, 1 at 96 dpi) in this window's coordinates, rounded to whole ones: what
+    /// <see cref="SetSize"/>, <see cref="SetMinimumSize"/> and <see cref="ResizeInPlace(int, int)"/> take. A design unit
+    /// spans <see cref="DisplayScale"/> over the window's pixel density: 1.5 at 150% on Windows and X11, where window
+    /// coordinates are pixels, and the display's content scale alone where they are points and the pixels come from
+    /// the density.
+    /// </summary>
+    /// <remarks>For a window sized in the units of the layout inside it, so it is as big on a 150% display as its
+    /// contents are. Each app used to multiply by a scale of its own choosing, and <see cref="DisplayScale"/> is the
+    /// right one only where window coordinates are pixels.</remarks>
+    public (int Width, int Height) ToWindowSize(float designWidth, float designHeight)
+    {
+        var density = GetWindowPixelDensity(Handle);
+        var scale = new DesignScale(DisplayScale / (density > 0f ? density : 1f));
+        return ((int)MathF.Round(scale.ToSurfaceX(designWidth)), (int)MathF.Round(scale.ToSurfaceY(designHeight)));
+    }
+
     public void ToggleFullscreen()
     {
         var flags = GetWindowFlags(Handle);
@@ -401,6 +418,48 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         }
         (x, y, width, height) = (0, 0, 0, 0);
         return false;
+    }
+
+    /// <summary>
+    /// Resizes the window where it stands, in window coordinates: the corner nearest its display's own corner stays
+    /// put, so a window parked bottom right grows up and to the left, and the window is kept inside the display's
+    /// usable area (<see cref="TryGetUsableDisplayBounds"/>). Never under its minimum size.
+    /// </summary>
+    /// <remarks>For a window that changes its own size, a floating player switching modes or folding to a strip.
+    /// <see cref="SetSize"/> keeps the top-left corner, which walks a window parked at the bottom of the screen off
+    /// it.</remarks>
+    public void ResizeInPlace(int width, int height)
+    {
+        GetWindowMinimumSize(Handle, out var minimumWidth, out var minimumHeight);
+        Place(Math.Max(width, minimumWidth), Math.Max(height, minimumHeight));
+    }
+
+    /// <summary>
+    /// <see cref="ResizeInPlace(int, int)"/> with a new minimum size (<see cref="SetMinimumSize"/>), which the size is
+    /// never under.
+    /// </summary>
+    /// <remarks>One call, because the order matters and differs by direction. A raised minimum grows the window at
+    /// once, from its top-left corner, before the resize could keep another corner where it was; a lowered one has to
+    /// come first, or it holds the window up. So the minimum is lowered, the window placed, and only then
+    /// raised.</remarks>
+    public void ResizeInPlace(int width, int height, int minimumWidth, int minimumHeight)
+    {
+        GetWindowMinimumSize(Handle, out var oldWidth, out var oldHeight);
+        SetWindowMinimumSize(Handle, Math.Min(oldWidth, minimumWidth), Math.Min(oldHeight, minimumHeight));
+        Place(Math.Max(width, minimumWidth), Math.Max(height, minimumHeight));
+        SetWindowMinimumSize(Handle, minimumWidth, minimumHeight);
+    }
+
+    private void Place(int width, int height)
+    {
+        GetWindowPosition(Handle, out var x, out var y);
+        GetWindowSize(Handle, out var w, out var h);
+        var current = new WindowRect(x, y, w, h);
+        var placed = TryGetUsableDisplayBounds(out var ux, out var uy, out var uw, out var uh)
+            ? WindowPlacement.Place(current, width, height, new WindowRect(ux, uy, uw, uh))
+            : current with { Width = width, Height = height };
+        SetWindowSize(Handle, placed.Width, placed.Height);
+        SetWindowPosition(Handle, placed.X, placed.Y);
     }
 
     /// <summary>Brings the window to the front and gives it input focus. Used after a tear-out/relocate
