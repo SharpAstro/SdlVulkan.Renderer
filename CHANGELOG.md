@@ -7,6 +7,21 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.68
+
+**A window sizes itself in design units, and resizes where it stands.** Two things YtPlayer did for itself, which any
+window that sizes itself needs:
+
+- `SdlVulkanWindow.ToWindowSize(designWidth, designHeight)` turns a size in DIR.Lib's design units into the window's
+  coordinates, for `SetSize`, `SetMinimumSize` and `ResizeInPlace`. A design unit spans `DisplayScale` over the
+  window's pixel density, so the window is as big on a 150% display as the layout inside it. YtPlayer multiplied by
+  `DisplayScale`, which is right only where window coordinates are pixels (Windows, X11).
+- `SdlVulkanWindow.ResizeInPlace(width, height)` resizes the window and keeps the corner nearest its display's own
+  corner where it was, so a window parked bottom right grows up and to the left, and keeps it inside the display's
+  usable area. `SetSize` keeps the top-left corner, which walks such a window off the bottom of the screen. The
+  overload with a minimum size sets that too, in the order that does not move the window: SDL grows a window to a
+  raised minimum at once, from its top-left corner, so the minimum is lowered, the window placed, then raised.
+
 ## 7.67
 
 **`SetMaximizable(false)` stays set.** SDL rebuilds a resizable window's style, maximize box included, when it
