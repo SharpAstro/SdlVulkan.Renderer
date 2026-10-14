@@ -20,7 +20,9 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// <summary>Called each frame between BeginFrame and EndFrame for this window.</summary>
     public Action? OnRender { get; set; }
 
-    /// <summary>Called after this window's renderer is resized. Parameters are the new pixel dimensions.</summary>
+    /// <summary>Called after this window's renderer is resized. Parameters are the new pixel dimensions: the size the
+    /// swapchain was built at (<see cref="VkRenderer.Width"/>/<see cref="VkRenderer.Height"/>), which the surface
+    /// chooses and which need not be the window's pixel size as SDL reports it.</summary>
     public Action<uint, uint>? OnResize { get; set; }
 
     /// <summary>

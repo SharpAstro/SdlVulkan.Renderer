@@ -100,8 +100,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         int sdfInitialAtlasDim = 0, ManagedFontRasterizer? rasterizer = null,
         SdfLargeTierOptions? sdfLargeTier = null) : base(ctx)
     {
-        _width = width;
-        _height = height;
+        // A window context has built its swapchain already, at the extent its surface chose, which
+        // need not be the size passed here; an offscreen one has none, and the size passed stands.
+        (_width, _height) = SizeAfterSwapchainBuild(ctx.SwapchainWidth, ctx.SwapchainHeight, width, height);
         _mainPipelines = _pipelines = VkPipelineSet.Create(ctx);
         if (ctx.SingleSampleMainPassAvailable)
             _singleSamplePipelinesBuild = Task.Run(
@@ -782,11 +783,27 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _pipelines = _mainPipelines;
     }
 
+    /// <summary>
+    /// The size this renderer lays out and projects to once a swapchain has been built: the
+    /// swapchain's own extent, which the surface may have chosen over the size that was asked for
+    /// (see <see cref="VulkanContext.ChooseSwapchainExtent"/>); the requested size only where there is
+    /// no swapchain extent to go by (an offscreen context).
+    /// </summary>
+    internal static (uint Width, uint Height) SizeAfterSwapchainBuild(
+        uint swapchainWidth, uint swapchainHeight, uint requestedWidth, uint requestedHeight)
+        => swapchainWidth > 0 && swapchainHeight > 0
+            ? (swapchainWidth, swapchainHeight)
+            : (requestedWidth, requestedHeight);
+
+    // After the swapchain is (re)built: lay out and project to the size it was actually built at.
+    private void AdoptSwapchainSize(uint requestedWidth, uint requestedHeight)
+        => (_width, _height) = SizeAfterSwapchainBuild(
+            Surface.SwapchainWidth, Surface.SwapchainHeight, requestedWidth, requestedHeight);
+
     public override void Resize(uint width, uint height)
     {
-        _width = width;
-        _height = height;
         Surface.RecreateSwapchain(width, height);
+        AdoptSwapchainSize(width, height);
         UpdateProjection();
     }
 
@@ -800,10 +817,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public void RecreateForNewSurface(Func<VkSurfaceKHR> recreateSurface, uint width, uint height)
     {
-        _width = width;
-        _height = height;
         Surface.PrepareForSurfaceLoss();
         Surface.AdoptSurface(recreateSurface(), width, height);
+        AdoptSwapchainSize(width, height);
         UpdateProjection();
     }
 
@@ -833,6 +849,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _currentCmd = VkCommandBuffer.Null;
         _lastBoundPipeline = VkPipeline.Null;
         Surface.RecoverFromGpuError(_width, _height);
+        AdoptSwapchainSize(_width, _height);
         UpdateProjection();
     }
 

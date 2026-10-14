@@ -401,8 +401,10 @@ public sealed class SdlEventLoop
             {
                 renderer.RecreateForNewSurface(
                     () => { v.Window.RecreateSurface(); return v.Window.Surface; }, (uint)fw, (uint)fh);
-                DebugLog($"[resume] swapchain rebuilt at {fw}x{fh}");
-                v.OnResize?.Invoke((uint)fw, (uint)fh);
+                DebugLog($"[resume] swapchain rebuilt at {renderer.Width}x{renderer.Height} (window {fw}x{fh})");
+                // The size the swapchain was built at, not the window's: the surface chooses the
+                // extent, and a host laid out to the window's would run past its frame.
+                v.OnResize?.Invoke(renderer.Width, renderer.Height);
                 v.NeedsSurfaceRebuild = false;
                 v.Paused = false;
                 v.NeedsRedraw = true; // paint the restored frame now that the swapchain is live
@@ -441,14 +443,15 @@ public sealed class SdlEventLoop
                     v.NeedsRedraw = true;
                     return false;
                 }
-                // Recovery rebuilt the swapchain at the pre-recovery size; re-run layout only if the
-                // window was resized while recovery was in flight (mirrors the synchronous path).
-                v.Window.GetSizeInPixels(out var rw, out var rh);
-                if (rw > 0 && rh > 0 && ((uint)rw != v.LastRecoverW || (uint)rh != v.LastRecoverH))
+                // Recovery rebuilt the swapchain at whatever extent the surface states now; re-run layout
+                // only if that differs from what was last reported here (a resize while recovery was in
+                // flight). The swapchain's size, not the window's, as on every path that reports one.
+                var (rw, rh) = (renderer.Width, renderer.Height);
+                if (rw > 0 && rh > 0 && (rw != v.LastRecoverW || rh != v.LastRecoverH))
                 {
-                    v.OnResize?.Invoke((uint)rw, (uint)rh);
-                    v.LastRecoverW = (uint)rw;
-                    v.LastRecoverH = (uint)rh;
+                    v.OnResize?.Invoke(rw, rh);
+                    v.LastRecoverW = rw;
+                    v.LastRecoverH = rh;
                 }
                 // fall through and render this frame
             }
@@ -498,7 +501,7 @@ public sealed class SdlEventLoop
                 if (sw > 0 && sh > 0)
                 {
                     renderer.Resize((uint)sw, (uint)sh);
-                    v.OnResize?.Invoke((uint)sw, (uint)sh);
+                    v.OnResize?.Invoke(renderer.Width, renderer.Height);
                 }
                 v.NeedsRedraw = true;
                 return false;
@@ -809,7 +812,7 @@ public sealed class SdlEventLoop
                     if (rw > 0 && rh > 0)
                     {
                         vr.Renderer.Resize((uint)rw, (uint)rh);
-                        vr.OnResize?.Invoke((uint)rw, (uint)rh);
+                        vr.OnResize?.Invoke(vr.Renderer.Width, vr.Renderer.Height);
                     }
                     vr.NeedsRedraw = true;
                 }

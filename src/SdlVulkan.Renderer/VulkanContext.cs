@@ -1279,16 +1279,29 @@ public sealed unsafe partial class VulkanContext : IDisposable
             _dev.Dispose();
     }
 
-    private void CreateSwapchain(uint width, uint height)
+    /// <summary>
+    /// The extent a swapchain is built at: the surface's <c>currentExtent</c> whenever it states one
+    /// (Win32, Android, and X11 always do — and it need not equal the window's pixel size as SDL last
+    /// reported it), and the requested size, clamped to the surface's limits, only where it is left
+    /// undefined (<c>0xFFFFFFFF</c>, Wayland). So the requested size is a hint; what the swapchain has
+    /// is <see cref="SwapchainWidth"/>/<see cref="SwapchainHeight"/>.
+    /// </summary>
+    internal static VkExtent2D ChooseSwapchainExtent(in VkSurfaceCapabilitiesKHR caps, uint width, uint height)
     {
-        InstanceApi.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, _surface, out var caps);
-
         var extent = caps.currentExtent;
         if (extent.width == uint.MaxValue)
         {
             extent.width = Math.Clamp(width, caps.minImageExtent.width, caps.maxImageExtent.width);
             extent.height = Math.Clamp(height, caps.minImageExtent.height, caps.maxImageExtent.height);
         }
+        return extent;
+    }
+
+    private void CreateSwapchain(uint width, uint height)
+    {
+        InstanceApi.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, _surface, out var caps);
+
+        var extent = ChooseSwapchainExtent(caps, width, height);
 
         var imageCount = caps.minImageCount + 1;
         if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
