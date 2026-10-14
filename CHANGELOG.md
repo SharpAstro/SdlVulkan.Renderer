@@ -7,6 +7,30 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.70
+
+**The inspector sidecar finds a local DEBUG app through DIR.Lib's per-user registry.** From DIR.Lib 11.21 a debug
+inspector stops answering UDP multicast by default (that bind on every interface made Windows Firewall prompt once
+per executable path, so once per worktree) and registers instead, as a `<pid>-<tcpPort>.json` file under
+`LocalApplicationData/DIR.Lib/inspector`. A sidecar that only multicast could no longer see such an app.
+
+- `SdlVulkan.Renderer.Inspector`'s discovery (`list_instances`, and the instance every other tool resolves) reads
+  that folder first, listing each live entry at `127.0.0.1`, then multicasts as before, which still finds instances
+  on other machines and builds older than 11.21 (which do not register). The two are merged keeping the first of each
+  (address, pid), with a reply from one of this machine's own addresses counted as loopback, so an app that both
+  registers and has LAN discovery on lists once, while another machine's instance that happens to share a local pid
+  still shows.
+- The reader follows DIR.Lib's `inspector-registry.md` by hand; the sidecar still references nothing from DIR.Lib.
+  It computes the folder as the writer does, with `SpecialFolderOption.DoNotVerify` (on Unix the default option
+  returns an empty path until `~/.local/share` exists), and a folder that is not there lists nothing. It reads only `<pid>-<port>.json` names, opens each sharing `ReadWrite | Delete` and closes it at once (so the app's
+  own rewrite and removal are not blocked for longer than the read), skips a file that vanished or does not parse,
+  and drops an entry whose pid is dead. An entry whose pid is running but whose process started more than 2 s away
+  from its recorded `processStart` (a reused pid) is skipped and SAID: `descriptor skipped: start-time mismatch
+  (<file>)` on stderr and as a `note:` line in `list_instances`, because on Linux a wall-clock step makes a live
+  instance look the same until it restarts. It never deletes; the next app to start a core sweeps. The kind filter applies to registry entries
+  as to replies (`sdl`, or `unknown`). The registry needs no network: a multicast that fails at the socket costs only
+  its own results.
+
 ## 7.69
 
 **A window can have its own entry in the system's media controls.** YtPlayer's video showed in Windows' media flyout
