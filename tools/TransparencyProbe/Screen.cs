@@ -69,6 +69,23 @@ internal sealed class Backdrop : IDisposable
         RenderPresent(_renderer);
     }
 
+    /// <summary>
+    /// Puts the backdrop back directly under <paramref name="window"/>, the window being judged, if it has come in
+    /// front of it. Both are always on top, and among always-on-top windows the one raised last is in front: on the
+    /// Surface (2026-10-14) the mouse merely passing over the checkerboard raised it over the window under test, without
+    /// a click and without activating it, so a person looking, or a capture, saw checkerboard where the window
+    /// should have been. Call it every frame; it moves the backdrop only when it is out of place.
+    /// </summary>
+    public void KeepBelow(nint window)
+    {
+        // Walk up from the backdrop: meeting the window means the backdrop is below it, as it should be.
+        for (var h = Win32.GetWindow(Hwnd, Win32.GwHwndPrev); h != 0; h = Win32.GetWindow(h, Win32.GwHwndPrev))
+            if (h == window)
+                return;
+        // Inserted after another always-on-top window, the backdrop stays always on top, so nothing else covers it.
+        Win32.SetWindowPos(Hwnd, window, 0, 0, 0, 0, Win32.SwpNoMove | Win32.SwpNoSize | Win32.SwpNoActivate);
+    }
+
     public byte[] Capture() => Win32.CaptureScreen(X, Y, Width, Height);
 
     /// <summary>Which top-level window a click at (x, y), relative to the backdrop, would reach.</summary>
@@ -252,9 +269,14 @@ internal static unsafe partial class Win32
     public const int GwlExStyle = -20;
     public const uint WsExLayered = 0x80000, WsExNoRedirectionBitmap = 0x200000, WsExTopmost = 0x8;
     public const uint WsPopup = 0x80000000, WsVisible = 0x10000000;
+    public const uint GwHwndPrev = 3;
+    public const uint SwpNoSize = 0x1, SwpNoMove = 0x2, SwpNoActivate = 0x10;
 
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool GetWindowRect(nint hwnd, out RectL rect);
     [LibraryImport("user32.dll")] public static partial nint WindowFromPoint(Point p);
+    [LibraryImport("user32.dll")] public static partial nint GetWindow(nint hwnd, uint cmd);
+    [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SetWindowPos(nint hwnd, nint insertAfter, int x, int y, int cx, int cy, uint flags);
     [LibraryImport("user32.dll")] public static partial nint GetAncestor(nint hwnd, uint flags);
     [LibraryImport("user32.dll")] public static partial nint GetWindowLongPtrW(nint hwnd, int index);
     [LibraryImport("user32.dll", SetLastError = true)] public static partial ushort RegisterClassW(WndClassW* wc);
