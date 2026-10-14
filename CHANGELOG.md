@@ -25,6 +25,13 @@ as "Unknown app": the entry was WebView2's, published from its own process, unde
   keys), so an app that shows its own entry does not get two: Chromium's
   `--disable-features=HardwareMediaKeyHandling`, passed in the environment options. Checked against a muted video:
   without it Windows lists a session from `msedgewebview2.exe`; with it, none, and the video plays on.
+- **Fix (a later 7.69 build): `OnResize` carries the size the swapchain was built at, not the window's.** The swapchain
+  takes the surface's `currentExtent` whenever the surface states one (Win32, Android, X11 always do), and that need
+  not be the pixel size SDL last reported for the window; yet `SdlEventLoop` handed `OnResize` the window's size on
+  every path (resize, the resize after a failed `BeginFrame`, Android's surface rebuild, the GPU-error recovery), and
+  `VkRenderer` projected to it as well. A host laid out to a size its frame did not have (tianwen #1574). Now
+  `VkRenderer.Resize`, `RecreateForNewSurface`, `RecoverFromGpuError` and its constructor adopt the swapchain's
+  extent as `Width`/`Height`, and the loop reports those. Same `Action<uint, uint>`; only the size it carries changed.
 
 ## 7.68
 
