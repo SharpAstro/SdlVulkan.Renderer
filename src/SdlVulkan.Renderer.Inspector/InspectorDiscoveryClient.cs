@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -6,65 +7,145 @@ using System.Text.Json;
 namespace SdlVulkan.Renderer.Inspector;
 
 /// <summary>A discovered debuggable instance (one running Debug-build app).</summary>
-/// <param name="Address">Where the reply came FROM. Not what the command connection uses — see
-/// <see cref="InspectorSocketClient"/>.</param>
+/// <param name="Address">Where the instance was found: <c>127.0.0.1</c> for a registry entry, otherwise where the
+/// multicast reply came FROM. Not what the command connection uses; see <see cref="InspectorSocketClient"/>.</param>
 /// <param name="Kind">The surface kind it claims. Only an <c>sdl</c> surface speaks these verbs.</param>
 public sealed record InspectorInstance(
     IPAddress Address, int TcpPort, string App, string? Title, int Pid, int Proto, string Kind);
 
 /// <summary>
-/// Discovers debuggable instances by sending a UDP multicast query and collecting the unicast
-/// descriptor replies. The reply's source address is the instance's reachable address (used for
-/// the TCP command connection), so the descriptor itself carries only the port + metadata.
+/// Discovers debuggable instances in two ways, merged. First DIR.Lib's per-user file registry
+/// (<see cref="InspectorRegistry"/>), which is how a DEBUG app on DIR.Lib 11.21 or later is found on this
+/// machine: that app answers no multicast unless asked to, so it never binds a socket Windows Firewall would
+/// prompt about. Then a UDP multicast query, collecting the unicast descriptor replies, which still finds
+/// instances on other machines and builds older than 11.21 (which do not register). The registry needs no
+/// network at all; a multicast that cannot be sent costs only its own results.
 /// </summary>
-public sealed class InspectorDiscoveryClient(IPAddress group, int port)
+public sealed class InspectorDiscoveryClient
 {
     private static readonly byte[] Query = Encoding.UTF8.GetBytes("{\"q\":\"dir-inspect\",\"proto\":1}");
 
+    private readonly IPAddress _group;
+    private readonly int _port;
+    private readonly string? _registryDirectory;
+
+    /// <summary>Discovers through the per-user registry and the multicast group <paramref name="group"/>:<paramref name="port"/>.</summary>
+    public InspectorDiscoveryClient(IPAddress group, int port)
+        : this(group, port, InspectorRegistry.DefaultDirectory)
+    {
+    }
+
+    /// <summary>The registry folder overridden, so a test reads fixtures and never the real per-user folder.</summary>
+    internal InspectorDiscoveryClient(IPAddress group, int port, string? registryDirectory)
+    {
+        _group = group;
+        _port = port;
+        _registryDirectory = registryDirectory;
+    }
+
     /// <summary>
-    /// Multicasts a discovery query and returns the instances that reply within the collection
-    /// window (~400ms). De-duped by pid.
+    /// Reads the registry, then multicasts a discovery query and collects replies for ~400ms, and returns both
+    /// merged (<see cref="Merge"/>): registry entries first, de-duped by (address, pid).
     /// </summary>
     public async Task<IReadOnlyList<InspectorInstance>> DiscoverAsync(CancellationToken ct = default)
     {
-        using var udp = new UdpClient(AddressFamily.InterNetwork);
-        // Auto-binds to an ephemeral local port on first send; replies arrive there.
-        await udp.SendAsync(Query, Query.Length, new IPEndPoint(group, port));
+        var registered = InspectorRegistry.Read(_registryDirectory).Where(i => IsSdl(i.Kind)).ToList();
+        var replied = await MulticastAsync(ct);
+        return Merge(registered, replied, replied.Count == 0 ? _ => false : LocalAddressFilter());
+    }
 
+    private async Task<List<InspectorInstance>> MulticastAsync(CancellationToken ct)
+    {
         var found = new List<InspectorInstance>();
-        var seen = new HashSet<int>();
-
-        using var window = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        window.CancelAfter(TimeSpan.FromMilliseconds(400));
         try
         {
-            while (true)
+            using var udp = new UdpClient(AddressFamily.InterNetwork);
+            // Auto-binds to an ephemeral local port on first send; replies arrive there. With no network the
+            // send throws, which leaves the registry's results to stand alone.
+            await udp.SendAsync(Query, Query.Length, new IPEndPoint(_group, _port));
+
+            using var window = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            window.CancelAfter(TimeSpan.FromMilliseconds(400));
+            try
             {
-                var recv = await udp.ReceiveAsync(window.Token);
-                if (TryParse(recv, out var instance) && IsSdl(instance!.Kind) && seen.Add(instance.Pid))
-                    found.Add(instance);
+                while (true)
+                {
+                    var recv = await udp.ReceiveAsync(window.Token);
+                    if (TryParseDescriptor(recv.Buffer, recv.RemoteEndPoint.Address, out var instance, out _)
+                        && IsSdl(instance!.Kind))
+                        found.Add(instance);
+                }
             }
+            catch (OperationCanceledException) { /* collection window elapsed */ }
         }
-        catch (OperationCanceledException) { /* collection window elapsed */ }
-        catch (SocketException) { /* transient receive error; return what we have */ }
+        catch (SocketException) { /* no network, or a transient receive error: return what we have */ }
 
         return found;
     }
 
     /// <summary>
-    /// Whether a reply is a surface this sidecar can drive. Discovery is ONE shared group, so a terminal
-    /// app on the same machine answers the same query — and offering it a screenshot verb would be
-    /// nonsense. <c>unknown</c> is accepted because an app built before the kind field existed does not
-    /// send one, and refusing it would make that app invisible rather than merely unlabelled.
+    /// Registry entries, then multicast replies, keeping the first of each (address, pid). A reply from one of
+    /// this machine's own addresses counts as <c>127.0.0.1</c>: an app that registers AND answers multicast (LAN
+    /// discovery opted in) replies from its interface address, and is still the instance the registry listed.
+    /// The address stays in the key because an instance on another machine can share a pid with a local one.
+    /// A process hosting several cores (one per window) lists once, as it always has, since a tool picks its
+    /// target by pid.
     /// </summary>
-    private static bool IsSdl(string kind) => kind is "sdl" or "unknown";
-
-    private static bool TryParse(UdpReceiveResult recv, out InspectorInstance? instance)
+    internal static IReadOnlyList<InspectorInstance> Merge(
+        IEnumerable<InspectorInstance> registered, IEnumerable<InspectorInstance> replied, Func<IPAddress, bool> isLocal)
     {
-        instance = null;
+        var merged = new List<InspectorInstance>();
+        var seen = new HashSet<(IPAddress, int)>();
+        foreach (var instance in registered.Concat(replied))
+        {
+            var machine = IPAddress.IsLoopback(instance.Address) || isLocal(instance.Address)
+                ? IPAddress.Loopback
+                : instance.Address;
+            if (seen.Add((machine, instance.Pid))) merged.Add(instance);
+        }
+        return merged;
+    }
+
+    /// <summary>
+    /// Whether an address is one of this machine's own. Built once per discovery, and only when something
+    /// replied; a machine whose interfaces cannot be listed treats only loopback as local.
+    /// </summary>
+    private static Func<IPAddress, bool> LocalAddressFilter()
+    {
+        var local = new HashSet<IPAddress>();
         try
         {
-            using var doc = JsonDocument.Parse(recv.Buffer);
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+                foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
+                    local.Add(unicast.Address);
+        }
+        catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException) { }
+        return local.Contains;
+    }
+
+    /// <summary>
+    /// Whether a reply is a surface this sidecar can drive. Discovery is ONE shared group, so a terminal
+    /// app on the same machine answers the same query, and offering it a screenshot verb would be
+    /// nonsense. <c>unknown</c> is accepted because an app built before the kind field existed does not
+    /// send one, and refusing it would make that app invisible rather than merely unlabelled. A registry
+    /// entry is filtered by the same rule.
+    /// </summary>
+    internal static bool IsSdl(string kind) => kind is "sdl" or "unknown";
+
+    /// <summary>
+    /// Parses a descriptor: a multicast reply, or a registry file, which carries the same members plus
+    /// <c>processStart</c>. False if it is not JSON or lacks <c>pid</c> or <c>tcpPort</c>; members it does not
+    /// know are ignored. <paramref name="processStart"/> is null when absent or unreadable, and the liveness
+    /// check then goes by the pid alone.
+    /// </summary>
+    internal static bool TryParseDescriptor(ReadOnlyMemory<byte> json, IPAddress address,
+        out InspectorInstance? instance, out DateTime? processStart)
+    {
+        instance = null;
+        processStart = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
             var r = doc.RootElement;
             var pid = r.GetProperty("pid").GetInt32();
             var tcpPort = r.GetProperty("tcpPort").GetInt32();
@@ -72,12 +153,15 @@ public sealed class InspectorDiscoveryClient(IPAddress group, int port)
             var title = r.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
             var proto = r.TryGetProperty("proto", out var p) ? p.GetInt32() : 0;
             var kind = r.TryGetProperty("kind", out var k) ? k.GetString() ?? "unknown" : "unknown";
-            instance = new InspectorInstance(recv.RemoteEndPoint.Address, tcpPort, app, title, pid, proto, kind);
+            if (r.TryGetProperty("processStart", out var s) && s.ValueKind == JsonValueKind.String
+                && s.TryGetDateTimeOffset(out var started))
+                processStart = started.UtcDateTime;
+            instance = new InspectorInstance(address, tcpPort, app, title, pid, proto, kind);
             return true;
         }
         catch
         {
-            return false; // ignore malformed datagrams
+            return false; // malformed: a stray datagram, or a file not written by the registry's writer
         }
     }
 }
