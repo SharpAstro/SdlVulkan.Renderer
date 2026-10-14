@@ -57,7 +57,8 @@ internal static unsafe class Present
         }
 
         var pick = args[0].Split(':', 2);
-        var match = devices.FirstOrDefault(d => d.Driver == pick[0]
+        // Part of the driver's name will do: Qualcomm's is "Qualcomm Technologies Inc. Adreno Vulkan Driver".
+        var match = devices.FirstOrDefault(d => d.Driver.Contains(pick[0], StringComparison.OrdinalIgnoreCase)
             && d.Name.Contains(pick.Length > 1 ? pick[1] : "", StringComparison.OrdinalIgnoreCase));
         if (match.Device.Handle == 0)
         {

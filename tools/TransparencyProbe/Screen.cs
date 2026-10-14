@@ -84,17 +84,19 @@ internal sealed class Backdrop : IDisposable
 
 /// <summary>
 /// The person in front of the panel, for when the capture may not show what the panel does. GDI reads the
-/// compositor's picture; the panel shows what the display hardware scans out, and on the Surface (Adreno X1-85) the
-/// two seem to part: its capture of the native driver's window said opaque, while the person watching the panel
-/// reported seeing the backdrop through it every time (2026-10-14). --look exists to pin that down. The same trap as
-/// HDR (tools/HdrProbe): only the panel can judge.
+/// compositor's picture; the panel shows what the display hardware scans out, and nothing promises the two agree:
+/// the same trap as HDR (tools/HdrProbe), where only the panel can judge. On the Surface (Adreno X1-85, 2026-10-14)
+/// they did agree. The person watching had first remembered seeing the backdrop through every picture, which would
+/// have contradicted the capture's "opaque" for the native driver; asked picture by picture, they saw the native
+/// driver's window opaque and Dozen's blend, as the capture had said.
 /// </summary>
 internal static class Eye
 {
-    private const double TimeoutSeconds = 30;
+    // Long enough for a person to walk up, look and decide: a person sets the pace here, not the probe.
+    private const double TimeoutSeconds = 600;
 
     /// <summary>
-    /// Asks <paramref name="question"/> and waits for Y or N in one of the probe's windows (Escape, or 30 seconds,
+    /// Asks <paramref name="question"/> and waits for Y or N in one of the probe's windows (Escape, or 10 minutes,
     /// for no answer), running <paramref name="frame"/> meanwhile so the picture stays up. True for yes.
     /// </summary>
     public static bool? Ask(string question, Action frame)

@@ -33,8 +33,8 @@ internal static class Program
         }
         // A powered-down panel is not composed, and its capture is black.
         Win32.KeepDisplayOn();
-        // --look: hold each picture on screen and ask the person in front of it, since a capture can disagree with
-        // the panel (it seems to on the Surface: the capture said opaque where the person watching saw alpha).
+        // --look: hold each picture on screen and ask the person in front of it, since nothing promises a capture
+        // shows what the panel does (on the Surface, asked picture by picture, the two agreed).
         var look = args.Contains("--look");
         args = args.Where(a => a != "--look").ToArray();
         // One folder per run, so a rerun does not overwrite the pictures of the last.
