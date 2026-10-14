@@ -148,9 +148,9 @@ public sealed class InspectorDiscoveryClient
 
     /// <summary>
     /// Parses a descriptor: a multicast reply, or a registry file, which carries the same members plus
-    /// <c>processStart</c>. False if it is not JSON or lacks <c>pid</c> or <c>tcpPort</c>; members it does not
-    /// know are ignored. <paramref name="processStart"/> is null when absent or unreadable, and the liveness
-    /// check then goes by the pid alone.
+    /// <c>processStart</c>. False if it is not JSON, or lacks a usable <c>pid</c> (positive) or <c>tcpPort</c>
+    /// (1 to 65535); members it does not know are ignored. <paramref name="processStart"/> is null when absent
+    /// or unreadable, and the liveness check then goes by the pid alone.
     /// </summary>
     internal static bool TryParseDescriptor(ReadOnlyMemory<byte> json, IPAddress address,
         out InspectorInstance? instance, out DateTime? processStart)
@@ -163,6 +163,9 @@ public sealed class InspectorDiscoveryClient
             var r = doc.RootElement;
             var pid = r.GetProperty("pid").GetInt32();
             var tcpPort = r.GetProperty("tcpPort").GetInt32();
+            // Pid 0 is Windows' Idle process, which the liveness check would find running and unreadable, and so
+            // keep; no port outside this range can be connected to.
+            if (pid <= 0 || tcpPort is <= 0 or > IPEndPoint.MaxPort) return false;
             var app = r.TryGetProperty("app", out var a) ? a.GetString() ?? "" : "";
             var title = r.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
             var proto = r.TryGetProperty("proto", out var p) ? p.GetInt32() : 0;

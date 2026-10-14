@@ -30,7 +30,7 @@ internal static class InspectorRegistry
     /// <see cref="Environment.SpecialFolderOption.DoNotVerify"/>, as the spec says: with the default option a
     /// Unix <c>GetFolderPath</c> returns "" while <c>~/.local/share</c> (or <c>$XDG_DATA_HOME</c>) does not exist
     /// yet, which would hide the folder's path rather than report it empty. A folder that is not there is no
-    /// instance registered, and <see cref="Read(string?)"/> lists nothing for it.
+    /// instance registered, and <see cref="Read(string, ICollection{string})"/> lists nothing for it.
     /// </para>
     /// </summary>
     internal static string? DefaultDirectory

@@ -129,6 +129,21 @@ public sealed class InspectorRegistryTests : IDisposable
     }
 
     [Fact]
+    public void AnUnusablePidOrPort_DoesNotParse()
+    {
+        // Pid 0 matters most: on Windows it is the Idle process, running and unreadable, so a liveness check
+        // alone would keep it.
+        WriteFile($"{OwnPid}-50018.json", Descriptor(pid: 0, port: 50018, processStartUtc: null));
+        WriteFile($"{OwnPid}-50019.json", Descriptor(pid: -5, port: 50019, processStartUtc: null));
+        WriteFile($"{OwnPid}-50020.json", Descriptor(OwnPid, port: 0, processStartUtc: null));
+        WriteFile($"{OwnPid}-50021.json", Descriptor(OwnPid, port: 70000, processStartUtc: null));
+        var notes = new List<string>();
+
+        InspectorRegistry.Read(_dir, notes).ShouldBeEmpty();
+        notes.ShouldBeEmpty("a file that does not parse is skipped quietly");
+    }
+
+    [Fact]
     public void AFileThatVanishesBeforeItIsRead_IsSkippedWithoutFailingTheListing()
     {
         // What an app exiting between the enumeration and the read looks like: a path that is no longer there.
