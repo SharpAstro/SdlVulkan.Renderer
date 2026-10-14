@@ -10,8 +10,9 @@ namespace SdlVulkan.Renderer.Inspector;
 /// without binding a socket a firewall would ask about. This project does not reference DIR.Lib, so the
 /// contract is DIR.Lib's <c>src/DIR.Lib/Diagnostics/inspector-registry.md</c>, implemented here by hand.
 /// <para>
-/// A reader never deletes. A descriptor left by a crash is dropped by the liveness rule (<see cref="IsLive"/>)
-/// and swept by the next app that starts a core.
+/// A reader never deletes. A descriptor left by a crash is dropped by the liveness rule (<see cref="Check"/>)
+/// and swept by the next app that starts a core; one whose pid is running but whose start time disagrees is
+/// skipped AND reported, since on Linux that can be a live instance after a wall-clock step.
 /// </para>
 /// </summary>
 internal static class InspectorRegistry
@@ -38,12 +39,31 @@ internal static class InspectorRegistry
             ? Path.Combine(root, "DIR.Lib", "inspector")
             : null;
 
+    /// <summary>What the liveness rule made of a descriptor's pid.</summary>
+    internal enum Liveness
+    {
+        /// <summary>Running, and the same process that wrote the descriptor (or its start time cannot be read).</summary>
+        Live,
+
+        /// <summary>Not running: a descriptor left by a crash, waiting for the next writer's sweep.</summary>
+        Dead,
+
+        /// <summary>
+        /// Running, but started more than <see cref="StartTimeTolerance"/> away from the recorded time. Usually a
+        /// reused pid; on Linux, where .NET derives a start time from the boot time, also a live instance after
+        /// the wall clock was stepped. The two cannot be told apart here, so this one is reported, not dropped
+        /// silently.
+        /// </summary>
+        StartMismatch,
+    }
+
     /// <summary>
     /// The live instances registered in <paramref name="directory"/>, each at <c>127.0.0.1</c> (the command
     /// server is loopback-only). A missing or unreadable folder means none. Not filtered by kind; the caller
-    /// filters registry and multicast results by the same rule.
+    /// filters registry and multicast results by the same rule. A descriptor skipped although its pid is
+    /// running adds a line to <paramref name="notes"/>.
     /// </summary>
-    internal static IReadOnlyList<InspectorInstance> Read(string? directory)
+    internal static IReadOnlyList<InspectorInstance> Read(string? directory, ICollection<string>? notes = null)
     {
         if (string.IsNullOrEmpty(directory)) return [];
 
@@ -53,14 +73,14 @@ internal static class InspectorRegistry
 
         // Sorted so a process hosting several cores (one per window) lists the same one first every time.
         Array.Sort(files, StringComparer.Ordinal);
-        return Read(files);
+        return Read(files, notes);
     }
 
     /// <summary>
     /// The live instances among <paramref name="files"/>. Split from the enumeration so a test can hand it a
     /// path that has already gone, which is what an app exiting between enumeration and read looks like.
     /// </summary>
-    internal static IReadOnlyList<InspectorInstance> Read(IEnumerable<string> files)
+    internal static IReadOnlyList<InspectorInstance> Read(IEnumerable<string> files, ICollection<string>? notes = null)
     {
         var found = new List<InspectorInstance>();
         foreach (var file in files)
@@ -69,7 +89,16 @@ internal static class InspectorRegistry
             if (TryReadAllBytes(file) is not { } bytes) continue;
             if (!InspectorDiscoveryClient.TryParseDescriptor(bytes, IPAddress.Loopback, out var instance, out var processStart))
                 continue;   // half-written by something other than the writer, or lacking pid / tcpPort
-            if (IsLive(instance!.Pid, processStart)) found.Add(instance);
+
+            switch (Check(instance!.Pid, processStart))
+            {
+                case Liveness.Live:
+                    found.Add(instance);
+                    break;
+                case Liveness.StartMismatch:
+                    notes?.Add($"descriptor skipped: start-time mismatch ({file})");
+                    break;
+            }
         }
         return found;
     }
@@ -111,18 +140,20 @@ internal static class InspectorRegistry
     /// descriptor recorded a start time, it is the same process rather than a later one given the same pid.
     /// When the start time cannot be read (access denied) the pid alone decides.
     /// </summary>
-    internal static bool IsLive(int pid, DateTime? processStartUtc)
+    internal static Liveness Check(int pid, DateTime? processStartUtc)
     {
         try
         {
             using var process = Process.GetProcessById(pid);
-            if (process.HasExited) return false;
-            if (processStartUtc is not { } recorded) return true;
-            return (process.StartTime.ToUniversalTime() - recorded).Duration() <= StartTimeTolerance;
+            if (process.HasExited) return Liveness.Dead;
+            if (processStartUtc is not { } recorded) return Liveness.Live;
+            return (process.StartTime.ToUniversalTime() - recorded).Duration() <= StartTimeTolerance
+                ? Liveness.Live
+                : Liveness.StartMismatch;
         }
-        catch (ArgumentException) { return false; }          // no process with that pid
-        catch (InvalidOperationException) { return false; }  // it exited while being asked
-        catch (Exception) { return true; }                    // cannot tell (access denied): the pid decides
+        catch (ArgumentException) { return Liveness.Dead; }          // no process with that pid
+        catch (InvalidOperationException) { return Liveness.Dead; }  // it exited while being asked
+        catch (Exception) { return Liveness.Live; }                   // cannot tell (access denied): the pid decides
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -92,22 +93,27 @@ public sealed class InspectorRegistryTests : IDisposable
     }
 
     [Fact]
-    public void ADeadPid_IsDroppedAndNotDeleted()
+    public void ADeadPid_IsDroppedQuietlyAndNotDeleted()
     {
         var path = WriteDescriptor(DeadPid, 50003, OwnStartUtc);
+        var notes = new List<string>();
 
-        InspectorRegistry.Read(_dir).ShouldBeEmpty();
+        InspectorRegistry.Read(_dir, notes).ShouldBeEmpty();
+        notes.ShouldBeEmpty("a crash's leftover is routine, and waits for the next writer's sweep");
         File.Exists(path).ShouldBeTrue("readers never delete; the next app that starts a core sweeps");
     }
 
     [Fact]
-    public void AReusedPid_IsDroppedAndNotDeleted()
+    public void AReusedPid_IsSkippedAndSaid_AndNotDeleted()
     {
         // Our own pid, live, but recorded as starting an hour before this process did: the file is a dead
-        // app's, and the pid has since been given to someone else.
+        // app's, and the pid has since been given to someone else. On Linux the same picture can be a live app
+        // after the wall clock was stepped, so the skip is reported rather than silent.
         var path = WriteDescriptor(OwnPid, 50004, OwnStartUtc.AddHours(-1));
+        var notes = new List<string>();
 
-        InspectorRegistry.Read(_dir).ShouldBeEmpty();
+        InspectorRegistry.Read(_dir, notes).ShouldBeEmpty();
+        notes.ShouldHaveSingleItem().ShouldBe($"descriptor skipped: start-time mismatch ({path})");
         File.Exists(path).ShouldBeTrue("readers never delete; the next app that starts a core sweeps");
     }
 
@@ -185,6 +191,32 @@ public sealed class InspectorRegistryTests : IDisposable
         instance.Address.ShouldBe(IPAddress.Loopback);
         instance.TcpPort.ShouldBe(50012);
         instance.Pid.ShouldBe(OwnPid);
+    }
+
+    [Fact]
+    public async Task ListInstances_ShowsAStartTimeSkipBesideTheInstances()
+    {
+        WriteDescriptor(OwnPid, 50015, OwnStartUtc);
+        var skipped = WriteDescriptor(OwnPid, 50016, OwnStartUtc.AddHours(-1));
+
+        var discovery = new InspectorDiscoveryClient(IPAddress.Loopback, port: 0, registryDirectory: _dir);
+        var text = await InspectorTools.list_instances(discovery, TestContext.Current.CancellationToken);
+
+        text.ShouldBe(
+            $"pid={OwnPid}  app=Chess  title=Chess - game 3  127.0.0.1:50015  proto=1{Environment.NewLine}"
+            + $"note: descriptor skipped: start-time mismatch ({skipped}){Environment.NewLine}");
+    }
+
+    [Fact]
+    public async Task ListInstances_SaysWhyWhenTheOnlyDescriptorWasSkipped()
+    {
+        var skipped = WriteDescriptor(OwnPid, 50017, OwnStartUtc.AddHours(-1));
+
+        var discovery = new InspectorDiscoveryClient(IPAddress.Loopback, port: 0, registryDirectory: _dir);
+        var text = await InspectorTools.list_instances(discovery, TestContext.Current.CancellationToken);
+
+        text.ShouldStartWith("No debuggable instances found.");
+        text.ShouldContain($"note: descriptor skipped: start-time mismatch ({skipped})");
     }
 
     [Fact]
