@@ -145,6 +145,19 @@ public sealed class InspectorRegistryTests : IDisposable
         InspectorRegistry.Read(_dir).ShouldBeEmpty();
     }
 
+    /// <summary>
+    /// Computes the path only; the folder is never read here. Pinned because on a Unix account without
+    /// <c>~/.local/share</c> the default option yields "" and the registry would silently have no path at all.
+    /// </summary>
+    [Fact]
+    public void TheDefaultFolder_IsLocalAppDataDirLibInspector_ComputedWithoutVerifying()
+    {
+        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData,
+            Environment.SpecialFolderOption.DoNotVerify);
+
+        InspectorRegistry.DefaultDirectory.ShouldBe(Path.Combine(root, "DIR.Lib", "inspector"));
+    }
+
     [Fact]
     public void AMissingFolder_ListsNothing()
     {
