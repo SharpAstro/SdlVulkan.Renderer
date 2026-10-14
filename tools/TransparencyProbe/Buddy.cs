@@ -86,10 +86,12 @@ internal static class Buddy
         Console.WriteLine($"SetShape: {buddy.SetShape(shape)}");
 
         var renderer = new VkRenderer(ctx, W, H);
+        var buddyHwnd = buddy.GetNativeWindowHandle();
         void Frame()
         {
             PumpEvents();
             backdrop.Paint();
+            backdrop.KeepBelow(buddyHwnd);
             if (!renderer.BeginFrame(new RGBAColor32(0, 0, 0, 0)))
                 return;
             renderer.FillEllipse(Box(20, 20, 220, 220), new RGBAColor32(OrangeR, OrangeG, OrangeB, HaloAlpha));

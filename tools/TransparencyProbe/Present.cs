@@ -225,6 +225,7 @@ internal static unsafe class Present
         {
             PumpEvents();
             backdrop.Paint();
+            backdrop.KeepBelow(hwnd);
             // Copies: a local function may not take the address of a local it captures.
             var fence = inFlight;
             var available = imageAvailable;
