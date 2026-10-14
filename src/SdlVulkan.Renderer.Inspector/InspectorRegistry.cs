@@ -25,9 +25,16 @@ internal static class InspectorRegistry
     /// <summary>
     /// <c>LocalApplicationData/DIR.Lib/inspector</c>, computed as the writer computes it. Null where the OS
     /// gives no per-user data folder, in which case nothing can have registered.
+    /// <para>
+    /// <see cref="Environment.SpecialFolderOption.DoNotVerify"/>, as the spec says: with the default option a
+    /// Unix <c>GetFolderPath</c> returns "" while <c>~/.local/share</c> (or <c>$XDG_DATA_HOME</c>) does not exist
+    /// yet, which would hide the folder's path rather than report it empty. A folder that is not there is no
+    /// instance registered, and <see cref="Read(string?)"/> lists nothing for it.
+    /// </para>
     /// </summary>
     internal static string? DefaultDirectory
-        => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) is { Length: > 0 } root
+        => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData,
+                Environment.SpecialFolderOption.DoNotVerify) is { Length: > 0 } root
             ? Path.Combine(root, "DIR.Lib", "inspector")
             : null;
 
