@@ -25,7 +25,7 @@ internal static class Buddy
     private const int OrangeR = 240, OrangeG = 176, OrangeB = 48;
     private const byte HaloAlpha = 100;
 
-    public static int Run(string mode, bool native, string outDir)
+    public static int Run(string mode, bool native, string outDir, bool look)
     {
         if (mode is not ("app" or "standalone"))
         {
@@ -86,25 +86,28 @@ internal static class Buddy
         Console.WriteLine($"SetShape: {buddy.SetShape(shape)}");
 
         var renderer = new VkRenderer(ctx, W, H);
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        var exit = 1;
-        while (true)
+        void Frame()
         {
             PumpEvents();
             backdrop.Paint();
             if (!renderer.BeginFrame(new RGBAColor32(0, 0, 0, 0)))
-                continue;
+                return;
             renderer.FillEllipse(Box(20, 20, 220, 220), new RGBAColor32(OrangeR, OrangeG, OrangeB, HaloAlpha));
             renderer.FillEllipse(Box(50, 50, 190, 190), new RGBAColor32(OrangeR, OrangeG, OrangeB, 255));
             renderer.FillEllipse(Box(88, 92, 104, 112), new RGBAColor32(42, 33, 16, 255));
             renderer.FillEllipse(Box(136, 92, 152, 112), new RGBAColor32(42, 33, 16, 255));
             renderer.EndFrame();
+        }
 
-            if (clock.Elapsed.TotalSeconds >= 1.5)
-            {
-                exit = Judge(backdrop, backdrop.Capture(), ctx.PresentsAlpha, buddy, native ? $"{mode}-native" : mode, outDir);
-                break;
-            }
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (clock.Elapsed.TotalSeconds < 1.5)
+            Frame();
+        var (exit, captureSawAlpha) = Judge(backdrop, backdrop.Capture(), ctx.PresentsAlpha, buddy,
+            native ? $"{mode}-native" : mode, outDir);
+        if (look && exit != 3)
+        {
+            var saw = Eye.Ask("Through the pale ring around the face, do you see the checkerboard?", Frame);
+            Console.WriteLine(Eye.Compare(saw, captureSawAlpha));
         }
 
         // The backdrop goes first: the library's teardown below ends in SDL_Quit.
@@ -120,12 +123,14 @@ internal static class Buddy
 
     private static RectInt Box(int x0, int y0, int x1, int y1) => new(new PointInt(x1, y1), new PointInt(x0, y0));
 
-    private static int Judge(Backdrop backdrop, byte[] after, bool presentsAlpha, SdlVulkanWindow buddy, string mode, string outDir)
+    // The exit code, and what the capture says of the halo: true blended, false opaque, null neither.
+    private static (int Exit, bool? CaptureSawAlpha) Judge(Backdrop backdrop, byte[] after, bool presentsAlpha,
+        SdlVulkanWindow buddy, string mode, string outDir)
     {
         if (Score.IsBlack(after))
         {
             Console.WriteLine("screen captured black: display off, or the Remote Desktop client minimized?");
-            return 3;
+            return (3, null);
         }
         var before = backdrop.Before;
         const double a = HaloAlpha / 255.0;
@@ -152,6 +157,6 @@ internal static class Buddy
         var ok = corner < 3 && body < 3 && (haloBlended < 6 || (!presentsAlpha && haloOpaque < 6))
             && Click(5, 5) == "through" && Click(35, 120) == "caught";
         Console.WriteLine(ok ? "VERDICT: as expected" : "VERDICT: NOT as expected");
-        return ok ? 0 : 2;
+        return (ok ? 0 : 2, haloBlended < 6 ? true : haloOpaque < 6 ? false : null);
     }
 }

@@ -33,15 +33,20 @@ internal static class Program
         }
         // A powered-down panel is not composed, and its capture is black.
         Win32.KeepDisplayOn();
-        var outDir = Path.Combine(Environment.CurrentDirectory, "transparency-probe-out");
+        // --look: hold each picture on screen and ask the person in front of it, since a capture can disagree with
+        // the panel (it seems to on the Surface: the capture said opaque where the person watching saw alpha).
+        var look = args.Contains("--look");
+        args = args.Where(a => a != "--look").ToArray();
+        // One folder per run, so a rerun does not overwrite the pictures of the last.
+        var outDir = Path.Combine(Environment.CurrentDirectory, "transparency-probe-out", System.DateTime.Now.ToString("yyyyMMdd-HHmmss"));
         Directory.CreateDirectory(outDir);
 
         var command = args.Length > 0 ? args[0] : "";
         return command switch
         {
             "caps" => WithInstance((instance, api) => Caps.Run(instance, api)),
-            "present" => WithInstance((instance, api) => Present.Run(instance, api, args[1..], outDir)),
-            "buddy" => Buddy.Run(args.Length > 1 ? args[1] : "app", args.Length > 2 && args[2] == "native", outDir),
+            "present" => WithInstance((instance, api) => Present.Run(instance, api, args[1..], outDir, look)),
+            "buddy" => Buddy.Run(args.Length > 1 ? args[1] : "app", args.Length > 2 && args[2] == "native", outDir, look),
             _ => Usage(),
         };
     }
@@ -58,7 +63,9 @@ internal static class Program
             TransparencyProbe buddy [app|standalone] [native]
                 the library's transparent-window API end to end: halo, shape, clicks; native keeps the window on
                 the native device, Dozen or not (a hard-edged companion: the shape alone)
-            Pictures go to .\transparency-probe-out. Keep the display on and visible while it runs.
+            --look, after "present" or "buddy": hold each picture on screen and ask whether you see the checkerboard
+                through it (Y or N in the picture's window), and print your answer beside the capture's verdict
+            Pictures go to .\transparency-probe-out\<date-time>. Keep the display on and visible while it runs.
             """);
         return 1;
     }
