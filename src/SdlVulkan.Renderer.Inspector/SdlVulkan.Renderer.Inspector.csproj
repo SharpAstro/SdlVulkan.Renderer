@@ -2,8 +2,9 @@
 
   <!--
     Published NuGet MCP-server package. A standalone stdio bridge: it discovers running Debug-build
-    SdlVulkan.Renderer apps over UDP multicast and drives them over TCP. It references NOTHING from
-    the framework (it speaks the JSON protocol), so publishing it is independent of the framework's
+    SdlVulkan.Renderer apps (through DIR.Lib's per-user inspector registry, then UDP multicast) and
+    drives them over TCP. It references NOTHING from the framework, nor DIR.Lib (it speaks the JSON
+    protocol and reads the registry by its spec), so publishing it is independent of the framework's
     Release footprint (the in-process inspector half is #if DEBUG and never ships).
 
     Run during development:  dotnet run, from this project directory.
@@ -27,7 +28,7 @@
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageId>SdlVulkan.Renderer.Inspector</PackageId>
     <ToolCommandName>sdlvulkan-inspector</ToolCommandName>
-    <Description>MCP server that discovers running Debug-build SDL3+Vulkan apps (built on SdlVulkan.Renderer) on the LAN and lets an AI agent inspect, screenshot, and drive their live UI.</Description>
+    <Description>MCP server that discovers running Debug-build SDL3+Vulkan apps (built on SdlVulkan.Renderer) on this machine and the LAN and lets an AI agent inspect, screenshot, and drive their live UI.</Description>
     <PackageTags>mcp;ai;sdl;vulkan;debugging;inspector;ui</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
