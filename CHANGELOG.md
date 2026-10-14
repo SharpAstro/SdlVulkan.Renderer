@@ -23,8 +23,8 @@ per executable path, so once per worktree) and registers instead, as a `<pid>-<t
 - The reader follows DIR.Lib's `inspector-registry.md` by hand; the sidecar still references nothing from DIR.Lib.
   It computes the folder as the writer does, with `SpecialFolderOption.DoNotVerify` (on Unix the default option
   returns an empty path until `~/.local/share` exists), and a folder that is not there lists nothing. It reads only `<pid>-<port>.json` names, opens each sharing `ReadWrite | Delete` and closes it at once (so the app's
-  own rewrite and removal are not blocked for longer than the read), skips a file that vanished or does not parse,
-  and drops an entry whose pid is dead. An entry whose pid is running but whose process started more than 2 s away
+  own rewrite and removal are not blocked for longer than the read), skips a file that vanished or does not parse
+  (including a `pid` that is not positive or a `tcpPort` outside 1 to 65535), and drops an entry whose pid is dead. An entry whose pid is running but whose process started more than 2 s away
   from its recorded `processStart` (a reused pid) is skipped and SAID: `descriptor skipped: start-time mismatch
   (<file>)` on stderr and as a `note:` line in `list_instances`, because on Linux a wall-clock step makes a live
   instance look the same until it restarts. It never deletes; the next app to start a core sweeps. The kind filter applies to registry entries
