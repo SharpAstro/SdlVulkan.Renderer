@@ -98,6 +98,9 @@ public sealed class SdlVulkanApp : IDisposable
     /// <see cref="Device"/> are not valid in a window on the other one. A transparent companion window draws its own
     /// content, so this costs it nothing; it does mean a document cannot move into such a window without
     /// re-uploading.
+    /// <para>A transparent window that needs only <see cref="SdlVulkanWindow.SetShape"/>'s hard edge, not soft alpha,
+    /// does not need the second device: build its context on <see cref="Device"/>, which still gives it alpha where
+    /// the shared device's surface offers it.</para>
     /// </remarks>
     public VulkanDevice DeviceFor(SdlVulkanWindow window)
     {

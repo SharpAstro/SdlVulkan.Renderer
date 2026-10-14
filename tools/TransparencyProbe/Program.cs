@@ -15,8 +15,9 @@ namespace TransparencyProbe;
 /// (GTX 1070, NVIDIA 582.66; Intel UHD 630), inside a Remote Desktop session: the native drivers offer
 /// <c>OPAQUE</c> only (Intel adds <c>INHERIT</c>) for every kind of window, yet on an <c>SDL_WINDOW_TRANSPARENT</c>
 /// window NVIDIA blended the frame's alpha under Mailbox presentation (not Fifo) and Intel under Fifo (it offers no
-/// Mailbox). Mesa's Dozen offered <c>PRE_MULTIPLIED</c> and blended under every mode, on every window kind. None of
-/// that is visible to Vulkan, so the only
+/// Mailbox). Mesa's Dozen offered <c>PRE_MULTIPLIED</c> and blended under every mode, on every window kind. The same
+/// day on a Surface (Adreno X1-85, Qualcomm 31.0.170.0) at its console: <c>OPAQUE</c> only, blended under no mode
+/// and on no window kind, and Dozen there as on the desktop. None of that is visible to Vulkan, so the only
 /// way to know it for another machine, driver or session type is to put a known picture over a known backdrop and
 /// look, which "present" and "buddy" do. Exit code 0 when the run went as described, 1 on an error, 2 when a
 /// scored check did not match, 3 when the screen captured black.</para>
@@ -40,7 +41,7 @@ internal static class Program
         {
             "caps" => WithInstance((instance, api) => Caps.Run(instance, api)),
             "present" => WithInstance((instance, api) => Present.Run(instance, api, args[1..], outDir)),
-            "buddy" => Buddy.Run(args.Length > 1 ? args[1] : "app", outDir),
+            "buddy" => Buddy.Run(args.Length > 1 ? args[1] : "app", args.Length > 2 && args[2] == "native", outDir),
             _ => Usage(),
         };
     }
@@ -54,8 +55,9 @@ internal static class Program
                 every device x present mode (Fifo, Mailbox) x window kind (SDL transparent, plain), scored on screen
             TransparencyProbe present <driver>:<device substring> [transparent|plain|shape] [fifo|mailbox]
                 one combination, e.g. "present Dozen:Adreno", "present Qualcomm:Adreno transparent mailbox"
-            TransparencyProbe buddy [app|standalone]
-                the library's transparent-window API end to end: halo, shape, clicks
+            TransparencyProbe buddy [app|standalone] [native]
+                the library's transparent-window API end to end: halo, shape, clicks; native keeps the window on
+                the native device, Dozen or not (a hard-edged companion: the shape alone)
             Pictures go to .\transparency-probe-out. Keep the display on and visible while it runs.
             """);
         return 1;

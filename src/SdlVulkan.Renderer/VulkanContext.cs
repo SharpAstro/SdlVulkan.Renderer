@@ -414,8 +414,11 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// Dozen, see <see cref="VulkanDevice.CreateForTransparentSurface"/>), so the swapchain is <c>OPAQUE</c>, whose
     /// alpha the spec says is ignored. Some Windows drivers blend it anyway on an <c>SDL_WINDOW_TRANSPARENT</c> window,
     /// outside anything Vulkan reports: observed for NVIDIA 582.66 with Mailbox presentation (not Fifo) and for Intel
-    /// UHD 630 with Fifo (it offers no Mailbox), in a Remote Desktop session. Do not count on it either way.
-    /// <see cref="SdlVulkanWindow.SetShape"/> still cuts the window to a hard-edged silhouette.</para>
+    /// UHD 630 with Fifo (it offers no Mailbox), in a Remote Desktop session; Qualcomm's Adreno X1-85 (31.0.170.0), at
+    /// its console, blends it under neither. Do not count on it either way.
+    /// <see cref="SdlVulkanWindow.SetShape"/> still cuts the window to a hard-edged silhouette, and a window that needs
+    /// no more than that can stay on the native device: build its context with <see cref="Create"/>, or on
+    /// <see cref="SdlVulkanApp.Device"/> rather than <see cref="SdlVulkanApp.DeviceFor"/>.</para>
     /// </remarks>
     public bool PresentsAlpha { get; private set; }
 

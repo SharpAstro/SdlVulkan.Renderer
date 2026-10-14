@@ -176,17 +176,25 @@ With `SdlVulkanApp`, open it with `app.CreateTransparentWindow(...)` and build i
   (`winget install 9NQPSL29BFFF --source msstore`).
 - **Check `ctx.PresentsAlpha`.** False means no device promised the window alpha (Windows without the pack), and its
   swapchain is `OPAQUE`. Some native drivers blend it anyway on an SDL transparent window, which Vulkan does not
-  report (seen with NVIDIA under Mailbox presentation and with Intel under Fifo, in a Remote Desktop session), so treat that as a
-  bonus, not a guarantee. `SetShape` still cuts the window to a hard-edged silhouette.
+  report (seen with NVIDIA under Mailbox presentation and with Intel under Fifo, in a Remote Desktop session; the Adreno, at
+  its console, blends it under neither), so treat that as a bonus, not a guarantee. `SetShape` still cuts the window
+  to a hard-edged silhouette.
 - **The shape is one bit per pixel** (a window region on Windows). It decides both where clicks go and where anything
   is drawn, so make it cover every pixel with any alpha, soft edges included. Rebuilding it costs about 3 ms at
   256 by 256, so set it when the silhouette changes, not every frame.
+- **A companion with hard edges needs no Dozen.** On an opaque swapchain the shape still cuts the window out and lets
+  clicks through outside it; only soft edges need alpha. To keep such a window on the native device with Dozen
+  installed, build its context with `VulkanContext.CreateTransparentForSharedDevice(app.Device, ...)` rather than on
+  `app.DeviceFor(window)` (it still gets alpha wherever the native surface offers it), or standalone with
+  `VulkanContext.Create` (opaque everywhere). Its antialiased edge blends with the clear colour, so clear to the
+  colour at the sprite's edge, or draw an outline.
 - **A second device shares no GPU resources** with the first: textures and meshes made on `app.Device` are not valid
   in a transparent window on Dozen.
 
 `tools/TransparencyProbe` measures a machine: `caps` lists what each device's surface offers, `present all` puts a
 known premultiplied picture over a checkerboard for every device, present mode and window kind and scores what the
-screen shows, and `buddy` runs this API end to end.
+screen shows, and `buddy` runs this API end to end (`buddy app native` and `buddy standalone native` keep the window
+on the native device).
 
 ## Native WebView (optional)
 

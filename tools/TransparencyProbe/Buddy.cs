@@ -14,7 +14,10 @@ namespace TransparencyProbe;
 /// <c>CreateTransparentWindow</c> and a context on <c>DeviceFor</c>. <c>standalone</c> goes through
 /// <c>SdlVulkanWindow.CreateTransparent</c> and <c>VulkanContext.CreateTransparent</c>. One per run: both end in
 /// <c>SDL_Quit</c>. To see the fallback without Dozen, hide it from the Vulkan loader for the run:
-/// <c>$env:VK_LOADER_DRIVERS_DISABLE='*dzn*'</c>.
+/// <c>$env:VK_LOADER_DRIVERS_DISABLE='*dzn*'</c>. <c>native</c> skips the second device with Dozen still installed,
+/// the way a hard-edged companion that needs only the shape would: <c>app</c> builds the context on
+/// <c>app.Device</c> (still asking for alpha, which a native surface may offer), <c>standalone</c> with
+/// <c>VulkanContext.Create</c>.
 /// </remarks>
 internal static class Buddy
 {
@@ -22,11 +25,11 @@ internal static class Buddy
     private const int OrangeR = 240, OrangeG = 176, OrangeB = 48;
     private const byte HaloAlpha = 100;
 
-    public static int Run(string mode, string outDir)
+    public static int Run(string mode, bool native, string outDir)
     {
         if (mode is not ("app" or "standalone"))
         {
-            Console.Error.WriteLine("buddy: app or standalone");
+            Console.Error.WriteLine("buddy: app or standalone, then optionally native");
             return 1;
         }
         if (!Init(InitFlags.Video | InitFlags.Events))
@@ -52,15 +55,20 @@ internal static class Buddy
             plain = app.CreateWindow("ordinary", 320, 200, maximized: false, hidden: true);
             plainCtx = VulkanContext.CreateForSharedDevice(app.DeviceFor(plain), plain.Surface, 320, 200);
             buddy = app.CreateTransparentWindow("buddy", W, H);
-            var device = app.DeviceFor(buddy);
+            var device = native ? app.Device : app.DeviceFor(buddy);
             Console.WriteLine($"DeviceFor(ordinary window) is the shared device: {app.DeviceFor(plain) == app.Device}");
-            Console.WriteLine($"DeviceFor(transparent window) is the shared device: {device == app.Device}; asked again, the same device: {app.DeviceFor(buddy) == device}");
+            if (native)
+                Console.WriteLine("native: the transparent window's context is on the shared device, not DeviceFor's");
+            else
+                Console.WriteLine($"DeviceFor(transparent window) is the shared device: {device == app.Device}; asked again, the same device: {app.DeviceFor(buddy) == device}");
             ctx = VulkanContext.CreateTransparentForSharedDevice(device, buddy.Surface, W, H);
         }
         else
         {
             buddy = SdlVulkanWindow.CreateTransparent("buddy", W, H);
-            ctx = VulkanContext.CreateTransparent(buddy.Instance, buddy.Surface, W, H);
+            ctx = native
+                ? VulkanContext.Create(buddy.Instance, buddy.Surface, W, H)
+                : VulkanContext.CreateTransparent(buddy.Instance, buddy.Surface, W, H);
         }
         buddy.SetPosition(backdrop.SdlX, backdrop.SdlY);
         buddy.Raise();
@@ -94,7 +102,7 @@ internal static class Buddy
 
             if (clock.Elapsed.TotalSeconds >= 1.5)
             {
-                exit = Judge(backdrop, backdrop.Capture(), ctx.PresentsAlpha, buddy, mode, outDir);
+                exit = Judge(backdrop, backdrop.Capture(), ctx.PresentsAlpha, buddy, native ? $"{mode}-native" : mode, outDir);
                 break;
             }
         }
