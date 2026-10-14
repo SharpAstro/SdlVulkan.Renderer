@@ -82,6 +82,49 @@ internal sealed class Backdrop : IDisposable
     }
 }
 
+/// <summary>
+/// The person in front of the panel, for when the capture may not show what the panel does. GDI reads the
+/// compositor's picture; the panel shows what the display hardware scans out, and on the Surface (Adreno X1-85) the
+/// two seem to part: its capture of the native driver's window said opaque, while the person watching the panel
+/// reported seeing the backdrop through it every time (2026-10-14). --look exists to pin that down. The same trap as
+/// HDR (tools/HdrProbe): only the panel can judge.
+/// </summary>
+internal static class Eye
+{
+    private const double TimeoutSeconds = 30;
+
+    /// <summary>
+    /// Asks <paramref name="question"/> and waits for Y or N in one of the probe's windows (Escape, or 30 seconds,
+    /// for no answer), running <paramref name="frame"/> meanwhile so the picture stays up. True for yes.
+    /// </summary>
+    public static bool? Ask(string question, Action frame)
+    {
+        Console.WriteLine($"  LOOK: {question} Y or N, in the picture (click it first if the keys do nothing).");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (clock.Elapsed.TotalSeconds < TimeoutSeconds)
+        {
+            while (PollEvent(out var e))
+            {
+                if ((EventType)e.Type != EventType.KeyDown)
+                    continue;
+                if (e.Key.Key == Keycode.Y) return true;
+                if (e.Key.Key == Keycode.N) return false;
+                if (e.Key.Key == Keycode.Escape) return null;
+            }
+            frame();
+        }
+        return null;
+    }
+
+    /// <summary>"eye: alpha", "eye: opaque" or "eye: -", and a warning when it contradicts the capture's verdict.</summary>
+    public static string Compare(bool? eyeSawAlpha, bool? captureSawAlpha)
+    {
+        var eye = eyeSawAlpha switch { true => "alpha", false => "opaque", null => "-" };
+        var clash = eyeSawAlpha is { } e && captureSawAlpha is { } c && e != c;
+        return clash ? $"eye: {eye}  <-- THE CAPTURE SAYS OTHERWISE" : $"eye: {eye}";
+    }
+}
+
 /// <summary>Scoring a capture against a prediction.</summary>
 internal static class Score
 {

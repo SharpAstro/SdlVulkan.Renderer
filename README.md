@@ -194,7 +194,8 @@ With `SdlVulkanApp`, open it with `app.CreateTransparentWindow(...)` and build i
 `tools/TransparencyProbe` measures a machine: `caps` lists what each device's surface offers, `present all` puts a
 known premultiplied picture over a checkerboard for every device, present mode and window kind and scores what the
 screen shows, and `buddy` runs this API end to end (`buddy app native` and `buddy standalone native` keep the window
-on the native device).
+on the native device). A capture is the compositor's picture, not necessarily the panel's: add `--look` to hold each
+picture on screen and answer by eye, which the tool prints beside the capture's verdict.
 
 ## Native WebView (optional)
 

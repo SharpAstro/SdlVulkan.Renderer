@@ -38,7 +38,8 @@ per-window opt-in; ordinary windows are unchanged.
   natively on the Adreno.
 - `tools/TransparencyProbe`, run by hand on Windows, measures what a machine actually does: what each device's surface
   offers (`caps`), what the screen shows for every device, present mode and window kind against a known backdrop
-  (`present all`), and this API end to end (`buddy`; `buddy app native` keeps the window off Dozen).
+  (`present all`), and this API end to end (`buddy`; `buddy app native` keeps the window off Dozen). `--look` holds
+  each picture and asks the person at the panel, because a capture can disagree with what the panel shows.
 
 ## 7.70
 

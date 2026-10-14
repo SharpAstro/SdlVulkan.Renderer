@@ -25,7 +25,7 @@ internal static unsafe class Present
 
     private enum Verdict { RealAlpha, Opaque, Other, CaptureBlack }
 
-    public static int Run(VkInstance instance, VkInstanceApi api, string[] args, string outDir)
+    public static int Run(VkInstance instance, VkInstanceApi api, string[] args, string outDir, bool look)
     {
         if (args.Length == 0)
         {
@@ -48,7 +48,7 @@ internal static unsafe class Present
             foreach (var kind in new[] { "transparent", "plain" })
             foreach (var mode in new[] { VkPresentModeKHR.Fifo, VkPresentModeKHR.Mailbox })
             {
-                var verdict = RunOne(instance, api, d, kind, mode, backdrop, outDir, quiet: true);
+                var verdict = RunOne(instance, api, d, kind, mode, backdrop, outDir, quiet: true, look);
                 if (verdict == Verdict.CaptureBlack)
                     worst = 3;
             }
@@ -68,7 +68,7 @@ internal static unsafe class Present
         }
         var windowKind = args.Length > 1 ? args[1] : "transparent";
         var presentMode = args.Length > 2 && args[2] == "mailbox" ? VkPresentModeKHR.Mailbox : VkPresentModeKHR.Fifo;
-        return RunOne(instance, api, match, windowKind, presentMode, backdrop, outDir, quiet: false) switch
+        return RunOne(instance, api, match, windowKind, presentMode, backdrop, outDir, quiet: false, look) switch
         {
             Verdict.CaptureBlack => 3,
             _ => 0,
@@ -77,7 +77,7 @@ internal static unsafe class Present
 
     private static Verdict RunOne(VkInstance instance, VkInstanceApi api,
         (VkPhysicalDevice Device, string Name, string Driver, string Info) d, string windowKind,
-        VkPresentModeKHR presentMode, Backdrop backdrop, string outDir, bool quiet)
+        VkPresentModeKHR presentMode, Backdrop backdrop, string outDir, bool quiet, bool look)
     {
         var head = $"{$"{d.Name} [{d.Driver}]",-62} {windowKind,-11} {presentMode,-8}";
         var flags = WindowFlags.Vulkan | WindowFlags.Borderless | WindowFlags.AlwaysOnTop;
@@ -104,7 +104,7 @@ internal static unsafe class Present
                 Console.WriteLine($"{head} {presentMode} not offered");
                 return Verdict.Other;
             }
-            return Show(instance, api, d.Device, family, surface, window, presentMode, backdrop, head, windowKind, outDir, d.Name, quiet);
+            return Show(instance, api, d.Device, family, surface, window, presentMode, backdrop, head, windowKind, outDir, d.Name, quiet, look);
         }
         finally
         {
@@ -137,7 +137,7 @@ internal static unsafe class Present
 
     private static Verdict Show(VkInstance instance, VkInstanceApi api, VkPhysicalDevice physical, uint family,
         VkSurfaceKHR surface, nint window, VkPresentModeKHR presentMode, Backdrop backdrop, string head,
-        string windowKind, string outDir, string deviceName, bool quiet)
+        string windowKind, string outDir, string deviceName, bool quiet, bool look)
     {
         var priority = 1f;
         VkDeviceQueueCreateInfo queueCI = new() { queueFamilyIndex = family, queueCount = 1, pQueuePriorities = &priority };
@@ -220,48 +220,57 @@ internal static unsafe class Present
         dev.vkCreateFence(VkFenceCreateFlags.Signaled, out var inFlight).CheckResult();
 
         var hwnd = GetPointerProperty(GetWindowProperties(window), Props.WindowWin32HWNDPointer, 0);
-        var verdict = Verdict.Other;
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        while (true)
+        void Frame()
         {
             PumpEvents();
             backdrop.Paint();
-            dev.vkWaitForFences(1, &inFlight, true, ulong.MaxValue);
-            dev.vkAcquireNextImageKHR(swapchain, ulong.MaxValue, imageAvailable, VkFence.Null, out var index).CheckResult();
-            dev.vkResetFences(1, &inFlight);
+            // Copies: a local function may not take the address of a local it captures.
+            var fence = inFlight;
+            var available = imageAvailable;
+            var chain = swapchain;
+            dev.vkWaitForFences(1, &fence, true, ulong.MaxValue);
+            dev.vkAcquireNextImageKHR(chain, ulong.MaxValue, available, VkFence.Null, out var index).CheckResult();
+            dev.vkResetFences(1, &fence);
             var cmd = commands[index];
             var signal = renderFinished[index];
             var stage = VkPipelineStageFlags.ColorAttachmentOutput;
             VkSubmitInfo submit = new()
             {
                 waitSemaphoreCount = 1,
-                pWaitSemaphores = &imageAvailable,
+                pWaitSemaphores = &available,
                 pWaitDstStageMask = &stage,
                 commandBufferCount = 1,
                 pCommandBuffers = &cmd,
                 signalSemaphoreCount = 1,
                 pSignalSemaphores = &signal,
             };
-            dev.vkQueueSubmit(queue, 1, &submit, inFlight).CheckResult();
+            dev.vkQueueSubmit(queue, 1, &submit, fence).CheckResult();
             VkPresentInfoKHR present = new()
             {
                 waitSemaphoreCount = 1,
                 pWaitSemaphores = &signal,
                 swapchainCount = 1,
-                pSwapchains = &swapchain,
+                pSwapchains = &chain,
                 pImageIndices = &index,
             };
             dev.vkQueuePresentKHR(queue, &present);
             if (presentMode == VkPresentModeKHR.Mailbox)
                 Thread.Sleep(8); // Mailbox does not pace; keep it from spinning the GPU flat out
-
-            if (clock.Elapsed.TotalSeconds >= 1.5)
-            {
-                var after = backdrop.Capture();
-                verdict = Judge(backdrop, after, alpha, hwnd, head, windowKind, outDir, deviceName, presentMode, quiet);
-                break;
-            }
         }
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (clock.Elapsed.TotalSeconds < 1.5)
+            Frame();
+        var (verdict, line, details) = Judge(backdrop, backdrop.Capture(), alpha, hwnd, head, windowKind, outDir, deviceName, presentMode);
+        if (look && verdict != Verdict.CaptureBlack)
+        {
+            Console.WriteLine($"  now showing: {head.TrimEnd()} ({alpha})");
+            var saw = Eye.Ask("Through the MIDDLE panel (half orange), do you see the checkerboard?", Frame);
+            line += "  " + Eye.Compare(saw, verdict switch { Verdict.RealAlpha => true, Verdict.Opaque => false, _ => null });
+        }
+        Console.WriteLine(line);
+        if (!quiet && details is not null)
+            Console.WriteLine(details);
 
         dev.vkDeviceWaitIdle();
         dev.vkDestroyFence(inFlight);
@@ -276,14 +285,13 @@ internal static unsafe class Present
         return verdict;
     }
 
-    private static Verdict Judge(Backdrop backdrop, byte[] after, VkCompositeAlphaFlagsKHR alpha, nint hwnd, string head,
-        string windowKind, string outDir, string deviceName, VkPresentModeKHR presentMode, bool quiet)
+    // The verdict, the table line, and (for a single run) the details below it.
+    private static (Verdict Verdict, string Line, string? Details) Judge(Backdrop backdrop, byte[] after,
+        VkCompositeAlphaFlagsKHR alpha, nint hwnd, string head, string windowKind, string outDir, string deviceName,
+        VkPresentModeKHR presentMode)
     {
         if (Score.IsBlack(after))
-        {
-            Console.WriteLine($"{head} {alpha,-13} screen captured black: display off, or the Remote Desktop client minimized?");
-            return Verdict.CaptureBlack;
-        }
+            return (Verdict.CaptureBlack, $"{head} {alpha,-13} screen captured black: display off, or the Remote Desktop client minimized?", null);
         var before = backdrop.Before;
         double Orange(int i, double a) => a * ((i % 4) switch { 0 => OrangeB, 1 => OrangeG, _ => OrangeR });
         double Blended(int x0, double a) => Score.MeanError(after, W, x0 + 10, 20, x0 + 110, 140, i => before[i] * (1 - a) + Orange(i, a));
@@ -307,16 +315,12 @@ internal static unsafe class Present
             Verdict.Opaque => "opaque",
             _ => "neither (look at the picture)",
         };
-        Console.WriteLine($"{head} {alpha,-13} {left,6:F1} {middle,6:F1} {right,6:F1}  {text}");
-        if (!quiet)
-        {
-            Console.WriteLine($"  mean error per channel against real alpha: left {left:F1}, middle {middle:F1}, right {right:F1};"
-                + $" against opaque: left {leftOpaque:F1}, middle {middleOpaque:F1}");
-            var click = backdrop.WindowAt(60, 80);
-            Console.WriteLine($"  a click on the alpha-0 third {(click == backdrop.Hwnd ? "goes through to the backdrop" : click == hwnd ? "is caught by the window" : "lands elsewhere")}");
-            Console.WriteLine($"  picture: {path} (backdrop alone | with the window)");
-        }
-        return verdict;
+        var click = backdrop.WindowAt(60, 80);
+        var details = $"  mean error per channel against real alpha: left {left:F1}, middle {middle:F1}, right {right:F1};"
+            + $" against opaque: left {leftOpaque:F1}, middle {middleOpaque:F1}" + Environment.NewLine
+            + $"  a click on the alpha-0 third {(click == backdrop.Hwnd ? "goes through to the backdrop" : click == hwnd ? "is caught by the window" : "lands elsewhere")}" + Environment.NewLine
+            + $"  picture: {path} (backdrop alone | with the window)";
+        return (verdict, $"{head} {alpha,-13} {left,6:F1} {middle,6:F1} {right,6:F1}  {text}", details);
     }
 
     private static VkRenderPass CreateRenderPass(VkDeviceApi dev, VkFormat format)
