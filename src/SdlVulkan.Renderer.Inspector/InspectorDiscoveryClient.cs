@@ -13,6 +13,9 @@ namespace SdlVulkan.Renderer.Inspector;
 public sealed record InspectorInstance(
     IPAddress Address, int TcpPort, string App, string? Title, int Pid, int Proto, string Kind);
 
+/// <summary>A discovery's instances, and what it skipped that a user should hear about.</summary>
+internal sealed record DiscoveryResult(IReadOnlyList<InspectorInstance> Instances, IReadOnlyList<string> Notes);
+
 /// <summary>
 /// Discovers debuggable instances in two ways, merged. First DIR.Lib's per-user file registry
 /// (<see cref="InspectorRegistry"/>), which is how a DEBUG app on DIR.Lib 11.21 or later is found on this
@@ -48,10 +51,21 @@ public sealed class InspectorDiscoveryClient
     /// merged (<see cref="Merge"/>): registry entries first, de-duped by (address, pid).
     /// </summary>
     public async Task<IReadOnlyList<InspectorInstance>> DiscoverAsync(CancellationToken ct = default)
+        => (await DiscoverWithNotesAsync(ct)).Instances;
+
+    /// <summary>
+    /// <see cref="DiscoverAsync"/>, plus a line for each registry descriptor skipped although its pid is
+    /// running (a start-time mismatch). Each note also goes to stderr, which is the log here (stdout is the
+    /// JSON-RPC channel), so a tool with nowhere to show it still leaves a trace.
+    /// </summary>
+    internal async Task<DiscoveryResult> DiscoverWithNotesAsync(CancellationToken ct = default)
     {
-        var registered = InspectorRegistry.Read(_registryDirectory).Where(i => IsSdl(i.Kind)).ToList();
+        var notes = new List<string>();
+        var registered = InspectorRegistry.Read(_registryDirectory, notes).Where(i => IsSdl(i.Kind)).ToList();
+        foreach (var note in notes) Console.Error.WriteLine($"[inspector] {note}");
+
         var replied = await MulticastAsync(ct);
-        return Merge(registered, replied, replied.Count == 0 ? _ => false : LocalAddressFilter());
+        return new DiscoveryResult(Merge(registered, replied, replied.Count == 0 ? _ => false : LocalAddressFilter()), notes);
     }
 
     private async Task<List<InspectorInstance>> MulticastAsync(CancellationToken ct)

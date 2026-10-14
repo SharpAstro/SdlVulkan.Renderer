@@ -19,11 +19,17 @@ public sealed class InspectorTools
     [McpServerTool, Description("Discover running Debug-build SDL/Vulkan app instances on the local machine and LAN. Returns one line per instance: pid, app, title, address:port.")]
     public static async Task<string> list_instances(InspectorDiscoveryClient discovery, CancellationToken ct = default)
     {
-        var all = await discovery.DiscoverAsync(ct);
-        if (all.Count == 0) return "No debuggable instances found. Is a Debug-build app running with DebugInspector.Attach?";
+        const string none = "No debuggable instances found. Is a Debug-build app running with DebugInspector.Attach?";
+        var (all, notes) = await discovery.DiscoverWithNotesAsync(ct);
+        if (all.Count == 0 && notes.Count == 0) return none;
         var sb = new StringBuilder();
+        if (all.Count == 0) sb.AppendLine(none);
         foreach (var i in all)
             sb.AppendLine($"pid={i.Pid}  app={i.App}  title={i.Title ?? "<none>"}  {i.Address}:{i.TcpPort}  proto={i.Proto}");
+        // A registry descriptor skipped although its pid runs: most often a reused pid, but on Linux it can be a
+        // live app after the wall clock was stepped, so the listing says so rather than hiding it.
+        foreach (var note in notes)
+            sb.AppendLine($"note: {note}");
         return sb.ToString();
     }
 
