@@ -13,7 +13,7 @@ namespace SdlVulkan.Renderer;
 /// no-redirection-bitmap included. Mesa's Dozen, Vulkan over Direct3D 12 as Microsoft's "OpenCL, OpenGL, and Vulkan
 /// Compatibility Pack" installs it, offers <c>PRE_MULTIPLIED</c> and means it: its Win32 presentation goes through
 /// DirectComposition with <c>DXGI_ALPHA_MODE_PREMULTIPLIED</c>, and a screen capture over a known backdrop matched
-/// the premultiplied prediction to within a fraction of one 8-bit step.</para>
+/// the premultiplied prediction to within a fraction of one 8-bit step, on NVIDIA, Intel, WARP and the Adreno.</para>
 /// <para>So the native device is asked first and kept whenever it can do it, which Wayland, macOS and Android
 /// drivers usually can. A second device is made only when it cannot: the one on the SAME GPU, matched by adapter
 /// LUID (Dozen reports the LUID of the D3D12 adapter it runs on, which is the native driver's), whose surface offers
