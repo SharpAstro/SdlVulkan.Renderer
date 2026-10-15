@@ -63,7 +63,7 @@ public sealed unsafe partial class VulkanContext
         }
         // Loading the swapchain image is what the multisampled pass cannot do (see CreateLoadRenderPass).
         _singleSampleLoadRenderPass = VulkanDevice.CreateCompatibleRenderPass(DeviceApi, format, DepthFormat,
-            VkSampleCountFlags.Count1, VkAttachmentLoadOp.Load, VkImageLayout.PresentSrcKHR, VkImageLayout.PresentSrcKHR);
+            VkSampleCountFlags.Count1, VkAttachmentLoadOp.Load, _dev.ColorFinalLayout, _dev.ColorFinalLayout);
     }
 
     private void CleanupSingleSampleSwapchainTargets()

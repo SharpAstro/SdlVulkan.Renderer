@@ -6,11 +6,12 @@ using static SdlVulkan.Renderer.VulkanDevice;
 namespace SdlVulkan.Renderer.Tests;
 
 /// <summary>
-/// The two decisions behind a transparent window, which need no GPU to check: which composite-alpha mode its
-/// swapchain asks for (<see cref="VulkanContext.ChooseCompositeAlpha"/>), and which device it falls back to when the
-/// native one offers no premultiplied alpha (<see cref="VulkanDevice.PickAlphaCandidate"/>). The surfaces and
-/// devices below are the ones measured: a Windows desktop with a GTX 1070, an Intel UHD 630 and Microsoft's
-/// compatibility pack installed, whose Dozen exposes one device per D3D12 adapter plus WARP.
+/// The three decisions behind a transparent window, which need no GPU to check: which composite-alpha mode its
+/// swapchain asks for (<see cref="VulkanContext.ChooseCompositeAlpha"/>), which device it falls back to when the
+/// native one offers no premultiplied alpha (<see cref="VulkanDevice.PickAlphaCandidate"/>), and which way its
+/// frames take to the screen on the device it ends up on (<see cref="VulkanContext.ChooseAlphaPresentation"/>). The
+/// surfaces and devices below are the ones measured: a Windows desktop with a GTX 1070, an Intel UHD 630 and
+/// Microsoft's compatibility pack installed, whose Dozen exposes one device per D3D12 adapter plus WARP.
 /// </summary>
 public sealed class TransparentWindowChoiceTests
 {
@@ -93,8 +94,22 @@ public sealed class TransparentWindowChoiceTests
             new(CanPresent: true, OffersPremultiplied: false, SameGpu: true, VkPhysicalDeviceType.DiscreteGpu),
         ];
 
-        // Windows without the compatibility pack: nothing to fall back to, so the window presents opaque.
+        // Windows without the compatibility pack: no other device to fall back to, so the window stays on the native
+        // one, where it is a layered window (ChooseAlphaPresentation below).
         PickAlphaCandidate(devices).ShouldBe(-1);
         PickAlphaCandidate([]).ShouldBe(-1);
     }
+
+    [Theory]
+    // A device whose surface offers premultiplied alpha: the swapchain carries it, layered windows or not (Wayland,
+    // macOS, Android; Dozen on Windows).
+    [InlineData(true, true, AlphaPresentation.Swapchain)]
+    [InlineData(true, false, AlphaPresentation.Swapchain)]
+    // Windows' native drivers: a layered window, drawn by that device.
+    [InlineData(false, true, AlphaPresentation.LayeredWindow)]
+    // Neither: an opaque swapchain, which SetShape can still cut to a hard edge.
+    [InlineData(false, false, AlphaPresentation.None)]
+    public void ChooseAlphaPresentation_PrefersTheSwapchainThenALayeredWindow(bool deviceOffersPremultiplied,
+        bool layeredWindows, AlphaPresentation expected)
+        => VulkanContext.ChooseAlphaPresentation(deviceOffersPremultiplied, layeredWindows).ShouldBe(expected);
 }

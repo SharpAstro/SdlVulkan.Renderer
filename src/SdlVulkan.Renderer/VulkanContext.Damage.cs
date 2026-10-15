@@ -158,7 +158,8 @@ public sealed unsafe partial class VulkanContext
         }
 
         // The shared shape (attachments, samples, dependencies) with only the colour's load and layouts
-        // stated here: keep what is already there, starting and ending where a presented image sits.
+        // stated here: keep what is already there, starting and ending where the device's main pass leaves
+        // its image (ColorFinalLayout): where a presented image sits, on a device made for a surface.
         // The dependencies in particular must stay byte-identical to the clearing pass's: a render pass
         // is compatible with the framebuffers and pipelines created against another only if everything
         // but load/store ops and layouts matches, and dependencies are not in that exemption. The loadOp
@@ -166,7 +167,7 @@ public sealed unsafe partial class VulkanContext
         // VulkanDevice.FillSubpassDependencies for every pass, not widened here (tried, and validation
         // answered with VUID-VkRenderPassBeginInfo-renderPass-00904 on every partial frame).
         return VulkanDevice.CreateCompatibleRenderPass(DeviceApi, format, DepthFormat, MsaaSamples,
-            VkAttachmentLoadOp.Load, VkImageLayout.PresentSrcKHR, VkImageLayout.PresentSrcKHR);
+            VkAttachmentLoadOp.Load, _dev.ColorFinalLayout, _dev.ColorFinalLayout);
     }
 
     private void CleanupLoadRenderPass()

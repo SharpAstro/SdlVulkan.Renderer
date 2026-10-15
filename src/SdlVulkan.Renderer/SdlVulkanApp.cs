@@ -72,9 +72,11 @@ public sealed class SdlVulkanApp : IDisposable
 
     /// <summary>
     /// Opens a window whose pixels blend with what is behind it, as <see cref="SdlVulkanWindow.CreateTransparent"/>
-    /// does for a standalone one. Build its context with <see cref="VulkanContext.CreateTransparentForSharedDevice"/>
-    /// passing <see cref="DeviceFor"/>, not <see cref="Device"/>. Opening one first does not change which device is
-    /// shared: that is still picked as <see cref="CreateWindow"/> picks it, for the ordinary windows.
+    /// does for a standalone one. Build its context with <see cref="VulkanContext.CreateTransparentForSharedDevice"/>,
+    /// passing <see cref="DeviceFor"/> to let it take a second device where only that one's swapchain can carry
+    /// alpha, or <see cref="Device"/> to keep it on the shared one (on Windows, then, a layered window). Opening one
+    /// first does not change which device is shared: that is still picked as <see cref="CreateWindow"/> picks it, for
+    /// the ordinary windows.
     /// </summary>
     public SdlVulkanWindow CreateTransparentWindow(string title, int width, int height, bool borderless = true,
         bool alwaysOnTop = true, bool focusable = true, bool hidden = false)
@@ -87,20 +89,21 @@ public sealed class SdlVulkanApp : IDisposable
 
     /// <summary>
     /// The device to build <paramref name="window"/>'s context on. <see cref="Device"/> for an ordinary window, and
-    /// for a transparent one whenever the shared device can give it alpha. Only when it cannot (on Windows, whose
-    /// native drivers offer no premultiplied alpha) is it a second device, made on first need and kept for every later
-    /// transparent window: the one on the same GPU whose surface offers premultiplied alpha, typically Mesa's Dozen.
-    /// Where no device offers it, <see cref="Device"/> again, and the window's swapchain is opaque (see
-    /// <see cref="VulkanContext.PresentsAlpha"/>).
+    /// for a transparent one whenever the shared device's swapchain can carry its alpha. Only when it cannot (on
+    /// Windows, whose native drivers offer no premultiplied alpha) is it a second device, made on first need and kept
+    /// for every later transparent window: the one on the same GPU whose surface offers premultiplied alpha, typically
+    /// Mesa's Dozen. Where no device offers it, <see cref="Device"/> again, and the window's context takes a layered
+    /// window on Windows and an opaque swapchain elsewhere (see <see cref="VulkanContext.AlphaPresentation"/>).
     /// </summary>
     /// <remarks>
     /// A second device does not share GPU resources with the first: textures, meshes and buffers made on
     /// <see cref="Device"/> are not valid in a window on the other one. A transparent companion window draws its own
     /// content, so this costs it nothing; it does mean a document cannot move into such a window without
     /// re-uploading.
-    /// <para>A transparent window that needs only <see cref="SdlVulkanWindow.SetShape"/>'s hard edge, not soft alpha,
-    /// does not need the second device: build its context on <see cref="Device"/>, which still gives it alpha where
-    /// the shared device's surface offers it.</para>
+    /// <para>A transparent window does not need the second device: build its context on <see cref="Device"/>, and on
+    /// Windows it is a layered window, soft edges and all, drawn by the shared device, at the cost of a readback per
+    /// frame (<see cref="AlphaPresentation.LayeredWindow"/>). Elsewhere it still gets alpha wherever the shared
+    /// device's surface offers it.</para>
     /// </remarks>
     public VulkanDevice DeviceFor(SdlVulkanWindow window)
     {
