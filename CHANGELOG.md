@@ -7,6 +7,41 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.73
+
+**A transparent window blends on Windows with nothing installed: where no device gives it a premultiplied-alpha
+swapchain, it is a layered window.**
+
+- **Breaking, against 7.71:** `VulkanContext.CreateTransparent` and `CreateTransparentForSharedDevice` take the
+  `SdlVulkanWindow` where they took its `VkInstance` and `VkSurfaceKHR`, since a layered window needs the window
+  itself, not only its surface: `CreateTransparent(window, w, h)`, `CreateTransparentForSharedDevice(device, window,
+  w, h)`.
+- A transparent window's context now takes the first way the machine has for its frames to reach the screen with
+  their alpha: a swapchain with `PRE_MULTIPLIED` composite alpha on the native device, one on a second device (Dozen,
+  as 7.71 brought), a layered window, or else an opaque swapchain. `VulkanContext.AlphaPresentation` says which
+  (`Swapchain`, `LayeredWindow`, `None`), and `PresentsAlpha` whether any.
+- Without such a device, or kept off it (its context on `app.Device` rather than `DeviceFor`, or `nativeDeviceOnly`
+  standalone), a transparent window on Windows is a layered one: the native device draws into an image of the
+  context's own where a swapchain image would be, and `EndFrame` waits for the GPU, copies the frame out and hands it
+  to the window with `UpdateLayeredWindow`, which blends it per pixel and passes clicks through wherever alpha is zero,
+  shape or not. No acquire and no present; the rest of the frame (fence ledger, dropped frames, damage, recovery,
+  resize, reported as a swapchain reports being out of date) is the swapchain path's. It costs a readback per frame,
+  growing with the window: a 240 by 240 companion on the Adreno, measured soft-edged and click-through, took 0.3 ms
+  from `BeginFrame` to `EndFrame`, against 0.09 ms for Dozen's swapchain. In exchange it needs nothing installed and
+  shares the native device's resources. Tests drive the same frame path with a stand-in window on the suite's
+  offscreen device, and once more under the validation layer where CI has it.
+- Only where there are no layered windows either is the swapchain opaque, though NVIDIA (under Mailbox presentation)
+  and Intel (under Fifo) were seen to blend its alpha anyway on an SDL transparent window, in a Remote Desktop session
+  and outside anything Vulkan reports. The Adreno, at its console, blends it under neither.
+- **Changed from 7.71:** a transparent context kept on the native device was an opaque swapchain, which is what a
+  hard-edged companion cut out with `SetShape` used. It is now a layered window, readback and all. A companion with
+  hard edges needs no readback and no second device: an ordinary context on the transparent window
+  (`CreateForSharedDevice` on `app.Device`, or `VulkanContext.Create` standalone) is an opaque swapchain the shape
+  cuts out (measured on the Adreno).
+- `tools/TransparencyProbe` measures the cost of a frame too (`buddy`): `buddy app native` keeps the window off
+  Dozen, a layered window on Windows, and `buddy app opaque` gives it an opaque swapchain.
+
+
 ## 7.72
 
 **A web view that cannot take focus no longer takes the app down.** On Windows, `INativeWebView.Focus` threw when

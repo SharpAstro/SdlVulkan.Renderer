@@ -401,8 +401,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private readonly bool _wantsAlpha;
 
     /// <summary>
-    /// True when this window's swapchain carries alpha to the compositor (<c>PRE_MULTIPLIED</c> composite alpha), so
-    /// what is behind the window shows through wherever its pixels are not opaque.
+    /// True when what is behind this window shows through wherever its pixels are not opaque: its frames reach the
+    /// screen with their alpha, by either way <see cref="AlphaPresentation"/> names.
     /// </summary>
     /// <remarks>
     /// <para>Only a context made by <see cref="CreateTransparent"/> or <see cref="CreateTransparentForSharedDevice"/>
@@ -410,20 +410,19 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// <c>OneMinusSrcAlpha</c> and alpha with <c>One</c> / <c>OneMinusSrcAlpha</c>, which over a transparent clear
     /// leaves exactly premultiplied pixels. The four blend-mode fills (multiply, screen, darken, lighten) are written
     /// for an opaque backdrop and are not premultiplied-correct over a transparent one.</para>
-    /// <para>False on a transparent window means no device's surface offered premultiplied alpha (on Windows: no
-    /// Dozen, see <see cref="VulkanDevice.CreateForTransparentSurface"/>), so the swapchain is <c>OPAQUE</c>, whose
-    /// alpha the spec says is ignored. Some Windows drivers blend it anyway on an <c>SDL_WINDOW_TRANSPARENT</c> window,
-    /// outside anything Vulkan reports: observed for NVIDIA 582.66 with Mailbox presentation (not Fifo) and for Intel
-    /// UHD 630 with Fifo (it offers no Mailbox), in a Remote Desktop session; Qualcomm's Adreno X1-85 (31.0.170.0), at
-    /// its console, blends it under neither. Do not count on it either way.
-    /// <see cref="SdlVulkanWindow.SetShape"/> still cuts the window to a hard-edged silhouette, and a window that needs
-    /// no more than that can stay on the native device: build its context with <see cref="Create"/>, or on
-    /// <see cref="SdlVulkanApp.Device"/> rather than <see cref="SdlVulkanApp.DeviceFor"/>.</para>
+    /// <para>False on a transparent window means its device's surface offered no premultiplied alpha and the platform
+    /// has no layered windows to fall back on (so not on Windows), and the swapchain is <c>OPAQUE</c>, whose alpha the
+    /// spec says is ignored. Some Windows drivers blend it anyway on an <c>SDL_WINDOW_TRANSPARENT</c> window, outside
+    /// anything Vulkan reports: observed for NVIDIA 582.66 with Mailbox presentation (not Fifo) and for Intel UHD 630
+    /// with Fifo (it offers no Mailbox), in a Remote Desktop session; Qualcomm's Adreno X1-85 (31.0.170.0), at its
+    /// console, blends it under neither. Do not count on it either way; a context built with <see cref="Create"/> on a
+    /// transparent window is such a swapchain on purpose.
+    /// <see cref="SdlVulkanWindow.SetShape"/> still cuts the window to a hard-edged silhouette.</para>
     /// </remarks>
-    public bool PresentsAlpha { get; private set; }
+    public bool PresentsAlpha => AlphaPresentation != AlphaPresentation.None;
 
     private VulkanContext(VulkanDevice device, VkSurfaceKHR surface, uint vertexBufferSize, bool ownsDevice,
-        bool wantsAlpha = false)
+        bool wantsAlpha = false, ILayeredTarget? layered = null)
     {
         _dev = device;
         _surface = surface;
@@ -431,6 +430,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         Array.Fill(_vertexBufferSizes, vertexBufferSize);
         _ownsDevice = ownsDevice;
         _wantsAlpha = wantsAlpha;
+        _layered = layered;
     }
 
     public static VulkanContext Create(VkInstance instance, VkSurfaceKHR surface, uint width, uint height,
@@ -442,21 +442,29 @@ public sealed unsafe partial class VulkanContext : IDisposable
     }
 
     /// <summary>
-    /// <see cref="Create"/> for a transparent window (<see cref="SdlVulkanWindow.CreateTransparent"/>): the device is
-    /// <see cref="VulkanDevice.CreateForTransparentSurface"/>'s, the native one unless only another device can give
-    /// the window alpha, and the swapchain asks for premultiplied alpha. Check <see cref="PresentsAlpha"/>.
+    /// <see cref="Create"/> for a transparent window (<see cref="SdlVulkanWindow.CreateTransparent"/>), which gets the
+    /// first of these that the machine can do (<see cref="AlphaPresentation"/> says which it got): a swapchain with
+    /// premultiplied alpha on the native device; one on another device that offers it, typically Mesa's Dozen on
+    /// Windows (see <see cref="VulkanDevice.CreateForTransparentSurface"/>); on Windows, a layered window drawn for by
+    /// the native device; an opaque swapchain, which <see cref="SdlVulkanWindow.SetShape"/> cuts to a hard edge.
     /// </summary>
-    public static VulkanContext CreateTransparent(VkInstance instance, VkSurfaceKHR surface, uint width, uint height,
-        uint vertexBufferSize = 4 * 1024 * 1024, VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
+    /// <param name="nativeDeviceOnly">Skip the second: stay on the device <see cref="Create"/> would pick even where
+    /// another offers alpha. On Windows the window is then a layered one, with no second device made.</param>
+    public static VulkanContext CreateTransparent(SdlVulkanWindow window, uint width, uint height,
+        uint vertexBufferSize = 4 * 1024 * 1024, VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1,
+        bool nativeDeviceOnly = false)
     {
-        var device = VulkanDevice.CreateForTransparentSurface(instance, surface, msaaSamples);
-        return CreateOwning(device, surface, width, height, vertexBufferSize, wantsAlpha: true);
+        var device = nativeDeviceOnly
+            ? VulkanDevice.Create(window.Instance, window.Surface, msaaSamples)
+            : VulkanDevice.CreateForTransparentSurface(window.Instance, window.Surface, msaaSamples);
+        return CreateOwning(device, window.Surface, width, height, vertexBufferSize, wantsAlpha: true,
+            LayeredTargetFor(device, window));
     }
 
     private static VulkanContext CreateOwning(VulkanDevice device, VkSurfaceKHR surface, uint width, uint height,
-        uint vertexBufferSize, bool wantsAlpha)
+        uint vertexBufferSize, bool wantsAlpha, ILayeredTarget? layered = null)
     {
-        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: true, wantsAlpha);
+        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: true, wantsAlpha, layered);
 
         ctx.CreateSyncObjects();
         ctx.AllocateCommandBuffers();
@@ -481,17 +489,20 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     /// <summary>
     /// <see cref="CreateForSharedDevice"/> for a transparent window: pass <see cref="SdlVulkanApp.DeviceFor"/>'s
-    /// device, which is the shared one unless only another device can give this window alpha. The swapchain asks
-    /// for premultiplied alpha; check <see cref="PresentsAlpha"/>.
+    /// device, which is the shared one unless only another device can give this window alpha through its swapchain.
+    /// On a device whose surface offers no premultiplied alpha, the window is a layered one on Windows (drawn by that
+    /// device, so with <see cref="SdlVulkanApp.Device"/> it shares the other windows' resources) and otherwise has an
+    /// opaque swapchain. <see cref="AlphaPresentation"/> says which it got.
     /// </summary>
-    public static VulkanContext CreateTransparentForSharedDevice(VulkanDevice device, VkSurfaceKHR surface,
+    public static VulkanContext CreateTransparentForSharedDevice(VulkanDevice device, SdlVulkanWindow window,
         uint width, uint height, uint vertexBufferSize = 4 * 1024 * 1024)
-        => CreateShared(device, surface, width, height, vertexBufferSize, wantsAlpha: true);
+        => CreateShared(device, window.Surface, width, height, vertexBufferSize, wantsAlpha: true,
+            LayeredTargetFor(device, window));
 
     private static VulkanContext CreateShared(VulkanDevice device, VkSurfaceKHR surface,
-        uint width, uint height, uint vertexBufferSize, bool wantsAlpha)
+        uint width, uint height, uint vertexBufferSize, bool wantsAlpha, ILayeredTarget? layered = null)
     {
-        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: false, wantsAlpha);
+        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: false, wantsAlpha, layered);
 
         ctx.CreateSyncObjects();
         ctx.AllocateCommandBuffers();
@@ -853,24 +864,25 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // whose rebuild releases every image. It must precede the ordinal bump: a retry after the bump
         // would count a frame that never ran, and the deferred destroys keyed on the ordinal would run
         // under a frame still in flight.
-        var result = DeviceApi.vkAcquireNextImageKHR(Swapchain,
-            _acquireStuck ? FenceStuckPollTimeoutNs : FenceWaitTimeoutNs,
-            _imageAvailableSemaphores[_currentFrame], VkFence.Null, out _currentImageIndex);
-        NoteDeviceLost(result, "vkAcquireNextImageKHR");
-        if (result is VkResult.Timeout or VkResult.NotReady)
+        //
+        // A layered context has no swapchain and so nothing to acquire: its one image is its own, and the fence just
+        // waited proves the last copy out of it is done. What a swapchain reports as out of date is the window having
+        // changed size under the image, and it is answered the same way, by the caller resizing
+        // (VulkanContext.Layered.cs).
+        if (_layered is not null)
         {
-            _acquireStuck = true;
-            throw new VkException(VkResult.Timeout, "swapchain image acquire timed out: every image is held");
+            if (LayeredWindowResized())
+            {
+                resized = true;
+                return VkCommandBuffer.Null;
+            }
+            _currentImageIndex = 0;
         }
-        _acquireStuck = false;
-        if (result == VkResult.ErrorOutOfDateKHR)
+        else if (!AcquireSwapchainImage())
         {
             resized = true;
             return VkCommandBuffer.Null;
         }
-        // Any other failure (the surface lost, the device lost) must not reach a frame recorded against an
-        // image that was never acquired. Thrown before any state below moves.
-        if (result != VkResult.SuboptimalKHR) result.CheckResult();
 
         // The fence proves this slot's last submission finished, so what it measured is readable now.
         CollectGpuTiming(_currentFrame);
@@ -925,6 +937,28 @@ public sealed unsafe partial class VulkanContext : IDisposable
         return cmd;
     }
 
+    // BeginFrame's acquire. False when the swapchain is out of date, which the caller answers by resizing; any other
+    // failure throws, before BeginFrame has moved any frame state.
+    private bool AcquireSwapchainImage()
+    {
+        var result = DeviceApi.vkAcquireNextImageKHR(Swapchain,
+            _acquireStuck ? FenceStuckPollTimeoutNs : FenceWaitTimeoutNs,
+            _imageAvailableSemaphores[_currentFrame], VkFence.Null, out _currentImageIndex);
+        NoteDeviceLost(result, "vkAcquireNextImageKHR");
+        if (result is VkResult.Timeout or VkResult.NotReady)
+        {
+            _acquireStuck = true;
+            throw new VkException(VkResult.Timeout, "swapchain image acquire timed out: every image is held");
+        }
+        _acquireStuck = false;
+        if (result == VkResult.ErrorOutOfDateKHR)
+            return false;
+        // Any other failure (the surface lost, the device lost) must not reach a frame recorded against an
+        // image that was never acquired. Thrown before any state below moves.
+        if (result != VkResult.SuboptimalKHR) result.CheckResult();
+        return true;
+    }
+
     public void BeginRenderPass(VkCommandBuffer cmd, float clearR, float clearG, float clearB, float clearA,
         bool singleSample = false)
     {
@@ -959,6 +993,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private void SubmitFrame(VkCommandBuffer cmd, bool endRenderPass)
     {
         AssertFrameThread(nameof(SubmitFrame));
+        var layeredReadback = false;
         if (endRenderPass)
         {
             DeviceApi.vkCmdEndRenderPass(cmd);
@@ -969,24 +1004,34 @@ public sealed unsafe partial class VulkanContext : IDisposable
             // presentation engine already owned, which the validation layer flags on every screenshot
             // and which entitles a driver to park the queue (the stuck-fence wedge shape).
             RecordPresentCapture(cmd);
+            // A layered context's frame reaches its window through a readback, recorded here for the same reason:
+            // after all the rendering, in the frame's own command buffer. A frame that died before its render pass
+            // has nothing to show, and the window keeps what it had.
+            if (_layered is not null)
+            {
+                RecordLayeredReadback(cmd);
+                layeredReadback = true;
+            }
         }
         EndGpuFrameTiming(cmd);
         DeviceApi.vkEndCommandBuffer(cmd);
 
+        // A layered context acquires nothing and presents nothing, so its submit waits on and signals no semaphore.
+        var layered = _layered is not null;
         var waitSemaphore = _imageAvailableSemaphores[_currentFrame];
         // Indexed by ACQUIRED IMAGE, not by frame slot: this is the semaphore vkQueuePresentKHR waits
         // on below, and its availability tracks the image's presentation, not the frame in flight.
-        var signalSemaphore = _renderFinishedSemaphores[_currentImageIndex];
+        var signalSemaphore = layered ? VkSemaphore.Null : _renderFinishedSemaphores[_currentImageIndex];
         VkPipelineStageFlags waitStage = VkPipelineStageFlags.ColorAttachmentOutput;
 
         VkSubmitInfo submitInfo = new()
         {
-            waitSemaphoreCount = 1,
+            waitSemaphoreCount = layered ? 0u : 1u,
             pWaitSemaphores = &waitSemaphore,
             pWaitDstStageMask = &waitStage,
             commandBufferCount = 1,
             pCommandBuffers = &cmd,
-            signalSemaphoreCount = 1,
+            signalSemaphoreCount = layered ? 0u : 1u,
             pSignalSemaphores = &signalSemaphore
         };
 
@@ -1094,6 +1139,18 @@ public sealed unsafe partial class VulkanContext : IDisposable
             Volatile.Write(ref _submitPending[_currentFrame], 0);
             NoteFrameDropped("submit failed");
             submitResult.CheckResult();
+        }
+
+        if (layered)
+        {
+            // In place of the present: the frame is shown once the GPU has finished it, so this waits for that,
+            // bounded like every other wait on the render thread (see PresentLayered).
+            _frameBegun = false;
+            var submittedFrame = _currentFrame;
+            _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
+            if (layeredReadback)
+                PresentLayered(submittedFrame);
+            return;
         }
 
         // Present is intentionally not CheckResult'd — ErrorOutOfDateKHR/SuboptimalKHR on resize are
@@ -1301,6 +1358,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         CleanupThumbnailTarget();
         CleanupCachedLayerTargets();
         CleanupPresentCapture();
+        CleanupLayered();
 
         for (var i = 0; i < MaxFramesInFlight; i++)
         {
@@ -1381,98 +1439,33 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     private void CreateSwapchain(uint width, uint height)
     {
-        InstanceApi.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, _surface, out var caps);
-
-        var extent = ChooseSwapchainExtent(caps, width, height);
-
-        var imageCount = caps.minImageCount + 1;
-        if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
-            imageCount = caps.maxImageCount;
-
         // Chosen once against the surface in VulkanDevice.Create; the render pass baked in the same
         // format, so the swapchain images must match it (BGRA on desktop, RGBA on Android/Mali).
         var format = _dev.ColorFormat;
+        VkExtent2D extent;
+        uint imgCount;
+        if (_layered is { } layered)
+        {
+            // No swapchain: one image of the context's own, the window's size now (which is what a Win32 surface
+            // reports as its current extent), read back after every frame (VulkanContext.Layered.cs).
+            var (w, h) = layered.PixelSize;
+            extent = new VkExtent2D(Math.Max(w, 1u), Math.Max(h, 1u));
+            imgCount = CreateLayeredImage(format, extent);
+        }
+        else
+        {
+            InstanceApi.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, _surface, out var caps);
+
+            extent = ChooseSwapchainExtent(caps, width, height);
+
+            var imageCount = caps.minImageCount + 1;
+            if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
+                imageCount = caps.maxImageCount;
+            imgCount = CreateSwapchainImages(caps, extent, format, imageCount);
+        }
         SwapchainFormat = format;
         SwapchainWidth = extent.width;
         SwapchainHeight = extent.height;
-
-        // Prefer Mailbox over Fifo when the driver offers it: Fifo (vsync) can block
-        // vkAcquireNextImageKHR for up to a full vblank interval, adding up to ~16 ms of
-        // input-to-pixel latency while actively rendering (zoom/pan). Mailbox replaces the
-        // queued image instead of waiting — stale intermediate frames are worthless for an
-        // interactive viewer. Fifo is the spec-guaranteed fallback. The event loop is
-        // idle-suppressing, so Mailbox does not turn the app into a busy renderer.
-        var presentMode = VkPresentModeKHR.Fifo;
-        uint pmCount;
-        InstanceApi.vkGetPhysicalDeviceSurfacePresentModesKHR(PhysicalDevice, _surface, &pmCount, null);
-        if (pmCount > 0)
-        {
-            Span<VkPresentModeKHR> modes = stackalloc VkPresentModeKHR[(int)pmCount];
-            fixed (VkPresentModeKHR* pModes = modes)
-                InstanceApi.vkGetPhysicalDeviceSurfacePresentModesKHR(PhysicalDevice, _surface, &pmCount, pModes);
-            foreach (var mode in modes)
-            {
-                if (mode == VkPresentModeKHR.Mailbox)
-                {
-                    presentMode = VkPresentModeKHR.Mailbox;
-                    break;
-                }
-            }
-        }
-
-        var imageUsage = VkImageUsageFlags.ColorAttachment;
-#if DEBUG
-        // TransferSrc lets the DEBUG-only inspector copy the presented frame out for screenshots
-        // (see VulkanContext.SwapchainReadback.cs). Desktop drivers always support it as a swapchain
-        // usage, but Android/Mali swapchains often expose ColorAttachment ONLY — and requesting an
-        // unsupported usage fails vkCreateSwapchainKHR (reported as VK_ERROR_SURFACE_LOST_KHR on
-        // Android). Only add it when the surface actually advertises it.
-        if ((caps.supportedUsageFlags & VkImageUsageFlags.TransferSrc) != 0)
-            imageUsage |= VkImageUsageFlags.TransferSrc;
-#endif
-
-        var compositeAlpha = ChooseCompositeAlpha(caps.supportedCompositeAlpha, _wantsAlpha);
-        PresentsAlpha = _wantsAlpha && compositeAlpha == VkCompositeAlphaFlagsKHR.PreMultiplied;
-
-        VkSwapchainCreateInfoKHR swapCI = new()
-        {
-            surface = _surface,
-            minImageCount = imageCount,
-            imageFormat = format,
-            imageColorSpace = VkColorSpaceKHR.SrgbNonLinear,
-            imageExtent = extent,
-            imageArrayLayers = 1,
-            imageUsage = imageUsage,
-            imageSharingMode = VkSharingMode.Exclusive,
-            // After a device rotation, currentTransform becomes Rotate90/270 — an app that adopts it
-            // as preTransform must render pre-rotated (rotate its projection), which VkRenderer does
-            // not. Prefer Identity when supported: the presentation engine applies the rotation
-            // itself (small compositor cost on mobile, correct visuals). Desktop surfaces report
-            // Identity as current anyway, so this is Android-rotation-only in practice.
-            preTransform = (caps.supportedTransforms & VkSurfaceTransformFlagsKHR.Identity) != 0
-                ? VkSurfaceTransformFlagsKHR.Identity
-                : caps.currentTransform,
-            compositeAlpha = compositeAlpha,
-            presentMode = presentMode,
-            clipped = true,
-            oldSwapchain = VkSwapchainKHR.Null
-        };
-
-        DeviceApi.vkCreateSwapchainKHR(&swapCI, null, out var swapchain).CheckResult();
-        Swapchain = swapchain;
-
-        // Get swapchain images
-        DeviceApi.vkGetSwapchainImagesKHR(Swapchain, out uint imgCount).CheckResult();
-        Span<VkImage> images = stackalloc VkImage[(int)imgCount];
-        DeviceApi.vkGetSwapchainImagesKHR(Swapchain, images).CheckResult();
-        _swapchainImages = images.ToArray();
-
-        // Present-wait semaphores are per image (see the field), so they are built here and torn down
-        // in CleanupSwapchain. Rebuilding them with the swapchain also keeps the count correct when a
-        // resize changes how many images the surface hands out.
-        _renderFinishedSemaphores = new VkSemaphore[imgCount];
-        for (var i = 0; i < imgCount; i++)
-            DeviceApi.vkCreateSemaphore(out _renderFinishedSemaphores[i]).CheckResult();
 
         // Create image views
         _swapchainImageViews = new VkImageView[imgCount];
@@ -1545,6 +1538,93 @@ public sealed unsafe partial class VulkanContext : IDisposable
         CreateSingleSampleSwapchainTargets(SwapchainFormat, extent.width, extent.height);
     }
 
+    // The swapchain itself and its images, for CreateSwapchain: everything about presenting through the surface.
+    // Returns how many images the surface handed out.
+    private uint CreateSwapchainImages(in VkSurfaceCapabilitiesKHR caps, VkExtent2D extent, VkFormat format,
+        uint imageCount)
+    {
+        // Prefer Mailbox over Fifo when the driver offers it: Fifo (vsync) can block
+        // vkAcquireNextImageKHR for up to a full vblank interval, adding up to ~16 ms of
+        // input-to-pixel latency while actively rendering (zoom/pan). Mailbox replaces the
+        // queued image instead of waiting — stale intermediate frames are worthless for an
+        // interactive viewer. Fifo is the spec-guaranteed fallback. The event loop is
+        // idle-suppressing, so Mailbox does not turn the app into a busy renderer.
+        var presentMode = VkPresentModeKHR.Fifo;
+        uint pmCount;
+        InstanceApi.vkGetPhysicalDeviceSurfacePresentModesKHR(PhysicalDevice, _surface, &pmCount, null);
+        if (pmCount > 0)
+        {
+            Span<VkPresentModeKHR> modes = stackalloc VkPresentModeKHR[(int)pmCount];
+            fixed (VkPresentModeKHR* pModes = modes)
+                InstanceApi.vkGetPhysicalDeviceSurfacePresentModesKHR(PhysicalDevice, _surface, &pmCount, pModes);
+            foreach (var mode in modes)
+            {
+                if (mode == VkPresentModeKHR.Mailbox)
+                {
+                    presentMode = VkPresentModeKHR.Mailbox;
+                    break;
+                }
+            }
+        }
+
+        var imageUsage = VkImageUsageFlags.ColorAttachment;
+#if DEBUG
+        // TransferSrc lets the DEBUG-only inspector copy the presented frame out for screenshots
+        // (see VulkanContext.SwapchainReadback.cs). Desktop drivers always support it as a swapchain
+        // usage, but Android/Mali swapchains often expose ColorAttachment ONLY — and requesting an
+        // unsupported usage fails vkCreateSwapchainKHR (reported as VK_ERROR_SURFACE_LOST_KHR on
+        // Android). Only add it when the surface actually advertises it.
+        if ((caps.supportedUsageFlags & VkImageUsageFlags.TransferSrc) != 0)
+            imageUsage |= VkImageUsageFlags.TransferSrc;
+#endif
+
+        var compositeAlpha = ChooseCompositeAlpha(caps.supportedCompositeAlpha, _wantsAlpha);
+        AlphaPresentation = _wantsAlpha && compositeAlpha == VkCompositeAlphaFlagsKHR.PreMultiplied
+            ? AlphaPresentation.Swapchain
+            : AlphaPresentation.None;
+
+        VkSwapchainCreateInfoKHR swapCI = new()
+        {
+            surface = _surface,
+            minImageCount = imageCount,
+            imageFormat = format,
+            imageColorSpace = VkColorSpaceKHR.SrgbNonLinear,
+            imageExtent = extent,
+            imageArrayLayers = 1,
+            imageUsage = imageUsage,
+            imageSharingMode = VkSharingMode.Exclusive,
+            // After a device rotation, currentTransform becomes Rotate90/270 — an app that adopts it
+            // as preTransform must render pre-rotated (rotate its projection), which VkRenderer does
+            // not. Prefer Identity when supported: the presentation engine applies the rotation
+            // itself (small compositor cost on mobile, correct visuals). Desktop surfaces report
+            // Identity as current anyway, so this is Android-rotation-only in practice.
+            preTransform = (caps.supportedTransforms & VkSurfaceTransformFlagsKHR.Identity) != 0
+                ? VkSurfaceTransformFlagsKHR.Identity
+                : caps.currentTransform,
+            compositeAlpha = compositeAlpha,
+            presentMode = presentMode,
+            clipped = true,
+            oldSwapchain = VkSwapchainKHR.Null
+        };
+
+        DeviceApi.vkCreateSwapchainKHR(&swapCI, null, out var swapchain).CheckResult();
+        Swapchain = swapchain;
+
+        // Get swapchain images
+        DeviceApi.vkGetSwapchainImagesKHR(Swapchain, out uint imgCount).CheckResult();
+        Span<VkImage> images = stackalloc VkImage[(int)imgCount];
+        DeviceApi.vkGetSwapchainImagesKHR(Swapchain, images).CheckResult();
+        _swapchainImages = images.ToArray();
+
+        // Present-wait semaphores are per image (see the field), so they are built here and torn down
+        // in CleanupSwapchain. Rebuilding them with the swapchain also keeps the count correct when a
+        // resize changes how many images the surface hands out.
+        _renderFinishedSemaphores = new VkSemaphore[imgCount];
+        for (var i = 0; i < imgCount; i++)
+            DeviceApi.vkCreateSemaphore(out _renderFinishedSemaphores[i]).CheckResult();
+        return imgCount;
+    }
+
     private void CleanupSwapchain()
     {
         CleanupSingleSampleSwapchainTargets();
@@ -1552,6 +1632,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
             DeviceApi.vkDestroyFramebuffer(fb);
         foreach (var iv in _swapchainImageViews)
             DeviceApi.vkDestroyImageView(iv);
+        // A layered context's image is its own, where a swapchain's belong to the swapchain, so it goes here.
+        CleanupLayeredImage();
 
         DestroyDepthAttachment(ref _depthImage, ref _depthMemory, ref _depthImageView);
 

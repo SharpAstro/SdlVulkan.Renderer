@@ -19,6 +19,8 @@ namespace SdlVulkan.Renderer;
 /// LUID (Dozen reports the LUID of the D3D12 adapter it runs on, which is the native driver's), whose surface offers
 /// <c>PRE_MULTIPLIED</c>; failing that, the best other device that does. A translation layer is slower than the
 /// native driver and its resources are not the native device's, so it is the exception, never the default.</para>
+/// <para>Where no device offers it, the window's context still has a way on Windows: drawn by the native device and
+/// handed to a layered window (<see cref="AlphaPresentation.LayeredWindow"/>, chosen by the context, not here).</para>
 /// </remarks>
 public sealed unsafe partial class VulkanDevice
 {
@@ -35,8 +37,8 @@ public sealed unsafe partial class VulkanDevice
     /// <summary>
     /// Creates a device for a transparent window's surface: the device <see cref="Create"/> would pick when its
     /// surface offers premultiplied alpha; otherwise a device on the same GPU (or failing that, any other) whose
-    /// surface does; otherwise <see cref="Create"/>'s pick after all, on which the window's swapchain is opaque (see
-    /// <see cref="VulkanContext.PresentsAlpha"/>).
+    /// surface does; otherwise <see cref="Create"/>'s pick after all, for which the window's context takes a layered
+    /// window on Windows and an opaque swapchain elsewhere (see <see cref="VulkanContext.AlphaPresentation"/>).
     /// </summary>
     public static VulkanDevice CreateForTransparentSurface(VkInstance instance, VkSurfaceKHR surface,
         VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1, bool ownsInstance = true)
@@ -57,7 +59,7 @@ public sealed unsafe partial class VulkanDevice
             return CreateOn(instance, instanceApi, alpha, alphaFamily, surface, msaaSamples, ownsInstance);
         }
 
-        SdlVulkanLog.Logger.TransparentWindowOpaque(DeviceName(instanceApi, native));
+        // The context says what the window gets instead (TransparentWindowLayered or TransparentWindowOpaque).
         LogSelectedDevice(instanceApi, native, nativeFamily, count);
         return CreateOn(instance, instanceApi, native, nativeFamily, surface, msaaSamples, ownsInstance);
     }
@@ -65,17 +67,16 @@ public sealed unsafe partial class VulkanDevice
     /// <summary>
     /// The extra device <see cref="SdlVulkanApp"/> gives its transparent windows when the shared device offers no
     /// premultiplied alpha on <paramref name="surface"/>, preferring the GPU of <paramref name="sameGpuAs"/> (the
-    /// shared device's); null when no other device offers it either.
+    /// shared device's); null when no other device offers it either, and the window's context makes do with the shared
+    /// device.
     /// </summary>
     internal static VulkanDevice? TryCreateForPremultipliedAlpha(VkInstance instance, VkSurfaceKHR surface,
         VkPhysicalDevice sameGpuAs, VkSampleCountFlags msaaSamples, bool ownsInstance)
     {
         var instanceApi = GetApi(instance);
+        // None: the context built on the shared device logs what the window gets instead.
         if (!TryPickForPremultipliedAlpha(instanceApi, surface, sameGpuAs, out var alpha, out var family))
-        {
-            SdlVulkanLog.Logger.TransparentWindowOpaque(DeviceName(instanceApi, sameGpuAs));
             return null;
-        }
         SdlVulkanLog.Logger.TransparentWindowDevice(DeviceName(instanceApi, sameGpuAs), DeviceName(instanceApi, alpha));
         LogSelectedDevice(instanceApi, alpha, family, DeviceCount(instanceApi));
         return CreateOn(instance, instanceApi, alpha, family, surface, msaaSamples, ownsInstance);
@@ -170,6 +171,9 @@ public sealed unsafe partial class VulkanDevice
             value = (value << 8) | id.deviceLUID[i];
         return value;
     }
+
+    /// <summary>The physical device's name, as the log lines give it.</summary>
+    internal string Name => DeviceName(InstanceApi, PhysicalDevice);
 
     private static uint DeviceCount(VkInstanceApi instanceApi)
     {

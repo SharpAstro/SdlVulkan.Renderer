@@ -21,6 +21,9 @@ namespace TransparencyProbe;
 /// way to know it for another machine, driver or session type is to put a known picture over a known backdrop and
 /// look, which "present" and "buddy" do. Exit code 0 when the run went as described, 1 on an error, 2 when a
 /// scored check did not match, 3 when the screen captured black.</para>
+/// <para>Where no swapchain blends, the library has one more way on Windows: the native device draws into an image of
+/// its own, read back every frame and handed to a layered window (<c>AlphaPresentation.LayeredWindow</c>), which
+/// "buddy ... native" measures, cost per frame included.</para>
 /// </remarks>
 internal static class Program
 {
@@ -46,7 +49,7 @@ internal static class Program
         {
             "caps" => WithInstance((instance, api) => Caps.Run(instance, api)),
             "present" => WithInstance((instance, api) => Present.Run(instance, api, args[1..], outDir, look)),
-            "buddy" => Buddy.Run(args.Length > 1 ? args[1] : "app", args.Length > 2 && args[2] == "native", outDir, look),
+            "buddy" => Buddy.Run(args.Length > 1 ? args[1] : "app", args.Length > 2 ? args[2] : "", outDir, look),
             _ => Usage(),
         };
     }
@@ -60,9 +63,11 @@ internal static class Program
                 every device x present mode (Fifo, Mailbox) x window kind (SDL transparent, plain), scored on screen
             TransparencyProbe present <driver>:<device substring> [transparent|plain|shape] [fifo|mailbox]
                 one combination, e.g. "present Dozen:Adreno", "present Qualcomm:Adreno transparent mailbox"
-            TransparencyProbe buddy [app|standalone] [native]
-                the library's transparent-window API end to end: halo, shape, clicks; native keeps the window on
-                the native device, Dozen or not (a hard-edged companion: the shape alone)
+            TransparencyProbe buddy [app|standalone] [native|opaque]
+                the library's transparent-window API end to end: halo, shape, clicks, and what a frame costs. As is,
+                the window takes the first way the machine has (Dozen's swapchain, where it is installed); native
+                keeps it on the native device (on Windows, a layered window); opaque gives it an ordinary context,
+                an opaque swapchain cut out by the shape alone (a hard-edged companion)
             --look, after "present" or "buddy": hold each picture on screen and ask whether you see the checkerboard
                 through it (Y or N in the picture's window), and print your answer beside the capture's verdict
             Pictures go to .\transparency-probe-out\<date-time>. Keep the display on and visible while it runs.

@@ -61,6 +61,11 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// fixed to B8G8R8A8Unorm on the offscreen path. Render pass and swapchain MUST agree on it.</summary>
     public VkFormat ColorFormat { get; }
 
+    /// <summary>Where every main pass on this device leaves its colour image: <c>PresentSrcKHR</c> on a device made
+    /// for a surface, <c>ColorAttachmentOptimal</c> on an offscreen one. A load pass starts from it, and a copy out of
+    /// a finished frame transitions from it.</summary>
+    internal VkImageLayout ColorFinalLayout { get; private set; } = VkImageLayout.PresentSrcKHR;
+
     /// <summary>The pool the next descriptor set will be taken from. Not the only one — see
     /// <see cref="AllocateDescriptorSet"/>; kept single-valued for callers that just need a
     /// representative handle.</summary>
@@ -333,6 +338,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
             graphicsQueue, queueFamily, renderPass, singleSamplePass, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples, ownsInstance);
         dev.MarkQueuePrivate();
         dev.MemoryBudgetAvailable = wantsBudget;
+        dev.ColorFinalLayout = VkImageLayout.ColorAttachmentOptimal;
         return dev;
     }
 
@@ -784,6 +790,18 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         }
         return FindMemoryType(typeFilter, VkMemoryPropertyFlags.DeviceLocal);
     }
+
+    /// <summary>
+    /// The memory type for a buffer the CPU reads back every frame: host-visible and coherent, and cached where the
+    /// device offers that. Without <c>HOST_CACHED</c> a discrete GPU's host-visible memory is typically
+    /// write-combined, which the CPU writes fast and reads slowly.
+    /// </summary>
+    internal uint FindReadbackMemoryType(uint typeFilter)
+        => TryFindMemoryType(typeFilter,
+            VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent | VkMemoryPropertyFlags.HostCached,
+            out var cached)
+            ? cached
+            : FindMemoryType(typeFilter, VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent);
 
     /// <summary>Whether the device has any lazily allocated memory type at all — a tiler does, a
     /// desktop GPU (and lavapipe) does not.</summary>

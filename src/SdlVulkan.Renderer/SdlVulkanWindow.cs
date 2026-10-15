@@ -55,7 +55,8 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// Standalone path for a window whose pixels blend with what is behind it, a desktop companion or an overlay:
     /// created with <c>SDL_WINDOW_TRANSPARENT</c>, not resizable, by default borderless and always on top. Pair it
     /// with <see cref="VulkanContext.CreateTransparent"/>, clear each frame to alpha 0, and use
-    /// <see cref="SetShape"/> to let clicks through outside the silhouette.
+    /// <see cref="SetShape"/> to let clicks through outside the silhouette (a layered window, see
+    /// <see cref="AlphaPresentation.LayeredWindow"/>, lets them through wherever alpha is zero without one).
     /// </summary>
     public static SdlVulkanWindow CreateTransparent(string title, int width, int height, bool borderless = true,
         bool alwaysOnTop = true)
@@ -267,6 +268,8 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// glows included, or they are cut off. Inside it, a window that presents alpha still blends exactly. One whose
     /// swapchain is opaque shows a hard-edged cut-out of an opaque frame, whose antialiased edge blends with the clear colour:
     /// clear to the colour at the sprite's edge, or draw an outline, so that fringe does not show.</para>
+    /// <para>A layered window (<see cref="AlphaPresentation.LayeredWindow"/>) needs no shape: Windows passes its clicks
+    /// through wherever a pixel's alpha is zero. A shape still clips it, as it does any window.</para>
     /// <para>Rebuilding the region costs about 3 ms for a 256 by 256 window (measured on Windows), so set it when
     /// the silhouette changes, not every frame.</para>
     /// </remarks>

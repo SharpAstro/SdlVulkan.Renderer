@@ -9,7 +9,7 @@ SDL3 + Vortice.Vulkan rendering library built on [DIR.Lib](https://github.com/Sh
 - **`VulkanContext`** — Vulkan device, command buffers, sync management. `MaxFramesInFlight = 2` with per-frame vertex buffers. Two construction modes:
   - `VulkanContext.Create(instance, surface, w, h, ...)` — on-screen path with a swapchain tied to an `SdlVulkanWindow`.
   - `VulkanContext.CreateOffscreen(instance, w, h, ...)` — headless path rendering to a standalone `VkImage`; no surface, no swapchain, no SDL window. See **Headless / offscreen rendering** below.
-  - `VulkanContext.CreateTransparent(instance, surface, w, h, ...)`: on-screen path for a window whose pixels blend with the desktop. See **Transparent windows** below.
+  - `VulkanContext.CreateTransparent(window, w, h, ...)`: on-screen path for a window whose pixels blend with the desktop. See **Transparent windows** below.
 - **`VkRenderer`** — `Renderer<VulkanContext>` implementation with FillRectangle, DrawRectangle, FillEllipse, DrawText, plus batched glyph and persistent-vertex-buffer draw APIs. Exposes `FontAtlasDirty` so callers can trigger redraws after glyph rasterization. Has `BeginFrame` / `BeginOffscreenFrame` variants that match the two `VulkanContext` modes.
 - **`VkPipelineSet`** — Vulkan pipeline creation from pre-baked SPIR-V (flat, textured, ellipse, page, stroke, SDF, round-rect, blend variants). Shaders are authored as GLSL 450 and baked to committed SPIR-V by `tools/BakeShaders`, re-run by hand after editing one — see **Dependencies** below.
 - **`VkFontAtlas`** — Dynamic bitmap glyph atlas with ManagedFontRasterizer (from DIR.Lib) rasterization and Vulkan texture upload. Supports grow (512→4096), deferred eviction, and `skipUnflushed` to prevent sampling stale GPU texture data.
@@ -155,7 +155,7 @@ per-window choice: ordinary windows are unchanged.
 
 ```csharp
 using var window = SdlVulkanWindow.CreateTransparent("Buddy", 240, 240);   // borderless, always on top
-using var ctx = VulkanContext.CreateTransparent(window.Instance, window.Surface, 240, 240);
+using var ctx = VulkanContext.CreateTransparent(window, 240, 240);
 using var renderer = new VkRenderer(ctx, 240, 240);
 window.SetShape(silhouette);   // an RgbaImage: clicks outside its non-zero alpha reach the window underneath
 
@@ -165,7 +165,17 @@ renderer.EndFrame();
 ```
 
 With `SdlVulkanApp`, open it with `app.CreateTransparentWindow(...)` and build its context with
-`VulkanContext.CreateTransparentForSharedDevice(app.DeviceFor(window), window.Surface, w, h)`.
+`VulkanContext.CreateTransparentForSharedDevice(app.DeviceFor(window), window, w, h)`.
+
+The window's frames reach the screen with their alpha by the first of these the machine can do, and
+`ctx.AlphaPresentation` says which it got. The app draws the same way whichever it is.
+
+| | Way | Where | Cost |
+|---|---|---|---|
+| 1 | `Swapchain`, on the native device | Wayland, macOS, Android drivers usually | none |
+| 2 | `Swapchain`, on a second device | Windows with Mesa's Dozen installed | a second device, which shares no resources |
+| 3 | `LayeredWindow`, on the native device | Windows without Dozen, or kept off it | a readback every frame |
+| 4 | `None`: an opaque swapchain, cut by `SetShape` | anywhere else | no alpha, hard edges only |
 
 - **Alpha comes from the swapchain's `PRE_MULTIPLIED` composite alpha,** and the ordinary pipelines already leave
   premultiplied pixels over a transparent clear. Wayland, macOS and Android drivers usually offer it.
@@ -174,28 +184,35 @@ With `SdlVulkanApp`, open it with `app.CreateTransparentWindow(...)` and build i
   transparent window that needs it gets a second device: Dozen on the same GPU, matched by adapter LUID. Every other
   window stays on the native device. Dozen comes with Microsoft's "OpenCL, OpenGL, and Vulkan Compatibility Pack"
   (`winget install 9NQPSL29BFFF --source msstore`).
-- **Check `ctx.PresentsAlpha`.** False means no device promised the window alpha (Windows without the pack), and its
-  swapchain is `OPAQUE`. Some native drivers blend it anyway on an SDL transparent window, which Vulkan does not
-  report (seen with NVIDIA under Mailbox presentation and with Intel under Fifo, in a Remote Desktop session; the Adreno, at
+- **Without Dozen, a layered window.** The native device draws into an image of the context's own instead of a
+  swapchain's; `EndFrame` waits for the GPU, copies the frame out and hands it to the window with
+  `UpdateLayeredWindow`, which blends it per pixel. Clicks pass through wherever alpha is zero, so the window needs no
+  shape. The copy grows with the window's size: a 240 by 240 companion took 0.3 ms a frame from `BeginFrame` to
+  `EndFrame` on an Adreno X1-85, against 0.09 ms for Dozen's swapchain. To take this way with Dozen installed, and
+  keep the window's resources on the native device, build its context on `app.Device` rather than
+  `app.DeviceFor(window)`, or pass `nativeDeviceOnly: true` standalone.
+- **Check `ctx.AlphaPresentation`** (or `ctx.PresentsAlpha`). `None` on a transparent window means no device's
+  swapchain offered alpha and there are no layered windows to fall back on, so its swapchain is `OPAQUE`. Some
+  Windows drivers blend an opaque swapchain's alpha anyway on an SDL transparent window, which Vulkan does not report
+  (seen with NVIDIA under Mailbox presentation and with Intel under Fifo, in a Remote Desktop session; the Adreno, at
   its console, blends it under neither), so treat that as a bonus, not a guarantee. `SetShape` still cuts the window
   to a hard-edged silhouette.
 - **The shape is one bit per pixel** (a window region on Windows). It decides both where clicks go and where anything
   is drawn, so make it cover every pixel with any alpha, soft edges included. Rebuilding it costs about 3 ms at
   256 by 256, so set it when the silhouette changes, not every frame.
-- **A companion with hard edges needs no Dozen.** On an opaque swapchain the shape still cuts the window out and lets
-  clicks through outside it; only soft edges need alpha. To keep such a window on the native device with Dozen
-  installed, build its context with `VulkanContext.CreateTransparentForSharedDevice(app.Device, ...)` rather than on
-  `app.DeviceFor(window)` (it still gets alpha wherever the native surface offers it), or standalone with
-  `VulkanContext.Create` (opaque everywhere). Its antialiased edge blends with the clear colour, so clear to the
-  colour at the sprite's edge, or draw an outline.
+- **A companion with hard edges needs no alpha at all.** On an opaque swapchain the shape still cuts the window out
+  and lets clicks through outside it, with no readback and no second device: give it an ordinary context,
+  `VulkanContext.CreateForSharedDevice(app.Device, window.Surface, ...)` or `VulkanContext.Create` standalone. Its
+  antialiased edge blends with the clear colour, so clear to the colour at the sprite's edge, or draw an outline.
 - **A second device shares no GPU resources** with the first: textures and meshes made on `app.Device` are not valid
-  in a transparent window on Dozen.
+  in a transparent window on Dozen. A layered window on `app.Device` shares them.
 
 `tools/TransparencyProbe` measures a machine: `caps` lists what each device's surface offers, `present all` puts a
 known premultiplied picture over a checkerboard for every device, present mode and window kind and scores what the
-screen shows, and `buddy` runs this API end to end (`buddy app native` and `buddy standalone native` keep the window
-on the native device). A capture is the compositor's picture, not necessarily the panel's: add `--look` to hold each
-picture on screen and answer by eye, which the tool prints beside the capture's verdict.
+screen shows, and `buddy` runs this API end to end and times its frames (`buddy app native` and
+`buddy standalone native` keep the window on the native device, a layered window on Windows; `buddy app opaque`
+gives it an opaque swapchain). A capture is the compositor's picture, not necessarily the panel's: add `--look` to
+hold each picture on screen and answer by eye, which the tool prints beside the capture's verdict.
 
 ## Native WebView (optional)
 
