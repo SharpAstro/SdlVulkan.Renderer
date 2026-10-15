@@ -189,6 +189,82 @@ jobs:
         env SDL_VIDEODRIVER=x11
         dotnet run --project tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0 -c $BUILD_CONF assert-docstart
 
+  # The Windows code (Win32WebView, the Win32 window features) is compiled by the build job through
+  # EnableWindowsTargeting, but until this job nothing ever RAN it in CI. Same shape as the Linux jobs:
+  # the offscreen test suite on a software Vulkan ICD, then the WebView smoke, here against the WebView2
+  # runtime the runner image ships.
+  #
+  # The runner has no Vulkan at all, so both halves are fetched, pinned: the loader (vulkan-1.dll) from
+  # LunarG's runtime components, copied into System32 where SDL and Vortice both find it, and lavapipe
+  # from mesa-dist-win, picked by VK_DRIVER_FILES (as the Linux jobs' lavapipe comes from apt).
+  #
+  # The smoke tool exits 0 with "SMOKE: SKIP" when it cannot stand up a window, which on Linux means the
+  # runner has no display and is acceptable; here the point is to run the WebView2 backend, so a run that
+  # does not print "SMOKE: PASS" fails. assert-hotkey, assert-filedialog and assert-caption are left out:
+  # they press real keys and clicks, which want a person's desktop, not a runner's.
+  #
+  # Non-gating (not in publish-nuget's needs) until proven stable, as webview-smoke-linux was.
+  windows:
+    timeout-minutes: 25
+    needs: build
+    runs-on: windows-latest
+    env:
+      VERSION_PREFIX: ${{ needs.build.outputs.version-prefix }}
+      VULKAN_RT_VERSION: 1.4.363.0
+      MESA_VERSION: 26.2.4
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install the Vulkan loader and lavapipe
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $vk = "$env:RUNNER_TEMP\vulkan"
+        New-Item -ItemType Directory -Force $vk | Out-Null
+        Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$env:VULKAN_RT_VERSION/windows/VulkanRT-X64-$env:VULKAN_RT_VERSION-Components.zip" -OutFile "$vk\rt.zip"
+        Expand-Archive "$vk\rt.zip" "$vk\rt"
+        $rt = "$vk\rt\VulkanRT-X64-$env:VULKAN_RT_VERSION-Components\x64"
+        Copy-Item "$rt\vulkan-1.dll" C:\Windows\System32\ -Force
+        gh release download $env:MESA_VERSION -R pal1000/mesa-dist-win -p "mesa3d-$env:MESA_VERSION-release-msvc.7z" -D $vk
+        7z x "$vk\mesa3d-$env:MESA_VERSION-release-msvc.7z" "-o$vk\mesa" x64 -r | Out-Null
+        $icd = Get-ChildItem "$vk\mesa" -Recurse -Filter lvp_icd.x86_64.json | Select-Object -First 1
+        if (-not $icd) { throw "lvp_icd.x86_64.json not found in mesa-dist-win $env:MESA_VERSION" }
+        "VK_DRIVER_FILES=$($icd.FullName)" >> $env:GITHUB_ENV
+        "VK_ICD_FILENAMES=$($icd.FullName)" >> $env:GITHUB_ENV
+        & "$rt\vulkaninfo.exe" --summary 2>&1 | Out-Host
+        if (-not $?) { Write-Host "::warning::vulkaninfo --summary failed" }
+    - uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+    - name: Install Android workload
+      # The renderer multi-targets net10.0-android, and restoring anything that references it resolves
+      # every TFM, so the workload is needed even though nothing here builds for Android.
+      run: dotnet workload install android
+    - name: Build test project
+      run: dotnet build src/SdlVulkan.Renderer.Tests -c $env:BUILD_CONF "-p:Version=$env:VERSION_PREFIX$env:VERSION_REV$env:VERSION_HASH" "-p:FileVersion=$env:VERSION_PREFIX.$env:VERSION_REV" -p:ContinuousIntegrationBuild=true
+    - name: Test
+      run: dotnet test src/SdlVulkan.Renderer.Tests -c $env:BUILD_CONF --no-build --logger "console;verbosity=detailed"
+    - name: Build WebView smoke
+      run: dotnet build tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0-windows -c $env:BUILD_CONF
+    - name: WebView2 self-tests
+      # messaging, the content sizer and document-start scripts as on Linux, plus the two WebView2-only
+      # ones: a DevTools-protocol click arrives trusted, and the page's fullscreen is reported both ways.
+      run: |
+        $failed = @()
+        foreach ($mode in 'assert', 'assert-autosize', 'assert-docstart', 'assert-cdp', 'assert-fullscreen') {
+          Write-Host "::group::$mode"
+          dotnet run --project tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0-windows -c $env:BUILD_CONF --no-build $mode 2>&1 | Tee-Object -Variable lines | Out-Host
+          $code = $LASTEXITCODE
+          Write-Host "::endgroup::"
+          if ($code -ne 0 -or -not ($lines -match 'SMOKE: PASS')) {
+            Write-Host "::error::WebViewSmoke $mode did not pass (exit $code)"
+            $failed += $mode
+          }
+        }
+        if ($failed) { throw "failed: $($failed -join ', ')" }
+
   publish-nuget:
     timeout-minutes: 15
     needs: [build, test]
