@@ -231,10 +231,13 @@ jobs:
         7z x "$vk\mesa3d-$env:MESA_VERSION-release-msvc.7z" "-o$vk\mesa" x64 -r | Out-Null
         $icd = Get-ChildItem "$vk\mesa" -Recurse -Filter lvp_icd.x86_64.json | Select-Object -First 1
         if (-not $icd) { throw "lvp_icd.x86_64.json not found in mesa-dist-win $env:MESA_VERSION" }
+        # GITHUB_ENV reaches the later steps only, so this step sets them for itself too.
+        $env:VK_DRIVER_FILES = $env:VK_ICD_FILENAMES = $icd.FullName
         "VK_DRIVER_FILES=$($icd.FullName)" >> $env:GITHUB_ENV
         "VK_ICD_FILENAMES=$($icd.FullName)" >> $env:GITHUB_ENV
+        # A loader that finds no driver here would only make every test below skip, so stop now.
         & "$rt\vulkaninfo.exe" --summary 2>&1 | Out-Host
-        if (-not $?) { Write-Host "::warning::vulkaninfo --summary failed" }
+        if ($LASTEXITCODE -ne 0) { throw "vulkaninfo found no usable Vulkan driver" }
     - uses: actions/setup-dotnet@v6
       with:
         dotnet-version: 10.0.x
