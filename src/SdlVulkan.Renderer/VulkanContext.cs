@@ -396,13 +396,38 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private VkSurfaceKHR _surface;
     private bool _disposed;
 
-    private VulkanContext(VulkanDevice device, VkSurfaceKHR surface, uint vertexBufferSize, bool ownsDevice)
+    // A transparent window's context: its swapchain asks for PRE_MULTIPLIED composite alpha wherever the surface
+    // offers it (see ChooseCompositeAlpha), so every swapchain rebuild keeps asking.
+    private readonly bool _wantsAlpha;
+
+    /// <summary>
+    /// True when this window's swapchain carries alpha to the compositor (<c>PRE_MULTIPLIED</c> composite alpha), so
+    /// what is behind the window shows through wherever its pixels are not opaque.
+    /// </summary>
+    /// <remarks>
+    /// <para>Only a context made by <see cref="CreateTransparent"/> or <see cref="CreateTransparentForSharedDevice"/>
+    /// asks for it. Clear to alpha 0 and draw as usual: the pipelines blend colour with <c>SrcAlpha</c> /
+    /// <c>OneMinusSrcAlpha</c> and alpha with <c>One</c> / <c>OneMinusSrcAlpha</c>, which over a transparent clear
+    /// leaves exactly premultiplied pixels. The four blend-mode fills (multiply, screen, darken, lighten) are written
+    /// for an opaque backdrop and are not premultiplied-correct over a transparent one.</para>
+    /// <para>False on a transparent window means no device's surface offered premultiplied alpha (on Windows: no
+    /// Dozen, see <see cref="VulkanDevice.CreateForTransparentSurface"/>), so the swapchain is <c>OPAQUE</c>, whose
+    /// alpha the spec says is ignored. Some Windows drivers blend it anyway on an <c>SDL_WINDOW_TRANSPARENT</c> window,
+    /// outside anything Vulkan reports: observed for NVIDIA 582.66 with Mailbox presentation (not Fifo) and for Intel
+    /// UHD 630 with Fifo (it offers no Mailbox), in a Remote Desktop session. Do not count on it either way.
+    /// <see cref="SdlVulkanWindow.SetShape"/> still cuts the window to a hard-edged silhouette.</para>
+    /// </remarks>
+    public bool PresentsAlpha { get; private set; }
+
+    private VulkanContext(VulkanDevice device, VkSurfaceKHR surface, uint vertexBufferSize, bool ownsDevice,
+        bool wantsAlpha = false)
     {
         _dev = device;
         _surface = surface;
         _vertexBufferSize = vertexBufferSize;
         Array.Fill(_vertexBufferSizes, vertexBufferSize);
         _ownsDevice = ownsDevice;
+        _wantsAlpha = wantsAlpha;
     }
 
     public static VulkanContext Create(VkInstance instance, VkSurfaceKHR surface, uint width, uint height,
@@ -410,7 +435,25 @@ public sealed unsafe partial class VulkanContext : IDisposable
     {
         // Single-window path: this context creates and owns its device.
         var device = VulkanDevice.Create(instance, surface, msaaSamples);
-        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: true);
+        return CreateOwning(device, surface, width, height, vertexBufferSize, wantsAlpha: false);
+    }
+
+    /// <summary>
+    /// <see cref="Create"/> for a transparent window (<see cref="SdlVulkanWindow.CreateTransparent"/>): the device is
+    /// <see cref="VulkanDevice.CreateForTransparentSurface"/>'s, the native one unless only another device can give
+    /// the window alpha, and the swapchain asks for premultiplied alpha. Check <see cref="PresentsAlpha"/>.
+    /// </summary>
+    public static VulkanContext CreateTransparent(VkInstance instance, VkSurfaceKHR surface, uint width, uint height,
+        uint vertexBufferSize = 4 * 1024 * 1024, VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
+    {
+        var device = VulkanDevice.CreateForTransparentSurface(instance, surface, msaaSamples);
+        return CreateOwning(device, surface, width, height, vertexBufferSize, wantsAlpha: true);
+    }
+
+    private static VulkanContext CreateOwning(VulkanDevice device, VkSurfaceKHR surface, uint width, uint height,
+        uint vertexBufferSize, bool wantsAlpha)
+    {
+        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: true, wantsAlpha);
 
         ctx.CreateSyncObjects();
         ctx.AllocateCommandBuffers();
@@ -431,8 +474,21 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// </summary>
     public static VulkanContext CreateForSharedDevice(VulkanDevice device, VkSurfaceKHR surface,
         uint width, uint height, uint vertexBufferSize = 4 * 1024 * 1024)
+        => CreateShared(device, surface, width, height, vertexBufferSize, wantsAlpha: false);
+
+    /// <summary>
+    /// <see cref="CreateForSharedDevice"/> for a transparent window: pass <see cref="SdlVulkanApp.DeviceFor"/>'s
+    /// device, which is the shared one unless only another device can give this window alpha. The swapchain asks
+    /// for premultiplied alpha; check <see cref="PresentsAlpha"/>.
+    /// </summary>
+    public static VulkanContext CreateTransparentForSharedDevice(VulkanDevice device, VkSurfaceKHR surface,
+        uint width, uint height, uint vertexBufferSize = 4 * 1024 * 1024)
+        => CreateShared(device, surface, width, height, vertexBufferSize, wantsAlpha: true);
+
+    private static VulkanContext CreateShared(VulkanDevice device, VkSurfaceKHR surface,
+        uint width, uint height, uint vertexBufferSize, bool wantsAlpha)
     {
-        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: false);
+        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: false, wantsAlpha);
 
         ctx.CreateSyncObjects();
         ctx.AllocateCommandBuffers();
@@ -1297,6 +1353,29 @@ public sealed unsafe partial class VulkanContext : IDisposable
         return extent;
     }
 
+    /// <summary>
+    /// The composite-alpha mode a swapchain asks for, given what the surface offers. An ordinary window takes Opaque,
+    /// which desktop surfaces offer; Android surfaces commonly offer Inherit ONLY, and asking for a mode the surface
+    /// does not offer fails swapchain creation (reported as VK_ERROR_SURFACE_LOST_KHR on Mali), so without Opaque the
+    /// first offered of Inherit, PreMultiplied, PostMultiplied is taken. A transparent window takes PreMultiplied
+    /// wherever it is offered, since that is what the pipelines' blending leaves in the framebuffer, and otherwise
+    /// falls back to the ordinary choice. PostMultiplied is never chosen for it: the pixels are not straight alpha.
+    /// </summary>
+    internal static VkCompositeAlphaFlagsKHR ChooseCompositeAlpha(VkCompositeAlphaFlagsKHR supported, bool wantsAlpha)
+    {
+        if (wantsAlpha && (supported & VkCompositeAlphaFlagsKHR.PreMultiplied) != 0)
+            return VkCompositeAlphaFlagsKHR.PreMultiplied;
+        if ((supported & VkCompositeAlphaFlagsKHR.Opaque) != 0)
+            return VkCompositeAlphaFlagsKHR.Opaque;
+        if ((supported & VkCompositeAlphaFlagsKHR.Inherit) != 0)
+            return VkCompositeAlphaFlagsKHR.Inherit;
+        if ((supported & VkCompositeAlphaFlagsKHR.PreMultiplied) != 0)
+            return VkCompositeAlphaFlagsKHR.PreMultiplied;
+        if ((supported & VkCompositeAlphaFlagsKHR.PostMultiplied) != 0)
+            return VkCompositeAlphaFlagsKHR.PostMultiplied;
+        return VkCompositeAlphaFlagsKHR.Opaque;
+    }
+
     private void CreateSwapchain(uint width, uint height)
     {
         InstanceApi.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, _surface, out var caps);
@@ -1349,19 +1428,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
             imageUsage |= VkImageUsageFlags.TransferSrc;
 #endif
 
-        // Pick a supported composite-alpha mode. Desktop supports Opaque; Android surfaces commonly
-        // support Inherit ONLY, and requesting an unsupported mode fails swapchain creation (reported
-        // as VK_ERROR_SURFACE_LOST_KHR on Mali).
-        var compositeAlpha = VkCompositeAlphaFlagsKHR.Opaque;
-        if ((caps.supportedCompositeAlpha & VkCompositeAlphaFlagsKHR.Opaque) == 0)
-        {
-            if ((caps.supportedCompositeAlpha & VkCompositeAlphaFlagsKHR.Inherit) != 0)
-                compositeAlpha = VkCompositeAlphaFlagsKHR.Inherit;
-            else if ((caps.supportedCompositeAlpha & VkCompositeAlphaFlagsKHR.PreMultiplied) != 0)
-                compositeAlpha = VkCompositeAlphaFlagsKHR.PreMultiplied;
-            else if ((caps.supportedCompositeAlpha & VkCompositeAlphaFlagsKHR.PostMultiplied) != 0)
-                compositeAlpha = VkCompositeAlphaFlagsKHR.PostMultiplied;
-        }
+        var compositeAlpha = ChooseCompositeAlpha(caps.supportedCompositeAlpha, _wantsAlpha);
+        PresentsAlpha = _wantsAlpha && compositeAlpha == VkCompositeAlphaFlagsKHR.PreMultiplied;
 
         VkSwapchainCreateInfoKHR swapCI = new()
         {

@@ -136,4 +136,14 @@ internal static partial class LogEvents
     // wedge, a driver quirk) cannot be attributed to hardware without this line.
     [LoggerMessage(501, LogLevel.Information, "[VulkanDevice] selected {DeviceName} ({DeviceType}, driver {DriverVersion}, Vulkan {ApiVersion}), queue family {QueueFamily}, from {DeviceCount} enumerated.")]
     public static partial void PhysicalDeviceSelected(this ILogger logger, string deviceName, string deviceType, string driverVersion, string apiVersion, uint queueFamily, uint deviceCount);
+
+    // A transparent window is the one place the renderer may run on a second device, typically Mesa's Dozen on
+    // Windows, whose native drivers offer no premultiplied alpha. Logged so a slower window, or one whose GPU resources are
+    // not the other windows', is attributable to that choice.
+    [LoggerMessage(502, LogLevel.Information, "[VulkanDevice] {NativeDevice} offers no premultiplied alpha on a transparent window's surface; that window uses {AlphaDevice}.")]
+    public static partial void TransparentWindowDevice(this ILogger logger, string nativeDevice, string alphaDevice);
+
+    // ...and when no device offers it (Windows without Dozen), the window gets an opaque swapchain on the native device.
+    [LoggerMessage(503, LogLevel.Information, "[VulkanDevice] no device offers premultiplied alpha on a transparent window's surface; it gets an opaque swapchain on {NativeDevice}.")]
+    public static partial void TransparentWindowOpaque(this ILogger logger, string nativeDevice);
 }

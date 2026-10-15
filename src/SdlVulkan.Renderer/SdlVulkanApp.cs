@@ -21,6 +21,10 @@ public sealed class SdlVulkanApp : IDisposable
 {
     private readonly VkSampleCountFlags _msaaSamples;
     private VulkanDevice? _device;
+    // The second device DeviceFor makes for transparent windows the shared device cannot give alpha. Sought once:
+    // which devices exist does not change while the app runs, so a miss is not worth repeating per window.
+    private VulkanDevice? _alphaDevice;
+    private bool _alphaDeviceSought;
     private bool _disposed;
 
     public VkInstance Instance { get; }
@@ -66,6 +70,49 @@ public sealed class SdlVulkanApp : IDisposable
         return window;
     }
 
+    /// <summary>
+    /// Opens a window whose pixels blend with what is behind it, as <see cref="SdlVulkanWindow.CreateTransparent"/>
+    /// does for a standalone one. Build its context with <see cref="VulkanContext.CreateTransparentForSharedDevice"/>
+    /// passing <see cref="DeviceFor"/>, not <see cref="Device"/>. Opening one first does not change which device is
+    /// shared: that is still picked as <see cref="CreateWindow"/> picks it, for the ordinary windows.
+    /// </summary>
+    public SdlVulkanWindow CreateTransparentWindow(string title, int width, int height, bool borderless = true,
+        bool alwaysOnTop = true, bool focusable = true, bool hidden = false)
+    {
+        var window = SdlVulkanWindow.CreateForApp(Instance, title, width, height, maximized: false,
+            borderless, alwaysOnTop, focusable, hidden, transparent: true);
+        _device ??= VulkanDevice.Create(Instance, window.Surface, _msaaSamples, ownsInstance: false);
+        return window;
+    }
+
+    /// <summary>
+    /// The device to build <paramref name="window"/>'s context on. <see cref="Device"/> for an ordinary window, and
+    /// for a transparent one whenever the shared device can give it alpha. Only when it cannot (on Windows, whose
+    /// native drivers offer no premultiplied alpha) is it a second device, made on first need and kept for every later
+    /// transparent window: the one on the same GPU whose surface offers premultiplied alpha, typically Mesa's Dozen.
+    /// Where no device offers it, <see cref="Device"/> again, and the window's swapchain is opaque (see
+    /// <see cref="VulkanContext.PresentsAlpha"/>).
+    /// </summary>
+    /// <remarks>
+    /// A second device does not share GPU resources with the first: textures, meshes and buffers made on
+    /// <see cref="Device"/> are not valid in a window on the other one. A transparent companion window draws its own
+    /// content, so this costs it nothing; it does mean a document cannot move into such a window without
+    /// re-uploading.
+    /// </remarks>
+    public VulkanDevice DeviceFor(SdlVulkanWindow window)
+    {
+        var shared = Device;
+        if (!window.IsTransparent || shared.SupportsPremultipliedAlpha(window.Surface))
+            return shared;
+        if (!_alphaDeviceSought)
+        {
+            _alphaDeviceSought = true;
+            _alphaDevice = VulkanDevice.TryCreateForPremultipliedAlpha(Instance, window.Surface,
+                shared.PhysicalDevice, _msaaSamples, ownsInstance: false);
+        }
+        return _alphaDevice is { } alpha && alpha.SupportsPremultipliedAlpha(window.Surface) ? alpha : shared;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -74,6 +121,7 @@ public sealed class SdlVulkanApp : IDisposable
         // The device (created ownsInstance: false) leaves the instance alone, so we destroy the
         // instance here after it. Callers must already have disposed every window + context — their
         // swapchains and surfaces reference this device/instance.
+        _alphaDevice?.Dispose();
         _device?.Dispose();
 
         VulkanValidation.DestroyMessenger(Instance, GetApi(Instance));

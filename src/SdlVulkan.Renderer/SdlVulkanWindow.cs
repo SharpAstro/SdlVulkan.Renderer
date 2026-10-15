@@ -52,6 +52,17 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         => CreateInternal(InitSdlAndCreateInstance(), title, width, height, ownsSdl: true, fullscreen: fullscreen);
 
     /// <summary>
+    /// Standalone path for a window whose pixels blend with what is behind it, a desktop companion or an overlay:
+    /// created with <c>SDL_WINDOW_TRANSPARENT</c>, not resizable, by default borderless and always on top. Pair it
+    /// with <see cref="VulkanContext.CreateTransparent"/>, clear each frame to alpha 0, and use
+    /// <see cref="SetShape"/> to let clicks through outside the silhouette.
+    /// </summary>
+    public static SdlVulkanWindow CreateTransparent(string title, int width, int height, bool borderless = true,
+        bool alwaysOnTop = true)
+        => CreateInternal(InitSdlAndCreateInstance(), title, width, height, ownsSdl: true, maximized: false,
+            borderless: borderless, alwaysOnTop: alwaysOnTop, transparent: true);
+
+    /// <summary>
     /// Multi-window path used by <see cref="SdlVulkanApp"/>: creates a window + surface against an
     /// already-created shared instance. Does not init or quit SDL — the app owns that.
     /// <paramref name="maximized"/> defaults true (the main window). A tab being torn out is dragged as
@@ -62,14 +73,17 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// </summary>
     internal static SdlVulkanWindow CreateForApp(VkInstance instance, string title, int width, int height,
         bool maximized = true, bool borderless = false, bool alwaysOnTop = false, bool focusable = true,
-        bool hidden = false)
+        bool hidden = false, bool transparent = false)
         => CreateInternal(instance, title, width, height, ownsSdl: false,
             maximized: maximized, borderless: borderless, alwaysOnTop: alwaysOnTop, focusable: focusable,
-            hidden: hidden);
+            hidden: hidden, transparent: transparent);
 
+    // transparent: SDL_WINDOW_TRANSPARENT, which SDL_SetWindowShape requires, and NOT resizable. A transparent window
+    // is sized to its content by the app, and SDL stretches a window's shape to the window's size, so a resize by
+    // the user would stretch the silhouette with it.
     private static SdlVulkanWindow CreateInternal(VkInstance instance, string title, int width, int height,
         bool ownsSdl, bool maximized = true, bool borderless = false, bool alwaysOnTop = false,
-        bool focusable = true, bool fullscreen = false, bool hidden = false)
+        bool focusable = true, bool fullscreen = false, bool hidden = false, bool transparent = false)
     {
         var flags = WindowFlags.Vulkan;
         if (fullscreen)
@@ -81,7 +95,8 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         }
         else
         {
-            flags |= WindowFlags.Resizable;
+            if (transparent) flags |= WindowFlags.Transparent;
+            else flags |= WindowFlags.Resizable;
             if (maximized) flags |= WindowFlags.Maximized;
             if (borderless) flags |= WindowFlags.Borderless;
             if (alwaysOnTop) flags |= WindowFlags.AlwaysOnTop;
@@ -231,6 +246,43 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
             if (surface == nint.Zero) return;   // out of memory or a bad stride; an iconless window is not fatal
             SetWindowIcon(Handle, surface);
             DestroySurface(surface);
+        }
+    }
+
+    /// <summary>Whether the window was created transparent (<see cref="CreateTransparent"/>,
+    /// <see cref="SdlVulkanApp.CreateTransparentWindow"/>): <c>SDL_WINDOW_TRANSPARENT</c>, which
+    /// <see cref="SetShape"/> requires.</summary>
+    public bool IsTransparent => (GetWindowFlags(Handle) & WindowFlags.Transparent) != 0;
+
+    /// <summary>
+    /// Cuts the window to the silhouette in <paramref name="shape"/>'s alpha (<c>SDL_SetWindowShape</c>); null
+    /// restores the full rectangle. Returns false when SDL refuses, which it does for a window not created
+    /// transparent.
+    /// </summary>
+    /// <remarks>
+    /// <para>The shape is one bit per pixel: on Windows SDL turns it into a window region (<c>SetWindowRgn</c>)
+    /// holding every pixel whose alpha is not zero, after stretching the image to the window's size. Outside the
+    /// region clicks go to whatever is underneath, and nothing of the window is drawn there either, so a shape for
+    /// a window that <see cref="VulkanContext.PresentsAlpha"/> must cover every pixel with any alpha, soft edges and
+    /// glows included, or they are cut off. Inside it, a window that presents alpha still blends exactly. One whose
+    /// swapchain is opaque shows a hard-edged cut-out of an opaque frame, whose antialiased edge blends with the clear colour:
+    /// clear to the colour at the sprite's edge, or draw an outline, so that fringe does not show.</para>
+    /// <para>Rebuilding the region costs about 3 ms for a 256 by 256 window (measured on Windows), so set it when
+    /// the silhouette changes, not every frame.</para>
+    /// </remarks>
+    public bool SetShape(RgbaImage? shape)
+    {
+        if (shape is null)
+            return SetWindowShape(Handle, nint.Zero);
+        fixed (byte* pixels = shape.Pixels)
+        {
+            // SDL converts the surface into its own copy before building the region, so this one can go at once.
+            var surface = CreateSurfaceFrom(shape.Width, shape.Height,
+                PixelFormat.ABGR8888, (nint)pixels, shape.Width * 4);
+            if (surface == nint.Zero) return false;
+            var applied = SetWindowShape(Handle, surface);
+            DestroySurface(surface);
+            return applied;
         }
     }
 
