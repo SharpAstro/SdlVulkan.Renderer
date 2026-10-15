@@ -29,7 +29,8 @@ public interface INativeWebView : IDisposable
     /// (the same space the renderer draws in). Forward <c>SdlWindowView.OnResize</c> here.</summary>
     void SetBounds(RectInt bounds);
 
-    /// <summary>Gives the webview input focus.</summary>
+    /// <summary>Gives the webview input focus. Best effort: a webview that cannot take it now does not
+    /// throw, it reports the failure on <see cref="Trace"/>.</summary>
     void Focus();
 
     /// <summary>Shows or hides the webview child surface.</summary>

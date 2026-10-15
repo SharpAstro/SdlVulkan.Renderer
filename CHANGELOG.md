@@ -7,6 +7,14 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.72
+
+**A web view that cannot take focus no longer takes the app down.** On Windows, `INativeWebView.Focus` threw when
+WebView2's `MoveFocus` failed, and it is called from event handlers: a player calling it as its window was activated
+died of an unhandled `Win32Exception` (0x800707DC, "The specified tag was not found"). The failure now goes to
+`Trace` instead, and the next call tries again. The interface says so: focus is best effort.
+
+
 ## 7.71
 
 **A window can be transparent: its pixels blend with what is behind it,** for a desktop companion or an overlay. A
