@@ -196,7 +196,7 @@ jobs:
   #
   # The runner has no Vulkan at all, so both halves are fetched, pinned: the loader (vulkan-1.dll) from
   # LunarG's runtime components, copied into System32 where SDL and Vortice both find it, and lavapipe
-  # from mesa-dist-win, picked by VK_DRIVER_FILES (as the Linux jobs' lavapipe comes from apt).
+  # from mesa-dist-win, registered as a driver (as the Linux jobs' lavapipe comes from apt).
   #
   # The smoke tool exits 0 with "SMOKE: SKIP" when it cannot stand up a window, which on Linux means the
   # runner has no display and is acceptable; here the point is to run the WebView2 backend, so a run that
@@ -231,13 +231,20 @@ jobs:
         7z x "$vk\mesa3d-$env:MESA_VERSION-release-msvc.7z" "-o$vk\mesa" x64 -r | Out-Null
         $icd = Get-ChildItem "$vk\mesa" -Recurse -Filter lvp_icd.x86_64.json | Select-Object -First 1
         if (-not $icd) { throw "lvp_icd.x86_64.json not found in mesa-dist-win $env:MESA_VERSION" }
-        # GITHUB_ENV reaches the later steps only, so this step sets them for itself too.
-        $env:VK_DRIVER_FILES = $env:VK_ICD_FILENAMES = $icd.FullName
-        "VK_DRIVER_FILES=$($icd.FullName)" >> $env:GITHUB_ENV
-        "VK_ICD_FILENAMES=$($icd.FullName)" >> $env:GITHUB_ENV
-        # A loader that finds no driver here would only make every test below skip, so stop now.
+        # Registered, not named in VK_DRIVER_FILES: the loader ignores its environment variables in an
+        # elevated process, and the runner's are elevated. A value of 0 under this key is how a driver
+        # installer registers its manifest.
+        $key = 'HKLM:\SOFTWARE\Khronos\Vulkan\Drivers'
+        New-Item -Path $key -Force | Out-Null
+        New-ItemProperty -Path $key -Name $icd.FullName -Value 0 -PropertyType DWord -Force | Out-Null
+        # A loader that finds no driver here would only make every test below skip, so stop now, with the
+        # loader's own account of where it looked.
         & "$rt\vulkaninfo.exe" --summary 2>&1 | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "vulkaninfo found no usable Vulkan driver" }
+        if ($LASTEXITCODE -ne 0) {
+          $env:VK_LOADER_DEBUG = 'error,warn,driver'
+          & "$rt\vulkaninfo.exe" --summary 2>&1 | Out-Host
+          throw "vulkaninfo found no usable Vulkan driver"
+        }
     - uses: actions/setup-dotnet@v6
       with:
         dotnet-version: 10.0.x
