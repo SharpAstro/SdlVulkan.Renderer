@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Answers, per machine and per Vulkan device: does a transparent window actually show the desktop through?
+    NOT part of the solution / package build, and Windows only (it reads the composed screen through GDI). Run it
+    directly, with one of three subcommands:
+      dotnet run caps                      composite-alpha modes each device's surface offers, per kind of window
+      dotnet run present all               every device x present mode x window kind, scored on screen
+      dotnet run present Dozen:NVIDIA      one device (driver name : device-name substring), scored on screen
+      dotnet run buddy                     the library's transparent-window API end to end (app and standalone)
+    "present" and "buddy" open small windows in the middle of the primary display for a few seconds each and
+    compare a screen capture against a checkerboard backdrop, so the display has to be on and visible: a minimized
+    Remote Desktop client or a sleeping panel captures black, which the tool reports rather than scores.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- SDL3.dll for window and surface creation. Native asset resolved at run time via deps.json. -->
+    <PackageReference Include="SDL3-CS.Native" Version="3.5.0-preview.20260205-174353" />
+  </ItemGroup>
+
+</Project>

@@ -7,6 +7,35 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.71
+
+**A window can be transparent: its pixels blend with what is behind it,** for a desktop companion or an overlay. A
+per-window opt-in; ordinary windows are unchanged.
+
+- `SdlVulkanWindow.CreateTransparent` and `SdlVulkanApp.CreateTransparentWindow` open a window with
+  `SDL_WINDOW_TRANSPARENT`, not resizable, by default borderless and always on top. `VulkanContext.CreateTransparent`
+  and `CreateTransparentForSharedDevice` build its context, whose swapchain asks for `PRE_MULTIPLIED` composite alpha
+  wherever the surface offers it, and `PresentsAlpha` says whether it got it. Clear to alpha 0 and draw as usual: the
+  pipelines' blending already leaves premultiplied pixels over a transparent clear, now pinned by a test (flat and
+  overlapping translucent fills, antialiased edges, text).
+- Windows' native Vulkan drivers offer no premultiplied alpha for any kind of window (measured: NVIDIA 582.66 and
+  Qualcomm Adreno offer `OPAQUE` only, Intel `OPAQUE` and `INHERIT`). Mesa's Dozen, from Microsoft's "OpenCL, OpenGL,
+  and Vulkan Compatibility Pack", does, and presents through DirectComposition: a screen capture over a known
+  backdrop matched the blend to within a fraction of one 8-bit step. So a transparent window whose native device
+  cannot give it alpha gets a second device, the one on the same GPU (matched by adapter LUID) whose surface offers
+  it, and nothing else moves: `VulkanDevice.CreateForTransparentSurface` on the standalone path,
+  `SdlVulkanApp.DeviceFor(window)` on the multi-window one, which makes that device once and shares it among
+  transparent windows. Both log which device a transparent window got and why. Without such a device the window's
+  swapchain is opaque, though NVIDIA (under Mailbox presentation) and Intel (under Fifo) were seen to blend its alpha anyway on
+  an SDL transparent window, in a Remote Desktop session and outside anything Vulkan reports.
+- `SdlVulkanWindow.SetShape(RgbaImage?)` cuts the window to the non-zero alpha of an image (`SDL_SetWindowShape`, a
+  one-bit window region on Windows): clicks outside it reach the window underneath, alpha still blends inside it, and
+  on a window whose swapchain is opaque it gives a hard-edged cut-out. `IsTransparent` says whether a window can take one.
+- The whole suite also passes on Dozen (the compatibility pack's and mesa-dist-win's).
+- `tools/TransparencyProbe`, run by hand on Windows, measures what a machine actually does: what each device's surface
+  offers (`caps`), what the screen shows for every device, present mode and window kind against a known backdrop
+  (`present all`), and this API end to end (`buddy`).
+
 ## 7.70
 
 **The inspector sidecar finds a local DEBUG app through DIR.Lib's per-user registry.** From DIR.Lib 11.21 a debug

@@ -18,7 +18,7 @@ namespace SdlVulkan.Renderer;
 /// (single-window / offscreen), so multiple windows can share one device without double-free.
 /// </para>
 /// </summary>
-public sealed unsafe class VulkanDevice : IDisposable
+public sealed unsafe partial class VulkanDevice : IDisposable
 {
     // Capacity of ONE descriptor pool, not a global ceiling: when a pool fills, another is added
     // (see AllocateDescriptorSet). A pool cannot be resized once created, so growth is always by
@@ -234,7 +234,14 @@ public sealed unsafe class VulkanDevice : IDisposable
     {
         var instanceApi = GetApi(instance);
         var physicalDevice = PickPhysicalDevice(instanceApi, surface, out var queueFamily);
+        return CreateOn(instance, instanceApi, physicalDevice, queueFamily, surface, msaaSamples, ownsInstance);
+    }
 
+    // The on-screen device, once the physical device is chosen: by PickPhysicalDevice for Create, or by the
+    // transparent-window picker (VulkanDevice.Transparency.cs) for a window that needs premultiplied alpha.
+    private static VulkanDevice CreateOn(VkInstance instance, VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice,
+        uint queueFamily, VkSurfaceKHR surface, VkSampleCountFlags msaaSamples, bool ownsInstance)
+    {
         float queuePriority = 1.0f;
         VkDeviceQueueCreateInfo queueCI = new()
         {
@@ -1081,7 +1088,10 @@ public sealed unsafe class VulkanDevice : IDisposable
         }
     }
 
-    private static VkPhysicalDevice PickPhysicalDevice(VkInstanceApi instanceApi, VkSurfaceKHR surface, out uint queueFamily)
+    // log: false when the caller may still choose another device (the transparent-window picker), so the log
+    // names the device that is actually used rather than one that was only considered.
+    private static VkPhysicalDevice PickPhysicalDevice(VkInstanceApi instanceApi, VkSurfaceKHR surface, out uint queueFamily,
+        bool log = true)
     {
         uint count = 0;
         instanceApi.vkEnumeratePhysicalDevices(&count, null);
@@ -1106,7 +1116,7 @@ public sealed unsafe class VulkanDevice : IDisposable
             if (props.deviceType == VkPhysicalDeviceType.DiscreteGpu)
             {
                 queueFamily = family;
-                LogSelectedDevice(instanceApi, pd, family, count);
+                if (log) LogSelectedDevice(instanceApi, pd, family, count);
                 return pd;
             }
 
@@ -1120,7 +1130,7 @@ public sealed unsafe class VulkanDevice : IDisposable
         if (fallback != VkPhysicalDevice.Null)
         {
             queueFamily = fallbackFamily;
-            LogSelectedDevice(instanceApi, fallback, fallbackFamily, count);
+            if (log) LogSelectedDevice(instanceApi, fallback, fallbackFamily, count);
             return fallback;
         }
 
