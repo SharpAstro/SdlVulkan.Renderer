@@ -352,9 +352,15 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
     }
 
     public void Focus()
-        => _controller?.Object
-            .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON.COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
-            .ThrowOnError();
+    {
+        // MoveFocus can fail on a controller momentarily in no state to take focus (seen: 0x800707DC,
+        // "The specified tag was not found", with the host window being activated). Focus is called
+        // from event handlers, where a throw takes the app down, and a missed focus is not worth that:
+        // it is traced, and the next call tries again.
+        if (_controller?.Object.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON.COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
+            is { IsError: true } hr)
+            Trace?.Invoke($"focus failed (HRESULT 0x{hr.Value:X8})");
+    }
 
     public void SetVisible(bool visible)
     {
