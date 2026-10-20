@@ -2,7 +2,11 @@
 
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFrameworks>net10.0;net10.0-android</TargetFrameworks>
+    <!-- The android TFM only when no RID is given (a pack, a plain build) or an android one is: a desktop publish
+         (`dotnet publish -r win-arm64` of an app on this as a sibling ProjectReference) carries its RID into every TFM
+         at restore, and net10.0-android with a win-arm64 RID asks for a Mono win-arm64 runtime pack that does not exist. -->
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <TargetFrameworks Condition="'$(RuntimeIdentifier)' == '' OR $(RuntimeIdentifier.StartsWith('android'))">net10.0;net10.0-android</TargetFrameworks>
     <!-- Android host (SdlVulkanActivity) needs SDL3-CS.Android's Java bridge, which only exists on
          the android TFM. Desktop keeps the SDL3-CS.Native path via consuming apps. -->
     <SupportedOSPlatformVersion Condition="'$(TargetFramework)' == 'net10.0-android'">24.0</SupportedOSPlatformVersion>
