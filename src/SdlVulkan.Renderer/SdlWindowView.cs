@@ -134,11 +134,14 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
         return consumed;
     }
 
-    /// <summary>SDL button byte (1=left, 2=middle, 3=right) to the DIR.Lib button enum; side buttons map to Left.</summary>
+    /// <summary>SDL button byte (1=left, 2=middle, 3=right, 4=X1/back, 5=X2/forward) to the DIR.Lib button enum;
+    /// a button SDL numbers beyond those maps to Left.</summary>
     internal static MouseButton ToMouseButton(byte sdlButton) => sdlButton switch
     {
         2 => MouseButton.Middle,
         3 => MouseButton.Right,
+        4 => MouseButton.Back,
+        5 => MouseButton.Forward,
         _ => MouseButton.Left,
     };
 

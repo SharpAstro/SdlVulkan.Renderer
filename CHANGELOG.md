@@ -7,6 +7,17 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.74
+
+**SDL's side mouse buttons arrive as `MouseButton.Back` and `MouseButton.Forward`.**
+
+- `SdlWindowView.ToMouseButton` maps SDL's X1 (button 4) to `MouseButton.Back` and X2 (button 5) to
+  `MouseButton.Forward`, on press and on release, through `OnPointerInput`. They used to fall through to `Left`,
+  so a back/forward click acted as a left click. Left, middle and right are unchanged, and a button SDL numbers
+  beyond those still maps to `Left`.
+- The legacy `OnMouseDown` / `OnMouseUp` callbacks still receive SDL's raw button byte, so they see 4 and 5 as before.
+- **Requires DIR.Lib 11.35**, the first release with `MouseButton.Back` and `Forward`; the pin moves from 11.17.* to 11.35.*.
+
 ## 7.73
 
 **A transparent window blends on Windows with nothing installed: where no device gives it a premultiplied-alpha
