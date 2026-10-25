@@ -1119,15 +1119,14 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         api.vkCmdDraw(_currentCmd, vertexCount, 1, 0, 0);
     }
 
+    /// <summary>Triangles in each round cap the stroke shader builds (its <c>kCapTriangles</c>).</summary>
+    public const int StrokeRoundCapTriangles = 8;
+
     /// <summary>
     /// Draws stroke segments from a persistent GPU buffer with a custom origin and scale.
     /// No frame-allocator usage — the buffer is pre-uploaded and reused across frames.
     /// </summary>
-    // segmentCount is the number of INSTANCES: one per line segment, each 4 floats (P0.xy, P1.xy)
-    // at byteOffset. The six quad vertices are expanded from gl_VertexIndex in the shader.
-    /// <summary>Triangles in each round cap the stroke shader builds (its <c>kCapTriangles</c>).</summary>
-    public const int StrokeRoundCapTriangles = 8;
-
+    /// <param name="segmentCount">The number of INSTANCES: one per line segment, each 4 floats (P0.xy, P1.xy) at <paramref name="byteOffset"/>. The six quad vertices are expanded from gl_VertexIndex in the shader.</param>
     /// <param name="roundCaps">Give every segment a round cap at each end, built in the vertex shader from
     /// the vertex index alone, so nothing is stored for them. Two segments meeting at a point cap it twice,
     /// which covers a round join, so a polyline that is round-capped and round-joined needs nothing but
