@@ -62,11 +62,26 @@ jobs:
       run: dotnet restore
     - name: Build
       run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+    # SdlVulkan.Renderer.Debug: the same library packed from a Debug build at the same stamped version. A
+    # published package is Release, so its #if DEBUG types (DebugInspector) are absent, and a plane never
+    # finds the sibling sources, so a Debug build there restored the Release package without the inspector.
+    # GeneratePackageOnBuild is off so bin/Debug holds no second copy of the nupkg: the upload glob must
+    # see the twin exactly once, from artifacts/debug-twin.
+    - name: Pack SdlVulkan.Renderer.Debug twin
+      run: dotnet pack src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj -c Debug -p:DebugTwin=true -p:GeneratePackageOnBuild=false -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true -o artifacts/debug-twin
+    # Proves a Debug consumer compiles against the twin (it references DebugInspector). The version is the
+    # stamped one without the +sha build metadata, which NuGet ignores when matching.
+    - name: Check SdlVulkan.Renderer.Debug twin
+      run: dotnet build tools/debug-twin-check/DebugTwinCheck.csproj -c Debug -p:SdlVulkanRendererDebugVersion=${VERSION_PREFIX}${VERSION_REV}
     - name: Upload NuGet package
       uses: actions/upload-artifact@v7
       with:
         name: nuget-packages
-        path: '**/*.nupkg'
+        # Not obj/: the consumer check restores into its own obj/packages, a package cache that holds a
+        # .nupkg for every restored package (third-party ones too).
+        path: |
+          **/*.nupkg
+          !**/obj/**
         retention-days: 5
 
   # BlendOpRegressionTests catch the dangling-pAttachments bug fixed in 3.4.471 by

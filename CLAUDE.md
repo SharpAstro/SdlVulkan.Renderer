@@ -46,6 +46,14 @@ The matching release note goes in [CHANGELOG.md](CHANGELOG.md) at the repo root,
 newest first, one `## Major.Minor` section each. (The notes used to live in a comment block in the
 workflow's `env:`; nothing ever read them there, and they had grown to 329 of that file's 478 lines.)
 
+## Debug twin package
+
+`-p:DebugTwin=true` on `dotnet pack src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj -c Debug` packs the Debug build as
+`SdlVulkan.Renderer.Debug`, depending on `DIR.Lib.Debug`, so a plane (which never finds the sibling sources) gets the
+`#if DEBUG` inspector types. CI packs it into `artifacts/debug-twin` and proves it with `tools/debug-twin-check`
+(a Debug consumer with no ProjectReference, outside `src/`, not in the solution):
+`dotnet build tools/debug-twin-check/DebugTwinCheck.csproj -c Debug` after packing. The upload excludes `obj/`.
+
 ## DIR.Lib Dependency
 
 DIR.Lib provides the rendering primitives, font rasterization, and widget interfaces that this library builds on. It is published via NuGet but its source lives in a sibling directory (`../DIR.Lib`). When fixing bugs or adding features, always prefer pushing changes upstream to DIR.Lib rather than working around its limitations in this repo.
