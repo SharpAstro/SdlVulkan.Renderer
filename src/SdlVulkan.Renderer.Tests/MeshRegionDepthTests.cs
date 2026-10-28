@@ -250,6 +250,9 @@ public sealed class MeshRegionDepthTests(OffscreenGpuFixture gpu)
         }
 
         ctx.ResizeOffscreen(Size, Size);
+        // An offscreen target starts without depth; the mesh in the layer is drawn on the first frame only
+        // if the context was asked for it up front (the lazy path is OffscreenDepthShapeTests').
+        ctx.RequireMeshDepth();
         using var renderer = new VkRenderer(ctx, Size, Size);
         renderer.EnsureCachedLayerTargets(Size, Size).ShouldBeTrue();
 
@@ -332,6 +335,7 @@ public sealed class MeshRegionDepthTests(OffscreenGpuFixture gpu)
 
     private static Action ValidatedSequence(VulkanContext ctx) => () =>
     {
+        ctx.RequireMeshDepth();
         using var renderer = new VkRenderer(ctx, Size, Size);
         renderer.EnsureCachedLayerTargets(Size, Size).ShouldBeTrue();
         renderer.OnPreRenderPass += _ =>
@@ -367,6 +371,9 @@ public sealed class MeshRegionDepthTests(OffscreenGpuFixture gpu)
     private static byte[] RenderFrame(VulkanContext ctx, Action<VkRenderer> draw)
     {
         ctx.ResizeOffscreen(Size, Size);
+        // A target has no depth until asked: opt in, so the region below draws on this very frame (the
+        // fixture's context keeps the depth image from here on, which is the shape these tests are about).
+        ctx.RequireMeshDepth();
         // The offscreen context belongs to the shared collection fixture; never dispose it here.
         using var renderer = new VkRenderer(ctx, Size, Size);
 

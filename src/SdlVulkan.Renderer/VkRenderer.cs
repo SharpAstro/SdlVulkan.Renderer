@@ -8,18 +8,107 @@ namespace SdlVulkan.Renderer;
 
 public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 {
-    // The set the next bind draws with: _mainPipelines, built for the device's own sample count, except
-    // inside a main pass the consumer asked to run single-sampled (SingleSampleMainPass), which draws with
-    // _singleSamplePipelines. A pipeline's sample count must match the pass it is drawn in.
+    // The set the next bind draws with. A pipeline must match the pass it is drawn in in its sample count
+    // AND its shape (a pass with a depth attachment or without, see VulkanDevice.CreateCompatibleRenderPass),
+    // so there is a set per pass the renderer draws in: the main pass at the device's own sample count, or
+    // inside a main pass the consumer asked to run single-sampled (SingleSampleMainPass) at one, each on the
+    // depth shape or the depth-less one. A window, a cached layer and a thumbnail capture are on the depth
+    // shape; an offscreen target starts on the depth-less one until a mesh asks for depth.
     private VkPipelineSet? _pipelines;
-    private VkPipelineSet? _mainPipelines;
-    private VkPipelineSet? _singleSamplePipelines;
-    // The single-sample set is built off the render thread: a pipeline set is about 50 ms of driver
-    // compile (Adreno X1-85, warm driver cache), which a window's creation should not pay for a feature
-    // its first frames rarely use. vkCreateGraphicsPipelines needs no external synchronisation without a
-    // pipeline cache. Until the set is in, a frame that asks for a single-sample main pass gets the
-    // multisampled one, which is correct, merely slower.
-    private Task<VkPipelineSet>? _singleSamplePipelinesBuild;
+    private readonly PipelineSlot _mainPipelines = new();
+    private readonly PipelineSlot _mainPipelinesNoDepth = new();
+    private readonly PipelineSlot _singleSamplePipelines = new();
+    private readonly PipelineSlot _singleSamplePipelinesNoDepth = new();
+    // Whether the main pass being recorded is on the depth shape; set as it begins, since an offscreen
+    // target's shape can change between frames.
+    private bool _mainPassHasDepth = true;
+    // The set that was current when a cached layer or a thumbnail capture opened: those passes are on the
+    // depth shape whatever the main pass is, so they draw with the depth set and hand the other back.
+    private VkPipelineSet? _savedLayerPipelines;
+    private VkPipelineSet? _savedThumbnailPipelines;
+
+    // One set of the four, with the build that may be producing it. A set other than the first one wanted
+    // is built off the render thread: a pipeline set is about 50 ms of driver compile (Adreno X1-85, warm
+    // driver cache), which a window's creation should not pay for a feature its first frames rarely use.
+    // vkCreateGraphicsPipelines needs no external synchronisation without a pipeline cache. Until a
+    // single-sample set is in, a frame that asks for a single-sample main pass gets the multisampled one,
+    // which is correct, merely slower; a main set a pass needs is waited for (Require), since a pass cannot
+    // be recorded without one.
+    private sealed class PipelineSlot
+    {
+        private VkPipelineSet? _set;
+        private Task<VkPipelineSet>? _build;
+
+        public bool Started => _set is not null || _build is not null;
+        public bool Ready => _set is not null || _build is { IsCompletedSuccessfully: true };
+
+        public void Start(Func<VkPipelineSet> create)
+        {
+            if (!Started) _build = Task.Run(create);
+        }
+
+        // The set if it is in; takes in a finished build, and reports a failed one to onFailed once.
+        public VkPipelineSet? Poll(Action<string?> onFailed)
+        {
+            if (_set is null && _build is { IsCompleted: true } built)
+            {
+                if (built.IsCompletedSuccessfully) _set = built.Result;
+                else onFailed(built.Exception?.GetBaseException().Message);
+                _build = null;
+            }
+            return _set;
+        }
+
+        // The set, from a running build (waited for) or built here when none was started.
+        public VkPipelineSet Require(Func<VkPipelineSet> create)
+        {
+            if (_set is null)
+            {
+                _set = _build is { } build ? build.GetAwaiter().GetResult() : create();
+                _build = null;
+            }
+            return _set;
+        }
+
+        // A build still running would create pipelines on a device about to go, so it is waited out first.
+        // It is CPU work on a pool thread with a bounded end (one pipeline set), not I/O.
+        public void Dispose(Action<string?> onFailed)
+        {
+            if (_set is null && _build is { } build)
+            {
+                ((IAsyncResult)build).AsyncWaitHandle.WaitOne();
+                Poll(onFailed);
+            }
+            _set?.Dispose();
+            _set = null;
+            _build = null;
+        }
+    }
+
+    private PipelineSlot MainSlot(bool depth) => depth ? _mainPipelines : _mainPipelinesNoDepth;
+    private PipelineSlot SingleSlot(bool depth) => depth ? _singleSamplePipelines : _singleSamplePipelinesNoDepth;
+
+    private VkPipelineSet CreateMainPipelines(bool depth)
+        => VkPipelineSet.Create(Surface, depth ? Surface.RenderPass : Surface.RenderPassNoDepth,
+            Surface.MsaaSamples, depth);
+
+    private VkPipelineSet CreateSingleSamplePipelines(bool depth)
+        => VkPipelineSet.Create(Surface,
+            depth ? Surface.SingleSampleRenderPass : Surface.SingleSampleRenderPassNoDepth,
+            VkSampleCountFlags.Count1, depth);
+
+    // The main pass's set on a shape, waiting for it or building it here if it is not in.
+    private VkPipelineSet MainPipelinesFor(bool depth)
+        => MainSlot(depth).Require(() => CreateMainPipelines(depth));
+
+    private void StartSingleSamplePipelines(bool depth)
+    {
+        if (Surface.SingleSampleMainPassAvailable)
+            SingleSlot(depth).Start(() => CreateSingleSamplePipelines(depth));
+    }
+
+    private static void LogSingleSampleFailed(string? message)
+        => SdlVulkanLog.Logger.SingleSamplePipelinesFailed(message);
     private VkFontAtlas? _fontAtlas;
     private VkSdfFontAtlas? _sdfFontAtlas;
     // Optional large-text tier: a second SDF atlas at a bigger raster (e.g. 128px). BeginSdfGlyphBatch
@@ -103,10 +192,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // A window context has built its swapchain already, at the extent its surface chose, which
         // need not be the size passed here; an offscreen one has none, and the size passed stands.
         (_width, _height) = SizeAfterSwapchainBuild(ctx.SwapchainWidth, ctx.SwapchainHeight, width, height);
-        _mainPipelines = _pipelines = VkPipelineSet.Create(ctx);
-        if (ctx.SingleSampleMainPassAvailable)
-            _singleSamplePipelinesBuild = Task.Run(
-                () => VkPipelineSet.Create(ctx, ctx.SingleSampleRenderPass, VkSampleCountFlags.Count1));
+        // The sets for the shape the first frame will have: a window's, and an offscreen target that asked
+        // for depth (CreateOffscreen's meshDepth), are on the depth shape; any other offscreen target starts
+        // without depth and pays for no mesh pipeline. The other shape is built when something needs it.
+        var depth = ctx.MainPassWillHaveDepth;
+        _mainPassHasDepth = depth;
+        _pipelines = MainPipelinesFor(depth);
+        StartSingleSamplePipelines(depth);
         _fontAtlas = new VkFontAtlas(ctx, rasterizer);
         _sdfFontAtlas = sdfInitialAtlasDim > 0
             ? new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, sdfDiskCache, sdfInitialAtlasDim, sdfInitialAtlasDim)
@@ -156,24 +248,44 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     /// <summary>
     /// Whether <see cref="SingleSampleMainPass"/> can take effect: the device multisamples, and the
-    /// single-sample pipelines, built off the render thread from construction, are in. Until then a frame
-    /// that asks for it runs multisampled.
+    /// single-sample pipelines for the target's pass, built off the render thread from construction, are
+    /// in. Until then a frame that asks for it runs multisampled.
     /// </summary>
-    public bool SingleSampleMainPassReady
-        => _singleSamplePipelines is not null || _singleSamplePipelinesBuild is { IsCompletedSuccessfully: true };
+    public bool SingleSampleMainPassReady => SingleSlot(Surface.MainPassWillHaveDepth).Ready;
 
-    // The main pass's sample count, as asked for and available; the set to draw it with follows.
-    private bool BeginMainPassPipelines()
+    // The main pass's sample count, as asked for and available, on the shape the target has; the set to
+    // draw it with follows.
+    private bool BeginMainPassPipelines(bool depth)
     {
-        if (_singleSamplePipelines is null && _singleSamplePipelinesBuild is { IsCompleted: true } built)
-        {
-            if (built.IsCompletedSuccessfully) _singleSamplePipelines = built.Result;
-            else SdlVulkanLog.Logger.SingleSamplePipelinesFailed(built.Exception?.GetBaseException().Message);
-            _singleSamplePipelinesBuild = null;
-        }
-        var single = SingleSampleMainPass && _singleSamplePipelines is not null;
-        if (single) _pipelines = _singleSamplePipelines;
+        _mainPassHasDepth = depth;
+        var slot = SingleSlot(depth);
+        if (SingleSampleMainPass) StartSingleSamplePipelines(depth);
+        var singleSet = slot.Poll(LogSingleSampleFailed);
+        var single = SingleSampleMainPass && singleSet is not null;
+        _pipelines = single ? singleSet : MainPipelinesFor(depth);
         return single;
+    }
+
+    // What a pass is on when no main pass is open: the set of the shape the target has.
+    private void RestPipelines() => _pipelines = MainSlot(Surface.MainPassHasDepth).Poll(LogSingleSampleFailed) ?? _pipelines;
+
+    // Whether the pass being recorded can host a mesh: the cached layer and the thumbnail capture are on
+    // the depth shape, the main pass is if its target has depth.
+    private bool PassHasDepth => _inCachedLayer || _inThumbnailCapture || _mainPassHasDepth;
+
+    /// <summary>
+    /// Asks for the target's main pass to carry depth from the next frame, so <see cref="BeginMeshRegion"/>
+    /// draws in it, and has the depth pipelines ready by then (built off the render thread). An offscreen
+    /// target starts without depth (see <see cref="VulkanContext.RequireMeshDepth"/>); a consumer that knows
+    /// it will draw a mesh calls this before the first frame, so that frame draws it. A frame that
+    /// reaches <see cref="BeginMeshRegion"/> without it makes the same request itself and loses only that
+    /// frame's mesh. No effect on a window, whose passes always carry depth.
+    /// </summary>
+    public void RequireMeshDepth()
+    {
+        Surface.RequireMeshDepth();
+        MainSlot(true).Start(() => CreateMainPipelines(true));
+        StartSingleSamplePipelines(true);
     }
     internal VkFontAtlas? FontAtlas => _fontAtlas;
     public ManagedFontRasterizer? GlyphRasterizer => _fontAtlas?.Rasterizer;
@@ -341,7 +453,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         LastPreFlushMs = 0;
         LastPreRenderPassMs = 0;
-        _pipelines = _mainPipelines;
+        _pipelines = MainPipelinesFor(Surface.MainPassWillHaveDepth);
         ForgetCachedLayer();
         _currentCmd = Surface.BeginFrame(out var resized);
         if (resized || _currentCmd == VkCommandBuffer.Null)
@@ -373,7 +485,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // Preserves the previous contents and confines painting to the accumulated damage when the
         // caller supplied any, otherwise clears and paints in full. Sets _damageRegion so every clip
         // below is bounded by it.
-        var single = BeginMainPassPipelines();
+        var single = BeginMainPassPipelines(Surface.MainPassHasDepth);
         Surface.BeginFrameRenderPass(_currentCmd, clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f,
             single);
         var region = Surface.LastFrameRegion;
@@ -388,7 +500,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void EndFrame()
     {
         Surface.EndFrame(_currentCmd);
-        _pipelines = _mainPipelines;
+        RestPipelines();
     }
 
     private void InvokePreFlush()
@@ -473,7 +585,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public bool BeginCachedLayer(uint w, uint h, DIR.Lib.RGBAColor32 clearColor)
     {
         if (_currentCmd == VkCommandBuffer.Null || _inCachedLayer) return false;
+        // The layer's pass is on the depth shape whatever the main pass is, and so draws with that set.
+        var depthPipelines = MainPipelinesFor(true);
         if (!Surface.BeginCachedLayerPass(_currentCmd, w, h, clearColor)) return false;
+        _savedLayerPipelines = _pipelines;
+        _pipelines = depthPipelines;
 
         _savedLayerWidth = _width;
         _savedLayerHeight = _height;
@@ -495,6 +611,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         if (!_inCachedLayer) return;
         Surface.EndCachedLayerPass(_currentCmd);
+        _pipelines = _savedLayerPipelines;
         _width = _savedLayerWidth;
         _height = _savedLayerHeight;
         UpdateProjection();
@@ -529,8 +646,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // swapchain, the cached layer, a thumbnail capture, the offscreen target), after what is under it
     // and before what goes over it, antialiased by the pass's MSAA and clipped by the caller's clip,
     // with no intermediate target. What makes it different from the 2D draws is that its triangles
-    // sort themselves through the pass's depth attachment -- which is why every pass here carries one
-    // (see VulkanContext.Depth.cs), and why a region has to be opened first: the depth under the model
+    // sort themselves through the pass's depth attachment -- which is why a pass that hosts one carries one
+    // (see VulkanContext.Depth.cs; an offscreen target takes it when asked, RequireMeshDepth), and why a
+    // region has to be opened first: the depth under the model
     // is cleared so its triangles are tested only against each other, never against a model drawn
     // earlier in the same frame.
 
@@ -542,6 +660,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <see cref="EndMeshRegion"/>. Returns false and opens nothing when no pass is being recorded, a
     /// region is already open, or the rect misses the area this pass may paint — the caller then draws
     /// no meshes, and whatever was under them stays.
+    /// <para>Also false, with a side effect, on an offscreen target that has no depth image yet (it starts
+    /// without, see <see cref="VulkanContext.RequireMeshDepth"/>): nothing is drawn this frame, the target
+    /// is marked as wanting depth and the next <see cref="BeginOffscreenFrame"/> gives it some. A consumer
+    /// that draws a mesh every frame can call <see cref="RequireMeshDepth"/> before its first one to draw
+    /// from the start.</para>
     /// </summary>
     /// <remarks>
     /// The clear is why this is a bracket rather than a flag on <see cref="DrawMesh"/>. Depth is
@@ -553,6 +676,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public bool BeginMeshRegion(float x, float y, float w, float h)
     {
         if (_currentCmd == VkCommandBuffer.Null || _pipelines is null || _inMeshRegion) return false;
+        if (!PassHasDepth)
+        {
+            // No depth image under this pass, so nothing to test against: ask for one, and draw the mesh
+            // from the next frame.
+            RequireMeshDepth();
+            return false;
+        }
         if (!(w > 0f) || !(h > 0f)) return false;
 
         // Device pixels, whole and outward — a scissor and a clear rect are integer, and a model must
@@ -617,7 +747,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void DrawMesh(ReadOnlySpan<float> vertices, ReadOnlySpan<float> mvp,
         DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection)
     {
-        if (!_inMeshRegion || _pipelines is null) return;
+        if (!_inMeshRegion || _pipelines?.Mesh is null) return;
         if (mvp.Length < 16) return;
         var floatsPerVertex = (int)(VkMeshPipeline.VertexStride / sizeof(float));
         if (vertices.Length < floatsPerVertex * 3) return;
@@ -659,7 +789,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         // Through the bind cache, so a model of many parts binds the pipeline once; the 2D draw that
         // follows the region rebinds its own through the same cache.
-        var mesh = _pipelines.Mesh;
+        var mesh = _pipelines.Mesh!;
         BindPipeline(mesh.Pipeline);
         mesh.Draw(_currentCmd, pc, Surface.VertexBuffer, offset, (uint)(vertices.Length / floatsPerVertex));
     }
@@ -691,7 +821,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public bool BeginThumbnailCapture(uint w, uint h, DIR.Lib.RGBAColor32 clearColor)
     {
         if (_currentCmd == VkCommandBuffer.Null || _inThumbnailCapture) return false;
+        // As the cached layer: the capture's pass is on the depth shape, so it draws with that set.
+        var depthPipelines = MainPipelinesFor(true);
         if (!Surface.BeginThumbnailCapturePass(_currentCmd, w, h, clearColor)) return false;
+        _savedThumbnailPipelines = _pipelines;
+        _pipelines = depthPipelines;
 
         _savedWidth = _width;
         _savedHeight = _height;
@@ -721,6 +855,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         if (!_inThumbnailCapture) return;
         Surface.EndThumbnailCapturePassAndCopy(_currentCmd);
+        _pipelines = _savedThumbnailPipelines;
         _width = _savedWidth;
         _height = _savedHeight;
         UpdateProjection(); // restore the swapchain-scale projection for the main render pass
@@ -748,9 +883,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         LastPreFlushMs = 0;
         LastPreRenderPassMs = 0;
-        _pipelines = _mainPipelines;
         ForgetCachedLayer();
+        // The pre-render hook may record a cached layer or a thumbnail, which draw on the depth shape
+        // themselves (BeginCachedLayer, BeginThumbnailCapture); the main pass's set is chosen below, once
+        // the context has taken the target to the shape it is to have this frame.
         _currentCmd = Surface.BeginOffscreenFrame();
+        _pipelines = MainPipelinesFor(Surface.MainPassHasDepth);
         if (_currentCmd == VkCommandBuffer.Null) return false;
 
         ResetClipStack();   // fresh command buffer, same as BeginFrame
@@ -765,7 +903,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         InvokePreRenderPass();
 
-        var single = BeginMainPassPipelines();
+        var single = BeginMainPassPipelines(Surface.MainPassHasDepth);
         Surface.BeginOffscreenRenderPass(_currentCmd,
             clearColor.Red / 255f, clearColor.Green / 255f, clearColor.Blue / 255f, clearColor.Alpha / 255f, single);
         // The whole target is the paintable area of an offscreen frame. It used to go unset here, so a
@@ -780,7 +918,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public void EndOffscreenFrame()
     {
         Surface.EndOffscreenFrame(_currentCmd);
-        _pipelines = _mainPipelines;
+        RestPipelines();
     }
 
     /// <summary>
@@ -2945,18 +3083,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _sdfFontAtlasLarge = null;
         _fontAtlas?.Dispose();
         _fontAtlas = null;
-        _mainPipelines?.Dispose();
-        // A build still running would create pipelines on a device about to go, so it is waited out first.
-        // It is CPU work on a pool thread with a bounded end (one pipeline set), not I/O.
-        if (_singleSamplePipelines is null && _singleSamplePipelinesBuild is { } build)
-        {
-            ((IAsyncResult)build).AsyncWaitHandle.WaitOne();
-            if (build.IsCompletedSuccessfully) _singleSamplePipelines = build.Result;
-            else SdlVulkanLog.Logger.SingleSamplePipelinesFailed(build.Exception?.GetBaseException().Message);
-        }
-        _singleSamplePipelines?.Dispose();
-        _pipelines = _mainPipelines = _singleSamplePipelines = null;
-        _singleSamplePipelinesBuild = null;
+        _mainPipelines.Dispose(LogSingleSampleFailed);
+        _mainPipelinesNoDepth.Dispose(LogSingleSampleFailed);
+        _singleSamplePipelines.Dispose(LogSingleSampleFailed);
+        _singleSamplePipelinesNoDepth.Dispose(LogSingleSampleFailed);
+        _pipelines = _savedLayerPipelines = _savedThumbnailPipelines = null;
     }
 
     /// <inheritdoc/>

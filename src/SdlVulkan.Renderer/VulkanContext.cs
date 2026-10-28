@@ -117,6 +117,10 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public VkExtent3D MinImageTransferGranularity => _dev.MinImageTransferGranularity;
     public VkCommandPool CommandPool => _dev.CommandPool;
     public VkRenderPass RenderPass => _dev.RenderPass;
+
+    // The depth-less variants of the main passes, for the pipeline sets of a target that has no depth.
+    internal VkRenderPass RenderPassNoDepth => _dev.RenderPassNoDepth;
+    internal VkRenderPass SingleSampleRenderPassNoDepth => _dev.SingleSampleRenderPassNoDepth;
     public VkDescriptorPool DescriptorPool => _dev.DescriptorPool;
 
     /// <summary>The one linear/clamp sampler every <see cref="VkTexture"/> binds — see
