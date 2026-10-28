@@ -250,9 +250,9 @@ public sealed class MeshRegionDepthTests(OffscreenGpuFixture gpu)
         }
 
         ctx.ResizeOffscreen(Size, Size);
-        // An offscreen target starts without depth; the mesh in the layer is drawn on the first frame only
-        // if the context was asked for it up front (the lazy path is OffscreenDepthShapeTests').
-        ctx.RequireMeshDepth();
+        // Every target starts without depth; the mesh in the layer is drawn on the first frame only if the
+        // context was asked for it up front (the lazy path is OffscreenDepthShapeTests').
+        ctx.RequireMeshDepth(MeshDepthTargets.Main | MeshDepthTargets.CachedLayer);
         using var renderer = new VkRenderer(ctx, Size, Size);
         renderer.EnsureCachedLayerTargets(Size, Size).ShouldBeTrue();
 
@@ -335,7 +335,7 @@ public sealed class MeshRegionDepthTests(OffscreenGpuFixture gpu)
 
     private static Action ValidatedSequence(VulkanContext ctx) => () =>
     {
-        ctx.RequireMeshDepth();
+        ctx.RequireMeshDepth(MeshDepthTargets.Main | MeshDepthTargets.CachedLayer);
         using var renderer = new VkRenderer(ctx, Size, Size);
         renderer.EnsureCachedLayerTargets(Size, Size).ShouldBeTrue();
         renderer.OnPreRenderPass += _ =>

@@ -15,7 +15,7 @@ namespace SdlVulkan.Renderer;
 /// use for.</para>
 /// <para>The one thing that makes it different from every other pipeline here is
 /// <c>depthTestEnable</c>. The 2D pipelines carry a depth-stencil state too — a pass with a depth
-/// attachment requires one — with the test switched off, so painter's order goes on deciding what
+/// attachment requires one (and one without ignores it) — with the test switched off, so painter's order goes on deciding what
 /// covers what among them, and a 2D draw after a mesh paints over it as it would over anything.</para>
 /// </remarks>
 public sealed unsafe class VkMeshPipeline : IDisposable
@@ -40,7 +40,8 @@ public sealed unsafe class VkMeshPipeline : IDisposable
 
     /// <summary>
     /// Create the pipeline for <paramref name="renderPass"/> at <paramref name="msaaSamples"/> — the
-    /// device's shared pass and sample count, which every pass in this renderer is compatible with.
+    /// device's shared pass and sample count, which every pass on the depth shape is compatible with. Only
+    /// that shape: a mesh tests depth, so there is no such pipeline for a pass without the attachment.
     /// </summary>
     public static VkMeshPipeline Create(VkDeviceApi deviceApi, VkRenderPass renderPass, VkSampleCountFlags msaaSamples)
     {

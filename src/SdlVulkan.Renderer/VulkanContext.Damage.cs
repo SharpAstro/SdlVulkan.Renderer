@@ -26,7 +26,9 @@ public sealed unsafe partial class VulkanContext
 {
     // Same attachments, samples and subpass refs as the swapchain pass -- so the pre-baked pipelines
     // stay render-pass compatible -- differing only in loading the previous colour instead of clearing
-    // it. Depth is cleared on this pass as on every other: it is never preserved across frames.
+    // it. Depth is cleared on this pass as on every other: it is never preserved across frames. It is built
+    // on the same shape as the clearing pass it pairs with (with depth or without, _mainHasDepth), so it
+    // is rebuilt with the framebuffers when the target changes shape.
     private VkRenderPass _loadRenderPass;
 
     private readonly SwapchainDamage _damage = new SwapchainDamage();
@@ -102,10 +104,11 @@ public sealed unsafe partial class VulkanContext
 
         var region = ClampToSwapchain(dx, dy, dw, dh);
 
-        // The colour entry is ignored (loadOp Load), but the depth attachment is cleared on this pass
-        // like every other, and a clear value must be supplied for every attachment index up to it.
+        // The colour entry is ignored (loadOp Load), but a depth attachment, when the shape has one, is
+        // cleared on this pass like every other, and a clear value must be supplied for every attachment
+        // index up to it.
         Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
-        FillClearValues(clears, clearR, clearG, clearB, clearA);
+        var clearCount = FillClearValues(clears, clearR, clearG, clearB, clearA, _mainHasDepth);
 
         fixed (VkClearValue* pClears = clears)
         {
@@ -114,7 +117,7 @@ public sealed unsafe partial class VulkanContext
                 renderPass = loadPass,
                 framebuffer = single ? _singleSampleFramebuffers[idx] : _framebuffers[idx],
                 renderArea = region,
-                clearValueCount = ClearValueCount,
+                clearValueCount = (uint)clearCount,
                 pClearValues = pClears
             };
             DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
@@ -167,7 +170,7 @@ public sealed unsafe partial class VulkanContext
         // VulkanDevice.FillSubpassDependencies for every pass, not widened here (tried, and validation
         // answered with VUID-VkRenderPassBeginInfo-renderPass-00904 on every partial frame).
         return VulkanDevice.CreateCompatibleRenderPass(DeviceApi, format, DepthFormat, MsaaSamples,
-            VkAttachmentLoadOp.Load, _dev.ColorFinalLayout, _dev.ColorFinalLayout);
+            VkAttachmentLoadOp.Load, _dev.ColorFinalLayout, _dev.ColorFinalLayout, withDepth: _mainHasDepth);
     }
 
     private void CleanupLoadRenderPass()

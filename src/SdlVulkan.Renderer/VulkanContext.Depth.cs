@@ -3,10 +3,37 @@ using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer;
 
+/// <summary>The render targets that can carry a depth image for <see cref="VkRenderer.BeginMeshRegion"/>:
+/// see <see cref="VulkanContext.RequireMeshDepth"/>.</summary>
+[Flags]
+public enum MeshDepthTargets
+{
+    None = 0,
+    /// <summary>The window's swapchain, or the offscreen target.</summary>
+    Main = 1,
+    /// <summary>The cached-layer slots (<see cref="VkRenderer.BeginCachedLayer"/>).</summary>
+    CachedLayer = 2,
+    /// <summary>The thumbnail capture target (<see cref="VkRenderer.BeginThumbnailCapture"/>).</summary>
+    Thumbnail = 4,
+    All = Main | CachedLayer | Thumbnail,
+}
+
 // The depth attachment a framebuffer in this renderer carries when its target may draw a mesh, and the
 // helpers that keep the framebuffers and clear values in step with VulkanDevice.CreateCompatibleRenderPass's
-// attachment order -- on either of its two shapes, with depth and without (a target that never opens a mesh
-// region has no depth image at all: the offscreen target starts that way, VulkanContext.Offscreen.cs).
+// attachment order -- on either of its two shapes, with depth and without.
+//
+// EVERY target starts without a depth image, on the depth-less shape: the swapchain's framebuffers (and the
+// damage load pass and single-sample pass that pair with them), the offscreen target, each cached-layer slot
+// and the thumbnail capture. Depth is only for VkRenderer.BeginMeshRegion/DrawMesh, and where the device has
+// no lazily allocated memory (a desktop GPU, lavapipe) the image costs as much as the multisample colour one,
+// 16 bytes a pixel at 4x MSAA (#146). A target gets its depth image once something asks for it, per target:
+//   * up front, RequireMeshDepth(targets), so the first frame draws its meshes; or
+//   * lazily, a BeginMeshRegion on a depth-less pass returns false, draws nothing and makes the request.
+// The request lands where no frame is being recorded against the objects it replaces: the next BeginFrame
+// (window) / BeginOffscreenFrame for the main target, the next BeginCachedLayerPass for a layer slot, the
+// next BeginThumbnailCapturePass for the thumbnail. From then on the target is on the depth shape for good,
+// across resize and swapchain recreation, and VkRenderer binds the pipeline set matching the shape of the
+// pass it records. The shared depth image rule below is unchanged, it just starts out empty.
 //
 // One depth image per render TARGET, not per pass or per frame: depth is written and tested inside a
 // single pass and never read after it (loadOp Clear, storeOp DontCare), so consecutive passes and
@@ -25,6 +52,54 @@ public sealed unsafe partial class VulkanContext
 {
     /// <summary>The depth format every pass on this device uses. Forwarded from the shared device.</summary>
     public VkFormat DepthFormat => _dev.DepthFormat;
+
+    // Whether the MAIN target's framebuffers (the swapchain's, or the offscreen target's) carry a depth image
+    // and so are on the depth shape, and whether something has asked for it. A request lands at the next
+    // BeginFrame / BeginOffscreenFrame, where no frame is being recorded; until then HasDepth is what the
+    // frame in hand was recorded with.
+    private bool _mainHasDepth;
+    private bool _mainWantsDepth;
+    // The same pair for the cached layer's slots (each slot flips on its own turn, _layerHasDepth) and the
+    // thumbnail capture target.
+    private bool _layerWantsDepth;
+    private bool _thumbWantsDepth;
+
+    // Whether the main pass of the NEXT frame is on the depth shape: once the target has asked for depth.
+    // What a renderer builds its first pipeline set for.
+    internal bool MainPassWillHaveDepth => _mainWantsDepth;
+
+    // Whether the main pass of the frame begun is on the depth shape, so which pipeline set it draws with.
+    internal bool MainPassHasDepth => _mainHasDepth;
+
+    /// <summary>
+    /// Whether the main target (the swapchain, or the offscreen target) carries a depth image, which is what
+    /// lets a mesh region draw on it. False until <see cref="RequireMeshDepth"/> has been honoured by a
+    /// <see cref="BeginFrame"/> / <see cref="BeginOffscreenFrame"/>.
+    /// </summary>
+    public bool MainTargetHasDepth => _mainHasDepth;
+
+    /// <summary>
+    /// Asks for depth images on the given targets so that <see cref="VkRenderer.BeginMeshRegion"/> draws on
+    /// them: the main target (<see cref="MeshDepthTargets.Main"/>, the default), the cached-layer slots and
+    /// the thumbnail capture. Meshes are the only thing depth is for; a target that never draws one should
+    /// not be named here, and does not pay for the image (16 bytes a pixel at 4x MSAA on a device without
+    /// lazily allocated memory). A consumer that cannot say in advance need not call it at all: a
+    /// <see cref="VkRenderer.BeginMeshRegion"/> on a depth-less pass returns false, draws nothing and makes
+    /// this request for that target itself, so the next frame (next layer / capture pass) has depth. Calling
+    /// it up front is what makes the first frame draw. Once made the request stands, across a resize or a
+    /// swapchain recreation too.
+    /// </summary>
+    public void RequireMeshDepth(MeshDepthTargets targets = MeshDepthTargets.Main)
+    {
+        if ((targets & MeshDepthTargets.Main) != 0) _mainWantsDepth = true;
+        if ((targets & MeshDepthTargets.CachedLayer) != 0) _layerWantsDepth = true;
+        if ((targets & MeshDepthTargets.Thumbnail) != 0) _thumbWantsDepth = true;
+    }
+
+    // The main pass's render passes, by the shape the target has.
+    private VkRenderPass MainRenderPass => _mainHasDepth ? _dev.RenderPass : _dev.RenderPassNoDepth;
+    private VkRenderPass MainSingleSampleRenderPass
+        => _mainHasDepth ? _dev.SingleSampleRenderPass : _dev.SingleSampleRenderPassNoDepth;
 
     /// <summary>
     /// What the depth attachment is cleared to: the far plane, which pairs with a Less depth test — a

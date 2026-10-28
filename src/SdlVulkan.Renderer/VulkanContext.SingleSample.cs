@@ -18,8 +18,8 @@ namespace SdlVulkan.Renderer;
 //
 // What it costs. One more render pass on the device (VulkanDevice.SingleSampleRenderPass), a framebuffer
 // per swapchain image over the images the multisampled pass already resolves into, a single-sample depth
-// image (not on an offscreen target that has none: it takes the depth-less variant of this pass,
-// VulkanDevice.SingleSampleRenderPassNoDepth, like its multisampled pass), and a second pipeline set in
+// image (only on a target that has asked for depth; one that has not takes the depth-less variant of this
+// pass, VulkanDevice.SingleSampleRenderPassNoDepth, like its multisampled pass), and a second pipeline set in
 // each VkRenderer, about 50 ms of driver compile built off the render
 // thread (VkRenderer.SingleSampleMainPassReady). The cached-layer and thumbnail passes are untouched:
 // they are recorded before the main pass begins, with the multisampled pipelines.
@@ -47,10 +47,6 @@ public sealed unsafe partial class VulkanContext
     /// is another sample count to choose.</summary>
     public bool SingleSampleMainPassAvailable => _dev.SingleSampleRenderPass != VkRenderPass.Null;
 
-    // The offscreen target's single-sample pass, on the shape its multisampled pass has.
-    private VkRenderPass OffscreenSingleSampleRenderPass
-        => _offscreenHasDepth ? _dev.SingleSampleRenderPass : _dev.SingleSampleRenderPassNoDepth;
-
     /// <summary>Whether the last main pass begun ran at one sample, by request.</summary>
     public bool LastFrameSingleSampled { get; private set; }
 
@@ -58,18 +54,20 @@ public sealed unsafe partial class VulkanContext
     private void CreateSingleSampleSwapchainTargets(VkFormat format, uint width, uint height)
     {
         if (!SingleSampleMainPassAvailable) return;
-        CreateDepthAttachment(width, height, out _singleDepthImage, out _singleDepthMemory,
-            out _singleDepthImageView, VkSampleCountFlags.Count1);
+        if (_mainHasDepth)
+            CreateDepthAttachment(width, height, out _singleDepthImage, out _singleDepthMemory,
+                out _singleDepthImageView, VkSampleCountFlags.Count1);
         _singleSampleFramebuffers = new VkFramebuffer[_swapchainImageViews.Length];
         for (var i = 0; i < _swapchainImageViews.Length; i++)
         {
-            _singleSampleFramebuffers[i] = CreateCompatibleFramebuffer(SingleSampleRenderPass,
+            _singleSampleFramebuffers[i] = CreateCompatibleFramebuffer(MainSingleSampleRenderPass,
                 colorView: _swapchainImageViews[i], depthView: _singleDepthImageView,
                 resolveView: VkImageView.Null, width, height, multisampled: false);
         }
         // Loading the swapchain image is what the multisampled pass cannot do (see CreateLoadRenderPass).
         _singleSampleLoadRenderPass = VulkanDevice.CreateCompatibleRenderPass(DeviceApi, format, DepthFormat,
-            VkSampleCountFlags.Count1, VkAttachmentLoadOp.Load, _dev.ColorFinalLayout, _dev.ColorFinalLayout);
+            VkSampleCountFlags.Count1, VkAttachmentLoadOp.Load, _dev.ColorFinalLayout, _dev.ColorFinalLayout,
+            withDepth: _mainHasDepth);
     }
 
     private void CleanupSingleSampleSwapchainTargets()
@@ -89,10 +87,10 @@ public sealed unsafe partial class VulkanContext
     private void CreateSingleSampleOffscreenTarget(uint width, uint height)
     {
         if (!SingleSampleMainPassAvailable) return;
-        if (_offscreenHasDepth)
+        if (_mainHasDepth)
             CreateDepthAttachment(width, height, out _offscreenSingleDepthImage, out _offscreenSingleDepthMemory,
                 out _offscreenSingleDepthImageView, VkSampleCountFlags.Count1);
-        _offscreenSingleSampleFramebuffer = CreateCompatibleFramebuffer(OffscreenSingleSampleRenderPass,
+        _offscreenSingleSampleFramebuffer = CreateCompatibleFramebuffer(MainSingleSampleRenderPass,
             colorView: _offscreenImageView, depthView: _offscreenSingleDepthImageView,
             resolveView: VkImageView.Null, width, height, multisampled: false);
     }

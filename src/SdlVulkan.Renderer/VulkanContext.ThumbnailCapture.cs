@@ -19,10 +19,19 @@ namespace SdlVulkan.Renderer;
 // pipelines bind into it unchanged. Only loadOp/storeOp/finalLayout differ (those don't affect
 // render-pass compatibility): the resolve attachment finalizes as TransferSrcOptimal so the copy
 // needs no manual layout barrier.
+//
+// Depth. The target starts without a depth image, on the depth-less pass shape, and takes one on request
+// (RequireMeshDepth(MeshDepthTargets.Thumbnail), or a BeginMeshRegion inside a depth-less capture, which
+// marks it): at the next BeginThumbnailCapturePass it gets a depth image and a framebuffer on the depth
+// pass. A capture that was refused a mesh delivers the picture without it; a consumer that captures meshes
+// asks up front.
 public sealed unsafe partial class VulkanContext
 {
     // Capture target — format matches the swapchain (B8G8R8A8Unorm) for pipeline compatibility.
+    // The pass by shape: the depth-less one the target starts on, and the depth one it moves to.
     private VkRenderPass _thumbRenderPass;
+    private VkRenderPass _thumbRenderPassDepth;
+    private bool _thumbHasDepth;
     private VkImage _thumbResolveImage;          // single-sample copy source (also the MSAA resolve target)
     private VkDeviceMemory _thumbResolveMemory;
     private VkImageView _thumbResolveView;
@@ -76,7 +85,8 @@ public sealed unsafe partial class VulkanContext
 
         _thumbTargetW = maxW;
         _thumbTargetH = maxH;
-        _thumbRenderPass = CreateThumbnailRenderPass(OffscreenFormat, MsaaSamples);
+        _thumbRenderPass = CreateThumbnailRenderPass(OffscreenFormat, MsaaSamples, withDepth: false);
+        _thumbRenderPassDepth = CreateThumbnailRenderPass(OffscreenFormat, MsaaSamples, withDepth: true);
         CreateThumbnailTarget(maxW, maxH);
         CreateThumbnailReadbackBuffer((ulong)maxW * maxH * 4);
         _thumbTargetReady = true;
@@ -148,16 +158,44 @@ public sealed unsafe partial class VulkanContext
             DeviceApi.vkCreateImageView(&msaaViewCI, null, out _thumbMsaaView).CheckResult();
         }
 
-        CreateDepthAttachment(width, height, out _thumbDepthImage, out _thumbDepthMemory, out _thumbDepthView);
+        // Depth only if the capture has already asked for it: a target that never draws a mesh has none.
+        _thumbHasDepth = _thumbWantsDepth;
+        if (_thumbHasDepth)
+            CreateDepthAttachment(width, height, out _thumbDepthImage, out _thumbDepthMemory, out _thumbDepthView);
+        CreateThumbnailFramebuffer(width, height);
+    }
 
-        // Framebuffer wired to the capture render pass.
+    // Framebuffer wired to the capture render pass of the shape the target has.
+    private void CreateThumbnailFramebuffer(uint width, uint height)
+    {
         var msaa = MsaaSamples != VkSampleCountFlags.Count1;
-        _thumbFramebuffer = CreateCompatibleFramebuffer(_thumbRenderPass,
+        _thumbFramebuffer = CreateCompatibleFramebuffer(_thumbHasDepth ? _thumbRenderPassDepth : _thumbRenderPass,
             colorView: msaa ? _thumbMsaaView : _thumbResolveView,
             depthView: _thumbDepthView,
             resolveView: _thumbResolveView,
             width, height);
     }
+
+    // Takes the target to the depth shape: the allocation a mesh asked for. Runs from
+    // BeginThumbnailCapturePass, when no capture is in flight; the framebuffer replaced may already be
+    // bound in the frame being recorded, so it goes through DeferDestroy.
+    private void AddThumbnailDepth()
+    {
+        var old = _thumbFramebuffer;
+        CreateDepthAttachment(_thumbTargetW, _thumbTargetH, out _thumbDepthImage, out _thumbDepthMemory, out _thumbDepthView);
+        _thumbHasDepth = true;
+        CreateThumbnailFramebuffer(_thumbTargetW, _thumbTargetH);
+        DeferDestroy(() => DeviceApi.vkDestroyFramebuffer(old));
+    }
+
+    /// <summary>
+    /// Whether the capture pass begun last by <see cref="BeginThumbnailCapturePass"/> carries a depth
+    /// attachment, which is what lets a mesh region draw in it.
+    /// </summary>
+    internal bool ThumbnailPassHasDepth => _thumbHasDepth;
+
+    // The depth image handle, for the tests: Null while the target has none.
+    internal VkImage ThumbnailDepthImage => _thumbDepthImage;
 
     private void CreateThumbnailReadbackBuffer(ulong size)
     {
@@ -186,9 +224,9 @@ public sealed unsafe partial class VulkanContext
     // but the pair must be declared IDENTICALLY everywhere or the pre-baked pipelines this pass borrows
     // are not render-pass compatible with it. See VulkanDevice.FillSubpassDependencies; this pass having
     // two dependencies while the swapchain pass had one is precisely what the validation layer flagged.
-    private VkRenderPass CreateThumbnailRenderPass(VkFormat format, VkSampleCountFlags msaaSamples)
+    private VkRenderPass CreateThumbnailRenderPass(VkFormat format, VkSampleCountFlags msaaSamples, bool withDepth)
         => VulkanDevice.CreateCompatibleRenderPass(DeviceApi, format, DepthFormat, msaaSamples,
-            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.TransferSrcOptimal);
+            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.TransferSrcOptimal, withDepth);
 
     /// <summary>
     /// Begins the thumbnail capture render pass into the (w,h) top-left sub-rect of the capture
@@ -205,17 +243,20 @@ public sealed unsafe partial class VulkanContext
         _thumbCapW = w;
         _thumbCapH = h;
 
+        // A mesh asked for depth since the last capture: the target changes shape here, before a pass begins.
+        if (_thumbWantsDepth && !_thumbHasDepth) AddThumbnailDepth();
+
         Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
-        FillClearValues(clears, clearColor.Red / 255f, clearColor.Green / 255f,
-            clearColor.Blue / 255f, clearColor.Alpha / 255f);
+        var clearCount = FillClearValues(clears, clearColor.Red / 255f, clearColor.Green / 255f,
+            clearColor.Blue / 255f, clearColor.Alpha / 255f, _thumbHasDepth);
         fixed (VkClearValue* pClears = clears)
         {
             VkRenderPassBeginInfo rpBI = new()
             {
-                renderPass = _thumbRenderPass,
+                renderPass = _thumbHasDepth ? _thumbRenderPassDepth : _thumbRenderPass,
                 framebuffer = _thumbFramebuffer,
                 renderArea = new VkRect2D(0, 0, w, h),
-                clearValueCount = ClearValueCount,
+                clearValueCount = (uint)clearCount,
                 pClearValues = pClears
             };
             DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
@@ -326,6 +367,7 @@ public sealed unsafe partial class VulkanContext
         if (_thumbReadbackBuffer != VkBuffer.Null) DeviceApi.vkDestroyBuffer(_thumbReadbackBuffer);
         if (_thumbReadbackMemory != VkDeviceMemory.Null) DeviceApi.vkFreeMemory(_thumbReadbackMemory);
         if (_thumbRenderPass != VkRenderPass.Null) DeviceApi.vkDestroyRenderPass(_thumbRenderPass);
+        if (_thumbRenderPassDepth != VkRenderPass.Null) DeviceApi.vkDestroyRenderPass(_thumbRenderPassDepth);
 
         _thumbFramebuffer = VkFramebuffer.Null;
         _thumbResolveView = VkImageView.Null;
@@ -337,6 +379,8 @@ public sealed unsafe partial class VulkanContext
         _thumbReadbackBuffer = VkBuffer.Null;
         _thumbReadbackMemory = VkDeviceMemory.Null;
         _thumbRenderPass = VkRenderPass.Null;
+        _thumbRenderPassDepth = VkRenderPass.Null;
+        _thumbHasDepth = false;
         _thumbTargetReady = false;
         _thumbPending = false;
         _thumbReady = false;

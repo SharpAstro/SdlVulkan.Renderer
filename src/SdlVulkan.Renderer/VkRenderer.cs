@@ -12,18 +12,20 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // AND its shape (a pass with a depth attachment or without, see VulkanDevice.CreateCompatibleRenderPass),
     // so there is a set per pass the renderer draws in: the main pass at the device's own sample count, or
     // inside a main pass the consumer asked to run single-sampled (SingleSampleMainPass) at one, each on the
-    // depth shape or the depth-less one. A window, a cached layer and a thumbnail capture are on the depth
-    // shape; an offscreen target starts on the depth-less one until a mesh asks for depth.
+    // depth shape or the depth-less one. Every target (window, offscreen, cached layer, thumbnail capture)
+    // starts on the depth-less shape and moves to the depth one when a mesh asks for it, each on its own, so
+    // the pass being recorded says which set it draws with (BeginMainPassPipelines, BeginCachedLayer,
+    // BeginThumbnailCapture).
     private VkPipelineSet? _pipelines;
     private readonly PipelineSlot _mainPipelines = new();
     private readonly PipelineSlot _mainPipelinesNoDepth = new();
     private readonly PipelineSlot _singleSamplePipelines = new();
     private readonly PipelineSlot _singleSamplePipelinesNoDepth = new();
-    // Whether the main pass being recorded is on the depth shape; set as it begins, since an offscreen
-    // target's shape can change between frames.
-    private bool _mainPassHasDepth = true;
-    // The set that was current when a cached layer or a thumbnail capture opened: those passes are on the
-    // depth shape whatever the main pass is, so they draw with the depth set and hand the other back.
+    // Whether the main pass being recorded is on the depth shape; set as it begins, since a target's shape
+    // can change between frames.
+    private bool _mainPassHasDepth;
+    // The set that was current when a cached layer or a thumbnail capture opened: those passes have a shape
+    // of their own, whatever the main pass is, so they draw with the set matching it and hand this one back.
     private VkPipelineSet? _savedLayerPipelines;
     private VkPipelineSet? _savedThumbnailPipelines;
 
@@ -269,23 +271,55 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // What a pass is on when no main pass is open: the set of the shape the target has.
     private void RestPipelines() => _pipelines = MainSlot(Surface.MainPassHasDepth).Poll(LogSingleSampleFailed) ?? _pipelines;
 
-    // Whether the pass being recorded can host a mesh: the cached layer and the thumbnail capture are on
-    // the depth shape, the main pass is if its target has depth.
-    private bool PassHasDepth => _inCachedLayer || _inThumbnailCapture || _mainPassHasDepth;
+    /// <summary>
+    /// Whether the pass being recorded has a depth attachment, which each target takes only once asked (see
+    /// <see cref="RequireMeshDepth"/>): it can host a mesh region, and it is render-pass compatible with
+    /// pipelines built against <see cref="VulkanContext.RenderPass"/> (true) or
+    /// <see cref="VulkanContext.RenderPassNoDepth"/> (false), never the other. A side-car pipeline binds the one
+    /// that matches, and so is created against both unless it only ever draws where it knows the answer.
+    /// </summary>
+    public bool CurrentPassHasDepth => _inCachedLayer ? Surface.CachedLayerPassHasDepth
+        : _inThumbnailCapture ? Surface.ThumbnailPassHasDepth
+        : _mainPassHasDepth;
+
+    private bool PassHasDepth => CurrentPassHasDepth;
+
+    // The target the pass being recorded draws into, for the request a refused mesh region makes.
+    private MeshDepthTargets PassTarget => _inCachedLayer ? MeshDepthTargets.CachedLayer
+        : _inThumbnailCapture ? MeshDepthTargets.Thumbnail
+        : MeshDepthTargets.Main;
+
+    // Set by a BeginMeshRegion refused for want of depth, taken by the event loop (TakeMeshDepthRedraw).
+    private bool _meshDepthRefused;
 
     /// <summary>
-    /// Asks for the target's main pass to carry depth from the next frame, so <see cref="BeginMeshRegion"/>
-    /// draws in it, and has the depth pipelines ready by then (built off the render thread). An offscreen
-    /// target starts without depth (see <see cref="VulkanContext.RequireMeshDepth"/>); a consumer that knows
-    /// it will draw a mesh calls this before the first frame, so that frame draws it. A frame that
-    /// reaches <see cref="BeginMeshRegion"/> without it makes the same request itself and loses only that
-    /// frame's mesh. No effect on a window, whose passes always carry depth.
+    /// Asks for the given targets (the main pass by default) to carry depth from the next frame, so
+    /// <see cref="BeginMeshRegion"/> draws in them, and has the depth pipelines ready by then (built off the
+    /// render thread). Every target starts without depth (see <see cref="VulkanContext.RequireMeshDepth"/>);
+    /// a consumer that knows it will draw a mesh, and where, calls this before the first frame so that frame
+    /// draws it. A frame that reaches <see cref="BeginMeshRegion"/> without it makes the same request itself,
+    /// for the target it is in, and loses only that frame's mesh.
     /// </summary>
-    public void RequireMeshDepth()
+    public void RequireMeshDepth(MeshDepthTargets targets = MeshDepthTargets.Main)
     {
-        Surface.RequireMeshDepth();
+        Surface.RequireMeshDepth(targets);
+        // The cached layer and the thumbnail capture draw with the main set of the depth shape too.
         MainSlot(true).Start(() => CreateMainPipelines(true));
-        StartSingleSamplePipelines(true);
+        if ((targets & MeshDepthTargets.Main) != 0) StartSingleSamplePipelines(true);
+    }
+
+    /// <summary>
+    /// True once after a <see cref="BeginMeshRegion"/> was refused for want of a depth image: the target now
+    /// has one coming, but the frame that was refused drew without its mesh, so another is due. The event
+    /// loop asks after each frame and redraws; a consumer driving frames itself does the same. What a cached
+    /// layer or thumbnail capture was refused stays missing until the consumer renders it again, which is why
+    /// a consumer that draws meshes into one asks up front (<see cref="RequireMeshDepth"/>).
+    /// </summary>
+    public bool TakeMeshDepthRedraw()
+    {
+        var refused = _meshDepthRefused;
+        _meshDepthRefused = false;
+        return refused;
     }
     internal VkFontAtlas? FontAtlas => _fontAtlas;
     public ManagedFontRasterizer? GlyphRasterizer => _fontAtlas?.Rasterizer;
@@ -458,6 +492,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _currentCmd = Surface.BeginFrame(out var resized);
         if (resized || _currentCmd == VkCommandBuffer.Null)
             return false;
+        // The context has taken the swapchain to the shape it is to have this frame.
+        _pipelines = MainPipelinesFor(Surface.MainPassHasDepth);
 
         // A scissor lives on the command buffer, and this one is fresh, so the region is already gone
         // whatever the stack says. Drop it to match — otherwise a widget that threw between its push
@@ -585,11 +621,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public bool BeginCachedLayer(uint w, uint h, DIR.Lib.RGBAColor32 clearColor)
     {
         if (_currentCmd == VkCommandBuffer.Null || _inCachedLayer) return false;
-        // The layer's pass is on the depth shape whatever the main pass is, and so draws with that set.
-        var depthPipelines = MainPipelinesFor(true);
         if (!Surface.BeginCachedLayerPass(_currentCmd, w, h, clearColor)) return false;
+        // The layer's pass has a shape of its own, whatever the main pass is, and draws with the set that
+        // matches it (a slot takes depth as its turn comes, once a mesh has asked).
         _savedLayerPipelines = _pipelines;
-        _pipelines = depthPipelines;
+        _pipelines = MainPipelinesFor(Surface.CachedLayerPassHasDepth);
 
         _savedLayerWidth = _width;
         _savedLayerHeight = _height;
@@ -647,8 +683,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // and before what goes over it, antialiased by the pass's MSAA and clipped by the caller's clip,
     // with no intermediate target. What makes it different from the 2D draws is that its triangles
     // sort themselves through the pass's depth attachment -- which is why a pass that hosts one carries one
-    // (see VulkanContext.Depth.cs; an offscreen target takes it when asked, RequireMeshDepth), and why a
-    // region has to be opened first: the depth under the model
+    // (see VulkanContext.Depth.cs; every target starts without and takes it when asked, RequireMeshDepth, or
+    // on a first refused region), and why a region has to be opened first: the depth under the model
     // is cleared so its triangles are tested only against each other, never against a model drawn
     // earlier in the same frame.
 
@@ -660,11 +696,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <see cref="EndMeshRegion"/>. Returns false and opens nothing when no pass is being recorded, a
     /// region is already open, or the rect misses the area this pass may paint — the caller then draws
     /// no meshes, and whatever was under them stays.
-    /// <para>Also false, with a side effect, on an offscreen target that has no depth image yet (it starts
-    /// without, see <see cref="VulkanContext.RequireMeshDepth"/>): nothing is drawn this frame, the target
-    /// is marked as wanting depth and the next <see cref="BeginOffscreenFrame"/> gives it some. A consumer
-    /// that draws a mesh every frame can call <see cref="RequireMeshDepth"/> before its first one to draw
-    /// from the start.</para>
+    /// <para>Also false, with a side effect, in a pass whose target has no depth image yet (every target
+    /// starts without, see <see cref="VulkanContext.RequireMeshDepth"/>): nothing is drawn this frame, the
+    /// target is marked as wanting depth and the next frame (<see cref="BeginFrame"/>,
+    /// <see cref="BeginOffscreenFrame"/>, or the next cached-layer / capture pass) gives it some.
+    /// <see cref="TakeMeshDepthRedraw"/> reports the refusal, and <c>SdlEventLoop</c> redraws on it. A
+    /// consumer that draws a mesh every frame can call <see cref="RequireMeshDepth"/> before its first one
+    /// to draw from the start.</para>
     /// </summary>
     /// <remarks>
     /// The clear is why this is a bracket rather than a flag on <see cref="DrawMesh"/>. Depth is
@@ -678,9 +716,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         if (_currentCmd == VkCommandBuffer.Null || _pipelines is null || _inMeshRegion) return false;
         if (!PassHasDepth)
         {
-            // No depth image under this pass, so nothing to test against: ask for one, and draw the mesh
-            // from the next frame.
-            RequireMeshDepth();
+            // No depth image under this pass, so nothing to test against: ask for one for this pass's
+            // target, and draw the mesh from the next frame, which is asked for.
+            RequireMeshDepth(PassTarget);
+            _meshDepthRefused = true;
             return false;
         }
         if (!(w > 0f) || !(h > 0f)) return false;
@@ -821,11 +860,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     public bool BeginThumbnailCapture(uint w, uint h, DIR.Lib.RGBAColor32 clearColor)
     {
         if (_currentCmd == VkCommandBuffer.Null || _inThumbnailCapture) return false;
-        // As the cached layer: the capture's pass is on the depth shape, so it draws with that set.
-        var depthPipelines = MainPipelinesFor(true);
         if (!Surface.BeginThumbnailCapturePass(_currentCmd, w, h, clearColor)) return false;
+        // As the cached layer: the capture's pass has a shape of its own and draws with the set matching it.
         _savedThumbnailPipelines = _pipelines;
-        _pipelines = depthPipelines;
+        _pipelines = MainPipelinesFor(Surface.ThumbnailPassHasDepth);
 
         _savedWidth = _width;
         _savedHeight = _height;

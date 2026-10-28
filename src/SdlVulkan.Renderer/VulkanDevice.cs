@@ -1444,9 +1444,11 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// Creates a render pass in the shape every pass in this renderer has, so that the pre-baked
     /// pipelines (<see cref="VkPipelineSet"/>, created against the device's <see cref="RenderPass"/>)
     /// bind into all of them: the swapchain pass, the damage-preserving load pass, the offscreen
-    /// pass, the cached layer and the thumbnail capture. The shape has a depth-less variant
-    /// (<paramref name="withDepth"/> false, <see cref="RenderPassNoDepth"/>) for a target that never
-    /// draws a mesh, with a pipeline set of its own.
+    /// pass, the cached layer and the thumbnail capture. The shape has two variants, with depth and
+    /// without (<paramref name="withDepth"/>, <see cref="RenderPassNoDepth"/>), each with a pipeline set of
+    /// its own. Every target starts on the depth-less one, which is what a target that never draws a mesh
+    /// stays on, and takes the depth one once a mesh region asks for it (see
+    /// <see cref="VulkanContext.RequireMeshDepth"/>).
     /// </summary>
     /// <remarks>
     /// <para>Render-pass compatibility is per attachment reference — format and sample count — plus
@@ -1469,7 +1471,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// cleared at pass start, then again over each region a consumer draws meshes into
     /// (<see cref="VkRenderer.BeginMeshRegion"/>), never stored, and never sampled; with
     /// <c>TransientAttachment</c> usage a tiler need not allocate it at all, and a target that never
-    /// opens a region need not have one (the offscreen target starts without: see
+    /// opens a region has none (every target starts without: see
     /// <see cref="VulkanContext.RequireMeshDepth"/>).</para>
     /// <para>The MSAA colour attachment is transient too (cleared, resolved, not stored), which is why
     /// <paramref name="colorLoadOp"/> can only apply to it when there is no resolve: a multisample
