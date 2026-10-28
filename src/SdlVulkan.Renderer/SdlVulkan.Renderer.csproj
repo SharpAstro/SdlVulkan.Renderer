@@ -26,6 +26,22 @@
     <DebugType>embedded</DebugType>
   </PropertyGroup>
 
+  <!--
+    Opt-in Debug twin (-p:DebugTwin=true): the same library packed from a Debug build as SdlVulkan.Renderer.Debug,
+    at the same version as SdlVulkan.Renderer, depending on DIR.Lib.Debug rather than DIR.Lib. A published
+    SdlVulkan.Renderer is built Release, so every #if DEBUG type in it (DebugInspector, DebugInspectorOptions,
+    GpuFaultInjection) is absent and a Debug consumer cannot compile against it. A consumer switches with a
+    Configuration-conditioned PackageReference: SdlVulkan.Renderer when not Debug, SdlVulkan.Renderer.Debug when
+    Debug. Visual Studio needs a restore after switching configuration.
+  -->
+  <PropertyGroup Condition="'$(DebugTwin)' == 'true'">
+    <PackageID>SdlVulkan.Renderer.Debug</PackageID>
+    <Description>The Debug build of SdlVulkan.Renderer, for Debug consumers that need the debug inspector and the #if DEBUG types (DebugInspector, DebugInspectorOptions, GpuFaultInjection), which the Release SdlVulkan.Renderer package does not contain. Same version as SdlVulkan.Renderer. Reference SdlVulkan.Renderer when the configuration is not Debug and SdlVulkan.Renderer.Debug when it is, with a Configuration-conditioned PackageReference; Visual Studio needs a restore after switching configuration.</Description>
+  </PropertyGroup>
+  <Target Name="RequireDebugForTwin" BeforeTargets="Pack;GenerateNuspec;CoreCompile" Condition="'$(DebugTwin)' == 'true' AND '$(Configuration)' != 'Debug'">
+    <Error Text="DebugTwin=true packs SdlVulkan.Renderer.Debug and must be built with -c Debug (Configuration is '$(Configuration)')." />
+  </Target>
+
   <ItemGroup>
     <None Include="../../LICENSE" Pack="true" PackagePath="/" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />
@@ -40,11 +56,14 @@
   <PropertyGroup>
     <UseLocalDirLib Condition="'$(UseLocalDirLib)' == '' AND Exists('..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj')">true</UseLocalDirLib>
   </PropertyGroup>
-  <ItemGroup Condition="'$(UseLocalDirLib)' == 'true'">
+  <!-- Under DebugTwin the sibling ProjectReference is skipped: it would put DIR.Lib in the twin's nuspec,
+       and the twin must depend on DIR.Lib.Debug. -->
+  <ItemGroup Condition="'$(UseLocalDirLib)' == 'true' AND '$(DebugTwin)' != 'true'">
     <ProjectReference Include="..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj" />
   </ItemGroup>
-  <ItemGroup Condition="'$(UseLocalDirLib)' != 'true'">
-    <PackageReference Include="DIR.Lib" />
+  <ItemGroup Condition="'$(UseLocalDirLib)' != 'true' OR '$(DebugTwin)' == 'true'">
+    <PackageReference Include="DIR.Lib" Condition="'$(DebugTwin)' != 'true'" />
+    <PackageReference Include="DIR.Lib.Debug" Condition="'$(DebugTwin)' == 'true'" />
   </ItemGroup>
 
   <!--
