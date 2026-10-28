@@ -68,8 +68,9 @@ public sealed unsafe class VkPipelineSet : IDisposable
     public VkPipeline FlatLightenPipeline { get; }
 
     /// <summary>The depth-tested mesh pipeline, with its own layout (see <see cref="VkMeshPipeline"/>).
-    /// Backs <c>VkRenderer.DrawMesh</c>.</summary>
-    public VkMeshPipeline Mesh { get; }
+    /// Backs <c>VkRenderer.DrawMesh</c>. Null in a set built for a pass without depth, which cannot host
+    /// it.</summary>
+    public VkMeshPipeline? Mesh { get; }
 
     private readonly VkDeviceApi _deviceApi;
 
@@ -80,7 +81,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
         VkPipeline sdf, VkPipeline sdfLarge, VkPipeline roundRect,
         VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten,
-        VkPipeline masked, VkMeshPipeline mesh, VkPipeline ellipseInstanced, VkPipeline sdfInstanced)
+        VkPipeline masked, VkMeshPipeline? mesh, VkPipeline ellipseInstanced, VkPipeline sdfInstanced)
     {
         _deviceApi = deviceApi;
         SdfInstancedPipeline = sdfInstanced;
@@ -107,8 +108,12 @@ public sealed unsafe class VkPipelineSet : IDisposable
     /// The set built against <paramref name="renderPass"/> at <paramref name="samples"/>: what a pipeline's
     /// sample count must match is the pass it is drawn in, so a device that offers a single-sample main pass
     /// beside its multisampled one (<see cref="VulkanContext.SingleSampleRenderPass"/>) needs a set for each.
+    /// The same goes for the shape: a pass without a depth attachment is not render-pass compatible with
+    /// pipelines built against one that has it, so a pass built with <c>withDepth</c> false takes a set
+    /// built with it false, which holds the 2D pipelines only (<see cref="Mesh"/> is null: it tests depth).
     /// </summary>
-    public static VkPipelineSet Create(VulkanContext ctx, VkRenderPass renderPass, VkSampleCountFlags samples)
+    public static VkPipelineSet Create(VulkanContext ctx, VkRenderPass renderPass, VkSampleCountFlags samples,
+        bool withDepth = true)
     {
         var deviceApi = ctx.DeviceApi;
 
@@ -245,8 +250,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
                 &texBinding, 1, texAttrs, 2, msaaSamples: msaa);
 
             // The one depth-TESTING pipeline, against the same pass: see VkMeshPipeline for why it has
-            // its own layout and so its own class.
-            var mesh = VkMeshPipeline.Create(deviceApi, renderPass, msaa);
+            // its own layout and so its own class. Not on a pass without depth, which has nothing to test.
+            var mesh = withDepth ? VkMeshPipeline.Create(deviceApi, renderPass, msaa) : null;
 
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, sdfLarge, roundRect,
                 flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced, sdfInstanced);
@@ -292,7 +297,7 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(SdfPipeline);
         _deviceApi.vkDestroyPipeline(SdfLargePipeline);
         _deviceApi.vkDestroyPipeline(SdfInstancedPipeline);
-        Mesh.Dispose();
+        Mesh?.Dispose();
     }
 
     private static VkPipeline CreatePipeline(
@@ -364,9 +369,10 @@ public sealed unsafe class VkPipelineSet : IDisposable
             pAttachments = blendAttachments
         };
 
-        // Depth OFF, and stated: the render pass has a depth attachment (for VkMeshPipeline, which
+        // Depth OFF, and stated: the render pass may have a depth attachment (for VkMeshPipeline, which
         // draws inline in the same pass), and a pipeline created against such a pass must supply a
-        // depth-stencil state. 2D drawing is painter's-order — the sequence of draws IS the occlusion —
+        // depth-stencil state (against one without, it is ignored, so the two shapes share this call).
+        // 2D drawing is painter's-order — the sequence of draws IS the occlusion —
         // so nothing here tests or writes depth, and a fill drawn after a mesh paints over it.
         VkPipelineDepthStencilStateCreateInfo depthStencil = new()
         {

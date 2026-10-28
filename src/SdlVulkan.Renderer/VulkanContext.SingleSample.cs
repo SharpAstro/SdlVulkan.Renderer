@@ -18,7 +18,9 @@ namespace SdlVulkan.Renderer;
 //
 // What it costs. One more render pass on the device (VulkanDevice.SingleSampleRenderPass), a framebuffer
 // per swapchain image over the images the multisampled pass already resolves into, a single-sample depth
-// image, and a second pipeline set in each VkRenderer, about 50 ms of driver compile built off the render
+// image (not on an offscreen target that has none: it takes the depth-less variant of this pass,
+// VulkanDevice.SingleSampleRenderPassNoDepth, like its multisampled pass), and a second pipeline set in
+// each VkRenderer, about 50 ms of driver compile built off the render
 // thread (VkRenderer.SingleSampleMainPassReady). The cached-layer and thumbnail passes are untouched:
 // they are recorded before the main pass begins, with the multisampled pipelines.
 //
@@ -44,6 +46,10 @@ public sealed unsafe partial class VulkanContext
     /// <summary>Whether a frame can ask for a single-sample main pass: the device multisamples, so there
     /// is another sample count to choose.</summary>
     public bool SingleSampleMainPassAvailable => _dev.SingleSampleRenderPass != VkRenderPass.Null;
+
+    // The offscreen target's single-sample pass, on the shape its multisampled pass has.
+    private VkRenderPass OffscreenSingleSampleRenderPass
+        => _offscreenHasDepth ? _dev.SingleSampleRenderPass : _dev.SingleSampleRenderPassNoDepth;
 
     /// <summary>Whether the last main pass begun ran at one sample, by request.</summary>
     public bool LastFrameSingleSampled { get; private set; }
@@ -79,13 +85,14 @@ public sealed unsafe partial class VulkanContext
         }
     }
 
-    // After the offscreen target's own framebuffer, from CreateOffscreenTarget.
+    // After the offscreen target's own framebuffer, from CreateOffscreenFramebuffers; on its shape.
     private void CreateSingleSampleOffscreenTarget(uint width, uint height)
     {
         if (!SingleSampleMainPassAvailable) return;
-        CreateDepthAttachment(width, height, out _offscreenSingleDepthImage, out _offscreenSingleDepthMemory,
-            out _offscreenSingleDepthImageView, VkSampleCountFlags.Count1);
-        _offscreenSingleSampleFramebuffer = CreateCompatibleFramebuffer(SingleSampleRenderPass,
+        if (_offscreenHasDepth)
+            CreateDepthAttachment(width, height, out _offscreenSingleDepthImage, out _offscreenSingleDepthMemory,
+                out _offscreenSingleDepthImageView, VkSampleCountFlags.Count1);
+        _offscreenSingleSampleFramebuffer = CreateCompatibleFramebuffer(OffscreenSingleSampleRenderPass,
             colorView: _offscreenImageView, depthView: _offscreenSingleDepthImageView,
             resolveView: VkImageView.Null, width, height, multisampled: false);
     }

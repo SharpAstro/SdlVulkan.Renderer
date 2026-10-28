@@ -55,6 +55,18 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// </summary>
     public VkRenderPass SingleSampleRenderPass { get; }
 
+    /// <summary>
+    /// <see cref="RenderPass"/> without the depth attachment: colour and, under MSAA, resolve. The pass of
+    /// a target that has never opened a mesh region (<see cref="VulkanContext.RequireMeshDepth"/>), which
+    /// then allocates no depth image. Pipelines built against it (<see cref="VkPipelineSet"/> with
+    /// <c>withDepth</c> false) have no mesh pipeline.
+    /// </summary>
+    internal VkRenderPass RenderPassNoDepth { get; }
+
+    /// <summary><see cref="SingleSampleRenderPass"/> without the depth attachment; Null when the device does
+    /// not multisample.</summary>
+    internal VkRenderPass SingleSampleRenderPassNoDepth { get; }
+
     /// <summary>The color format the render pass — and therefore the swapchain images — use. Chosen
     /// from the surface's supported formats on the swapchain path (B8G8R8A8Unorm on desktop for
     /// readback/offscreen byte-order parity; R8G8B8A8Unorm on Android/Mali, which offers no BGRA);
@@ -181,6 +193,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         VkPhysicalDevice physicalDevice, VkDevice device, VkDeviceApi deviceApi,
         VkQueue graphicsQueue, uint graphicsQueueFamily,
         VkCommandPool commandPool, VkRenderPass renderPass, VkRenderPass singleSampleRenderPass,
+        VkRenderPass renderPassNoDepth, VkRenderPass singleSampleRenderPassNoDepth,
         VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
         VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout,
         VkDescriptorSetLayout maskedSetLayout, VkPipelineLayout maskedPipelineLayout,
@@ -198,6 +211,8 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         CommandPool = commandPool;
         RenderPass = renderPass;
         SingleSampleRenderPass = singleSampleRenderPass;
+        RenderPassNoDepth = renderPassNoDepth;
+        SingleSampleRenderPassNoDepth = singleSampleRenderPassNoDepth;
         ColorFormat = colorFormat;
         _descriptorPools.Add(descriptorPool);
         _currentPool = descriptorPool;
@@ -283,9 +298,15 @@ public sealed unsafe partial class VulkanDevice : IDisposable
             VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.PresentSrcKHR);
         var singleSamplePass = CreateSingleSamplePass(deviceApi, colorFormat, depthFormat, msaaSamples,
             VkImageLayout.PresentSrcKHR);
+        // The depth-less variants of both, for a target that never draws a mesh.
+        var renderPassNoDepth = CreateCompatibleRenderPass(deviceApi, colorFormat, depthFormat, msaaSamples,
+            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.PresentSrcKHR, withDepth: false);
+        var singleSamplePassNoDepth = CreateSingleSamplePass(deviceApi, colorFormat, depthFormat, msaaSamples,
+            VkImageLayout.PresentSrcKHR, withDepth: false);
 
         var created = CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, renderPass, singleSamplePass, colorFormat, depthFormat, msaaSamples, ownsInstance);
+            graphicsQueue, queueFamily, renderPass, singleSamplePass, renderPassNoDepth, singleSamplePassNoDepth,
+            colorFormat, depthFormat, msaaSamples, ownsInstance);
         created.MemoryBudgetAvailable = wantsBudget;
         return created;
     }
@@ -333,9 +354,15 @@ public sealed unsafe partial class VulkanDevice : IDisposable
             VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.ColorAttachmentOptimal);
         var singleSamplePass = CreateSingleSamplePass(deviceApi, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples,
             VkImageLayout.ColorAttachmentOptimal);
+        // The depth-less variants: the offscreen target starts on these and takes depth on demand.
+        var renderPassNoDepth = CreateCompatibleRenderPass(deviceApi, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples,
+            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.ColorAttachmentOptimal, withDepth: false);
+        var singleSamplePassNoDepth = CreateSingleSamplePass(deviceApi, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples,
+            VkImageLayout.ColorAttachmentOptimal, withDepth: false);
 
         var dev = CreateCommon(instance, instanceApi, physicalDevice, device, deviceApi,
-            graphicsQueue, queueFamily, renderPass, singleSamplePass, VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples, ownsInstance);
+            graphicsQueue, queueFamily, renderPass, singleSamplePass, renderPassNoDepth, singleSamplePassNoDepth,
+            VkFormat.B8G8R8A8Unorm, depthFormat, msaaSamples, ownsInstance);
         dev.MarkQueuePrivate();
         dev.MemoryBudgetAvailable = wantsBudget;
         dev.ColorFinalLayout = VkImageLayout.ColorAttachmentOptimal;
@@ -346,11 +373,11 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     // already. Same shape as the factory's own pass in every respect but the sample count, so the
     // context builds a framebuffer for it from the very images the multisampled pass resolves into.
     private static VkRenderPass CreateSingleSamplePass(VkDeviceApi deviceApi, VkFormat colorFormat,
-        VkFormat depthFormat, VkSampleCountFlags msaaSamples, VkImageLayout finalLayout)
+        VkFormat depthFormat, VkSampleCountFlags msaaSamples, VkImageLayout finalLayout, bool withDepth = true)
         => msaaSamples == VkSampleCountFlags.Count1
             ? VkRenderPass.Null
             : CreateCompatibleRenderPass(deviceApi, colorFormat, depthFormat, VkSampleCountFlags.Count1,
-                VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, finalLayout);
+                VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, finalLayout, withDepth);
 
     // Shared tail of both factories: command pool, descriptor pool/layout/set, pipeline layout.
     // Identical on the swapchain and offscreen paths so VkPipelineSet's pre-baked pipelines and the
@@ -360,6 +387,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         VkInstance instance, VkInstanceApi instanceApi,
         VkPhysicalDevice physicalDevice, VkDevice device, VkDeviceApi deviceApi,
         VkQueue graphicsQueue, uint queueFamily, VkRenderPass renderPass, VkRenderPass singleSamplePass,
+        VkRenderPass renderPassNoDepth, VkRenderPass singleSamplePassNoDepth,
         VkFormat colorFormat, VkFormat depthFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
     {
         // Command pool
@@ -473,7 +501,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         return new VulkanDevice(
             instance, instanceApi, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, commandPool, renderPass, singleSamplePass,
-            descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout,
+            renderPassNoDepth, singleSamplePassNoDepth, descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout,
             maskedSetLayout, maskedPipelineLayout, colorFormat, depthFormat,
             msaaSamples, ownsInstance);
     }
@@ -1093,6 +1121,9 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         DeviceApi.vkDestroyRenderPass(RenderPass);
         if (SingleSampleRenderPass != VkRenderPass.Null)
             DeviceApi.vkDestroyRenderPass(SingleSampleRenderPass);
+        DeviceApi.vkDestroyRenderPass(RenderPassNoDepth);
+        if (SingleSampleRenderPassNoDepth != VkRenderPass.Null)
+            DeviceApi.vkDestroyRenderPass(SingleSampleRenderPassNoDepth);
         DeviceApi.vkDestroyCommandPool(CommandPool);
         DeviceApi.vkDestroyDevice();
 
@@ -1343,7 +1374,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// </para>
     /// <para>
     /// The depth-stencil stages and accesses are here for the same reason and by the same argument.
-    /// Every pass carries a depth attachment (see <see cref="CreateCompatibleRenderPass"/>), and its
+    /// Every pass on the depth shape carries a depth attachment (see <see cref="CreateCompatibleRenderPass"/>), and its
     /// depth loadOp CLEAR write needs ordering against the previous frame's storeOp write to the same
     /// image — the identical WRITE_AFTER_WRITE the colour entry above documents, one attachment
     /// over. Widening only ever adds ordering, so it cannot introduce a hazard.
@@ -1410,10 +1441,12 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     }
 
     /// <summary>
-    /// Creates a render pass in the ONE shape every pass in this renderer has, so that the pre-baked
+    /// Creates a render pass in the shape every pass in this renderer has, so that the pre-baked
     /// pipelines (<see cref="VkPipelineSet"/>, created against the device's <see cref="RenderPass"/>)
     /// bind into all of them: the swapchain pass, the damage-preserving load pass, the offscreen
-    /// pass, the cached layer and the thumbnail capture.
+    /// pass, the cached layer and the thumbnail capture. The shape has a depth-less variant
+    /// (<paramref name="withDepth"/> false, <see cref="RenderPassNoDepth"/>) for a target that never
+    /// draws a mesh, with a pipeline set of its own.
     /// </summary>
     /// <remarks>
     /// <para>Render-pass compatibility is per attachment reference — format and sample count — plus
@@ -1424,16 +1457,20 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// <para>Attachment order is <b>colour (0), depth (1), resolve (2, MSAA only)</b>. Depth sits at
     /// index 1 in both modes so the clear values are the same two entries everywhere (see
     /// <see cref="VulkanContext.FillClearValues"/>), and so a framebuffer's attachment list is built
-    /// by one helper (<see cref="VulkanContext.CreateCompatibleFramebuffer"/>).</para>
-    /// <para><b>The depth attachment is on every pass, and 2D drawing never reads it.</b> It exists
-    /// for depth-tested meshes (<see cref="VkRenderer.DrawMesh"/>), which are drawn inline in the same
-    /// pass as everything else — antialiased by the same MSAA, clipped by the same scissor, with no
-    /// intermediate target. Since compatibility is per attachment, a pass without it could not host
-    /// the shared pipelines once they carry a depth-stencil state, so every pass has one and the 2D
-    /// pipelines simply switch depth testing off. It is cleared at pass start, then again over each
-    /// region a consumer draws meshes into (<see cref="VkRenderer.BeginMeshRegion"/>), never stored,
-    /// and never sampled; with <c>TransientAttachment</c> usage a tiler need not allocate it at
-    /// all.</para>
+    /// by one helper (<see cref="VulkanContext.CreateCompatibleFramebuffer"/>). The depth-less variant
+    /// is <b>colour (0), resolve (1, MSAA only)</b> with one clear value, and the same helpers follow
+    /// the shape.</para>
+    /// <para><b>The depth attachment is on a pass whose target may draw a mesh, and 2D drawing never
+    /// reads it.</b> It exists for depth-tested meshes (<see cref="VkRenderer.DrawMesh"/>), which are
+    /// drawn inline in the same pass as everything else — antialiased by the same MSAA, clipped by the
+    /// same scissor, with no intermediate target. Since compatibility is per attachment, a pass
+    /// without it cannot host pipelines built against one that has it, so each shape has a pipeline
+    /// set of its own, and on the depth shape the 2D pipelines simply switch depth testing off. It is
+    /// cleared at pass start, then again over each region a consumer draws meshes into
+    /// (<see cref="VkRenderer.BeginMeshRegion"/>), never stored, and never sampled; with
+    /// <c>TransientAttachment</c> usage a tiler need not allocate it at all, and a target that never
+    /// opens a region need not have one (the offscreen target starts without: see
+    /// <see cref="VulkanContext.RequireMeshDepth"/>).</para>
     /// <para>The MSAA colour attachment is transient too (cleared, resolved, not stored), which is why
     /// <paramref name="colorLoadOp"/> can only apply to it when there is no resolve: a multisample
     /// attachment cannot be re-loaded from its resolved image, and
@@ -1447,17 +1484,25 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// <param name="colorFinalLayout">Where the stored colour image is left: PresentSrcKHR for the
     /// swapchain, ShaderReadOnlyOptimal for a sampled layer, TransferSrcOptimal for a copy source,
     /// ColorAttachmentOptimal where the consumer transitions it itself.</param>
+    /// <param name="withDepth">False for the depth-less variant of the shape: the same pass without the
+    /// depth attachment, so the subpass names none and the attachments are colour (0) and, under MSAA,
+    /// resolve (1). Pipelines are render-pass compatible only within a shape (see
+    /// <see cref="VkPipelineSet.Create(VulkanContext, VkRenderPass, VkSampleCountFlags, bool)"/>), and a
+    /// target on this shape cannot host <see cref="VkRenderer.DrawMesh"/>.</param>
     internal static VkRenderPass CreateCompatibleRenderPass(VkDeviceApi deviceApi, VkFormat colorFormat,
         VkFormat depthFormat, VkSampleCountFlags msaaSamples,
-        VkAttachmentLoadOp colorLoadOp, VkImageLayout colorInitialLayout, VkImageLayout colorFinalLayout)
+        VkAttachmentLoadOp colorLoadOp, VkImageLayout colorInitialLayout, VkImageLayout colorFinalLayout,
+        bool withDepth = true)
     {
         var msaa = msaaSamples != VkSampleCountFlags.Count1;
-        var attachmentCount = msaa ? 3 : 2;
+        var attachmentCount = 1 + (msaa ? 1 : 0) + (withDepth ? 1 : 0);
+        // Depth sits at 1 on the depth shape, so the resolve is 2 there and 1 on the depth-less one.
+        var resolveIndex = withDepth ? 2 : 1;
         Span<VkAttachmentDescription> attachments = stackalloc VkAttachmentDescription[attachmentCount];
 
         if (msaa)
         {
-            // Multisample colour: cleared, resolved into attachment 2, never stored.
+            // Multisample colour: cleared, resolved into the resolve attachment, never stored.
             attachments[0] = new()
             {
                 format = colorFormat,
@@ -1471,7 +1516,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
             };
             // The resolve target IS the stored image: its load op is irrelevant (the resolve overwrites
             // it) and its final layout is the caller's.
-            attachments[2] = new()
+            attachments[resolveIndex] = new()
             {
                 format = colorFormat,
                 samples = VkSampleCountFlags.Count1,
@@ -1502,21 +1547,24 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         // nowhere. storeOp DontCare is what makes the image's TransientAttachment usage meaningful — the
         // flag alone does not make it transient, the pass has to agree that nothing outlives it. The
         // stencil aspect is unused whatever the format carries.
-        attachments[1] = new()
+        if (withDepth)
         {
-            format = depthFormat,
-            samples = msaaSamples,
-            loadOp = VkAttachmentLoadOp.Clear,
-            storeOp = VkAttachmentStoreOp.DontCare,
-            stencilLoadOp = VkAttachmentLoadOp.DontCare,
-            stencilStoreOp = VkAttachmentStoreOp.DontCare,
-            initialLayout = VkImageLayout.Undefined,
-            finalLayout = VkImageLayout.DepthStencilAttachmentOptimal
-        };
+            attachments[1] = new()
+            {
+                format = depthFormat,
+                samples = msaaSamples,
+                loadOp = VkAttachmentLoadOp.Clear,
+                storeOp = VkAttachmentStoreOp.DontCare,
+                stencilLoadOp = VkAttachmentLoadOp.DontCare,
+                stencilStoreOp = VkAttachmentStoreOp.DontCare,
+                initialLayout = VkImageLayout.Undefined,
+                finalLayout = VkImageLayout.DepthStencilAttachmentOptimal
+            };
+        }
 
         VkAttachmentReference colorRef = new() { attachment = 0, layout = VkImageLayout.ColorAttachmentOptimal };
         VkAttachmentReference depthRef = new() { attachment = 1, layout = VkImageLayout.DepthStencilAttachmentOptimal };
-        VkAttachmentReference resolveRef = new() { attachment = 2, layout = VkImageLayout.ColorAttachmentOptimal };
+        VkAttachmentReference resolveRef = new() { attachment = (uint)resolveIndex, layout = VkImageLayout.ColorAttachmentOptimal };
 
         VkSubpassDescription subpass = new()
         {
@@ -1524,7 +1572,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
             colorAttachmentCount = 1,
             pColorAttachments = &colorRef,
             pResolveAttachments = msaa ? &resolveRef : null,
-            pDepthStencilAttachment = &depthRef
+            pDepthStencilAttachment = withDepth ? &depthRef : null
         };
 
         // The shared pair every pass declares — see FillSubpassDependencies for why it is uniform.

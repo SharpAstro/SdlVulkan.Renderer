@@ -3,8 +3,10 @@ using static Vortice.Vulkan.Vulkan;
 
 namespace SdlVulkan.Renderer;
 
-// The depth attachment every framebuffer in this renderer carries, and the helpers that keep the
-// framebuffers and clear values in step with VulkanDevice.CreateCompatibleRenderPass's attachment order.
+// The depth attachment a framebuffer in this renderer carries when its target may draw a mesh, and the
+// helpers that keep the framebuffers and clear values in step with VulkanDevice.CreateCompatibleRenderPass's
+// attachment order -- on either of its two shapes, with depth and without (a target that never opens a mesh
+// region has no depth image at all: the offscreen target starts that way, VulkanContext.Offscreen.cs).
 //
 // One depth image per render TARGET, not per pass or per frame: depth is written and tested inside a
 // single pass and never read after it (loadOp Clear, storeOp DontCare), so consecutive passes and
@@ -31,8 +33,11 @@ public sealed unsafe partial class VulkanContext
     /// </summary>
     internal const float DepthClearValue = 1f;
 
-    /// <summary>Number of entries <see cref="FillClearValues"/> writes.</summary>
+    /// <summary>Number of entries <see cref="FillClearValues"/> writes for a pass with depth.</summary>
     internal const int ClearValueCount = 2;
+
+    /// <summary>Number of entries <see cref="FillClearValues"/> writes for a pass without depth: the colour.</summary>
+    internal const int ClearValueCountNoDepth = 1;
 
     /// <summary>
     /// Creates a depth image, its memory and a depth-aspect view for a framebuffer of
@@ -102,7 +107,8 @@ public sealed unsafe partial class VulkanContext
     /// with the attachments in the order that pass declares: colour, depth, then the resolve target
     /// under MSAA. <paramref name="colorView"/> is the multisample image when MSAA is on and the
     /// stored image otherwise; <paramref name="resolveView"/> is the stored image under MSAA and
-    /// ignored otherwise.
+    /// ignored otherwise. A Null <paramref name="depthView"/> is the depth-less shape: colour and then
+    /// the resolve target, for a pass built with <c>withDepth</c> false.
     /// </summary>
     internal VkFramebuffer CreateCompatibleFramebuffer(VkRenderPass renderPass,
         VkImageView colorView, VkImageView depthView, VkImageView resolveView, uint width, uint height,
@@ -110,16 +116,18 @@ public sealed unsafe partial class VulkanContext
     {
         // A single-sample pass beside a multisampled device's own has two attachments, not three.
         var msaa = multisampled ?? MsaaSamples != VkSampleCountFlags.Count1;
+        var withDepth = depthView != VkImageView.Null;
         Span<VkImageView> attachments = stackalloc VkImageView[3];
-        attachments[0] = colorView;
-        attachments[1] = depthView;
-        attachments[2] = resolveView;
+        var count = 0;
+        attachments[count++] = colorView;
+        if (withDepth) attachments[count++] = depthView;
+        if (msaa) attachments[count++] = resolveView;
         fixed (VkImageView* pAtt = attachments)
         {
             VkFramebufferCreateInfo fbCI = new()
             {
                 renderPass = renderPass,
-                attachmentCount = msaa ? 3u : 2u,
+                attachmentCount = (uint)count,
                 pAttachments = pAtt,
                 width = width, height = height, layers = 1
             };
@@ -130,15 +138,20 @@ public sealed unsafe partial class VulkanContext
 
     /// <summary>
     /// The clear values a compatible pass takes, in attachment order: the colour, then the depth at
-    /// the far plane. Two entries in both modes — the MSAA resolve attachment is index 2 and is not
-    /// cleared, so it needs none. A load pass ignores the colour entry and still needs the depth one,
-    /// which is why the count is fixed rather than a per-pass decision.
+    /// the far plane. Two entries in both modes of the depth shape — the MSAA resolve attachment comes
+    /// after and is not cleared, so it needs none. A load pass ignores the colour entry and still needs
+    /// the depth one, which is why the count is fixed by the shape rather than a per-pass decision. The
+    /// depth-less shape (<paramref name="withDepth"/> false) takes the colour alone. Returns the count
+    /// written, <see cref="ClearValueCount"/> or <see cref="ClearValueCountNoDepth"/>.
     /// </summary>
-    internal static void FillClearValues(Span<VkClearValue> clears, float r, float g, float b, float a)
+    internal static int FillClearValues(Span<VkClearValue> clears, float r, float g, float b, float a,
+        bool withDepth = true)
     {
         clears[0] = new VkClearValue();
         clears[0].color = new VkClearColorValue(r, g, b, a);
+        if (!withDepth) return ClearValueCountNoDepth;
         clears[1] = new VkClearValue();
         clears[1].depthStencil = new VkClearDepthStencilValue(DepthClearValue, 0);
+        return ClearValueCount;
     }
 }
