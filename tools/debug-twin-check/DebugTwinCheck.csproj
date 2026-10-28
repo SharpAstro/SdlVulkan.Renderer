@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Proves a Debug build sees the #if DEBUG types of SdlVulkan.Renderer: it compiles only against the
+    SdlVulkan.Renderer.Debug twin package (packed from a Debug build into artifacts/debug-twin), never against
+    the Release SdlVulkan.Renderer, where DebugInspector and DebugInspectorOptions do not exist (CS0246).
+    Sits outside src/ so Central Package Management does not apply, and has no ProjectReference on purpose:
+    the package is the thing under test.
+    CI overrides the version with -p:SdlVulkanRendererDebugVersion=<run-stamped version>.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Its own package folder, so a re-pack of the same version is never served from the global cache. -->
+    <RestorePackagesPath>$(MSBuildProjectDirectory)/obj/packages</RestorePackagesPath>
+    <SdlVulkanRendererDebugVersion Condition="'$(SdlVulkanRendererDebugVersion)' == ''">$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)/../../src/Directory.Build.props')), '&lt;VersionMajorMinor&gt;([^&lt;]+)&lt;').Groups[1].Value).0</SdlVulkanRendererDebugVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SdlVulkan.Renderer.Debug" Version="$(SdlVulkanRendererDebugVersion)" />
+  </ItemGroup>
+
+</Project>
