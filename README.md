@@ -300,6 +300,24 @@ Backend notes:
   `TitleChanged`, …) are raised on the **GTK thread**, so handlers must be thread-safe or marshal back
   themselves.
 
+## Debug twin package (`SdlVulkan.Renderer.Debug`)
+
+The in-process `DebugInspector` is `#if DEBUG`, and a published `SdlVulkan.Renderer` is built Release, so a
+Debug build of a consumer that restored the package has no inspector. `SdlVulkan.Renderer.Debug` is the same
+library packed from a Debug build at the same version; it depends on `DIR.Lib.Debug` rather than `DIR.Lib`.
+Switch by configuration:
+
+```xml
+<ItemGroup Condition="'$(Configuration)' == 'Debug'">
+  <PackageReference Include="SdlVulkan.Renderer.Debug" Version="7.76.*" />
+</ItemGroup>
+<ItemGroup Condition="'$(Configuration)' != 'Debug'">
+  <PackageReference Include="SdlVulkan.Renderer" Version="7.76.*" />
+</ItemGroup>
+```
+
+Restore after switching configuration (Visual Studio does not do it for you). Never reference both packages.
+
 ## Dependencies
 
 - [DIR.Lib](https://www.nuget.org/packages/DIR.Lib) — Rendering primitives + pure-managed glyph rasterization (no native dependency)

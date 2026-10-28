@@ -7,6 +7,19 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.76
+
+**`SdlVulkan.Renderer.Debug`: a twin package built Debug, so a Debug consumer gets the inspector (#148).**
+
+- `DebugInspector` and its options are `#if DEBUG`, and the published package is Release, so they were absent. A
+  plane never finds the sibling sources, so a Debug build there restored the Release package and had no inspector.
+- CI now also packs the same library from a Debug build as `SdlVulkan.Renderer.Debug` at the run's stamped version
+  (opt-in `-p:DebugTwin=true`), depending on `DIR.Lib.Debug` (never `DIR.Lib`), and publishes it with the others.
+  `tools/debug-twin-check` compiles a Debug consumer against it on every push.
+- Consumers switch with a Configuration-conditioned `PackageReference` (see the README); restore in Visual Studio
+  after switching configuration.
+- DIR.Lib floats to 11.40, which carries the `DIR.Lib.Debug` twin.
+
 ## 7.75
 
 **Depth is allocated per target only once a mesh is drawn on it (#146).**
