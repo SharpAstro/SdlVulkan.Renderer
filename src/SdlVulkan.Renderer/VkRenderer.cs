@@ -194,9 +194,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // A window context has built its swapchain already, at the extent its surface chose, which
         // need not be the size passed here; an offscreen one has none, and the size passed stands.
         (_width, _height) = SizeAfterSwapchainBuild(ctx.SwapchainWidth, ctx.SwapchainHeight, width, height);
-        // The sets for the shape the first frame will have: a window's, and an offscreen target that asked
-        // for depth (CreateOffscreen's meshDepth), are on the depth shape; any other offscreen target starts
-        // without depth and pays for no mesh pipeline. The other shape is built when something needs it.
+        // The sets for the shape the first frame will have: every target, a window or an offscreen one, starts
+        // without depth and pays for no mesh pipeline, unless depth was asked for up front (CreateOffscreen's
+        // meshDepth, RequireMeshDepth). The other shape is built when something needs it.
         var depth = ctx.MainPassWillHaveDepth;
         _mainPassHasDepth = depth;
         _pipelines = MainPipelinesFor(depth);
