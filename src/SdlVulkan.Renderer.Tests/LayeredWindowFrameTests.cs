@@ -154,6 +154,176 @@ public sealed class LayeredWindowFrameTests(OffscreenGpuFixture gpu)
         PixelAt(frame, 40, 30).ShouldBe(((byte)255, (byte)0, (byte)0, (byte)255), "outside it: the frame before");
     }
 
+    // The swapchain path's depth shape, which has no headless test of its own: a layered context runs the
+    // same BeginFrame, framebuffers, load pass and recreation as a swapchain one, over an image of its own.
+    private static float[] Quad(float z) =>
+    [
+        -1f, -1f, z,  0f, 0f, 1f,
+         1f, -1f, z,  0f, 0f, 1f,
+         1f,  1f, z,  0f, 0f, 1f,
+
+        -1f, -1f, z,  0f, 0f, 1f,
+         1f,  1f, z,  0f, 0f, 1f,
+        -1f,  1f, z,  0f, 0f, 1f,
+    ];
+
+    private static readonly float[] Identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    private static readonly System.Numerics.Vector3 Light = new(0f, 0f, 1f);
+
+    [Fact]
+    public void ASwapchainTargetTakesDepthOnlyOnceAMeshRegionAsksForIt()
+    {
+        if (gpu.Context is not { } shared)
+        {
+            Assert.Skip("Vulkan runtime not available on this host");
+            return;
+        }
+
+        var window = new StandInWindow(64, 48);
+        using var ctx = VulkanContext.CreateLayeredForSharedDevice(shared.GraphicsDevice, window);
+        using var renderer = new VkRenderer(ctx, 64, 48);
+        var red = new RGBAColor32(255, 0, 0, 255);
+        var blue = OpaqueBlue;
+
+        void TwoD()
+        {
+            renderer.BeginFrame(Transparent).ShouldBeTrue();
+            renderer.FillRectangle(Rect(0, 0, 16, 16), OpaqueGreen);
+            renderer.FillRectangle(Rect(16, 0, 32, 16), HalfRed);
+            renderer.EndFrame();
+        }
+
+        TwoD();
+        TwoD();
+        ctx.MainTargetHasDepth.ShouldBeFalse("a window's frames start without a depth image");
+        ctx.OffscreenDepthImage.ShouldBe(Vortice.Vulkan.VkImage.Null);
+        var baseline = window.Frames[^1];
+
+        renderer.BeginFrame(Transparent).ShouldBeTrue();
+        renderer.BeginMeshRegion(0f, 0f, 64f, 48f).ShouldBeFalse("there is no depth image to test against yet");
+        renderer.DrawMesh(Quad(0.25f), Identity, red, Light);
+        renderer.EndMeshRegion();
+        renderer.EndFrame();
+        PixelAt(window.Frames[^1], 32, 24).ShouldBe(((byte)0, (byte)0, (byte)0, (byte)0), "the refused region drew nothing");
+        renderer.TakeMeshDepthRedraw().ShouldBeTrue("the refusal asks for another frame");
+        ctx.MainTargetHasDepth.ShouldBeFalse("the frame in hand was recorded without depth");
+
+        // The next BeginFrame gives the swapchain its depth image; the far quad is drawn last, so the near one
+        // showing is the depth test.
+        renderer.BeginFrame(Transparent).ShouldBeTrue();
+        ctx.MainTargetHasDepth.ShouldBeTrue();
+        ctx.OffscreenDepthImage.ShouldNotBe(Vortice.Vulkan.VkImage.Null);
+        renderer.BeginMeshRegion(0f, 0f, 64f, 48f).ShouldBeTrue();
+        renderer.DrawMesh(Quad(0.25f), Identity, red, Light);
+        renderer.DrawMesh(Quad(0.75f), Identity, blue, Light);
+        renderer.EndMeshRegion();
+        renderer.EndFrame();
+        PixelAt(window.Frames[^1], 32, 24).ShouldBe(((byte)0, (byte)0, (byte)255, (byte)255), "near (red, BGRA) over far");
+
+        TwoD();
+        window.Frames[^1].Bgra.ShouldBe(baseline.Bgra, "depth must not change a pixel of 2D drawing");
+
+        // A partial frame (the damage load pass, on the depth shape now) keeps the rest of the image.
+        renderer.AddFrameDamage(0, 0, 16, 16);
+        renderer.BeginFrame(Transparent).ShouldBeTrue();
+        renderer.FillRectangle(Rect(0, 0, 64, 48), OpaqueBlue);
+        renderer.EndFrame();
+        ctx.LastFrameWasPartial.ShouldBeTrue();
+        PixelAt(window.Frames[^1], 8, 8).ShouldBe(((byte)255, (byte)0, (byte)0, (byte)255), "inside the damage");
+        PixelAt(window.Frames[^1], 40, 30).ShouldBe(((byte)0, (byte)0, (byte)0, (byte)0), "outside it: the frame before");
+
+        // A resize recreates the framebuffers and keeps the shape.
+        window.PixelSize = (80, 60);
+        renderer.BeginFrame(Transparent).ShouldBeFalse();
+        renderer.Resize(80, 60);
+        ctx.MainTargetHasDepth.ShouldBeTrue("a recreation keeps the depth shape");
+        renderer.BeginFrame(Transparent).ShouldBeTrue();
+        renderer.BeginMeshRegion(0f, 0f, 80f, 60f).ShouldBeTrue();
+        renderer.DrawMesh(Quad(0.25f), Identity, red, Light);
+        renderer.EndMeshRegion();
+        renderer.EndFrame();
+        PixelAt(window.Frames[^1], 40, 30).ShouldBe(((byte)0, (byte)0, (byte)255, (byte)255));
+    }
+
+    [Fact]
+    public void AnUpFrontRequestGivesASwapchainDepthFromItsFirstFrame()
+    {
+        if (gpu.Context is not { } shared)
+        {
+            Assert.Skip("Vulkan runtime not available on this host");
+            return;
+        }
+
+        var window = new StandInWindow(64, 48);
+        using var ctx = VulkanContext.CreateLayeredForSharedDevice(shared.GraphicsDevice, window);
+        using var renderer = new VkRenderer(ctx, 64, 48);
+        renderer.RequireMeshDepth();
+
+        renderer.BeginFrame(Transparent).ShouldBeTrue();
+        renderer.BeginMeshRegion(0f, 0f, 64f, 48f).ShouldBeTrue();
+        renderer.DrawMesh(Quad(0.25f), Identity, new RGBAColor32(255, 0, 0, 255), Light);
+        renderer.DrawMesh(Quad(0.75f), Identity, OpaqueBlue, Light);
+        renderer.EndMeshRegion();
+        renderer.EndFrame();
+        PixelAt(window.Frames[^1], 32, 24).ShouldBe(((byte)0, (byte)0, (byte)255, (byte)255));
+    }
+
+    [Fact]
+    public void TheSwapchainChangingShape_IsValidationClean()
+    {
+        // The switch drains, frees the framebuffers and the damage load pass and builds them again on the depth
+        // shape, at 4x with single-sampled partial frames in between (the load pass is single-sample only), then
+        // a resize. A framebuffer or load pass of the wrong shape, or one freed under a frame in flight, shows
+        // here. Skips where the layer is not installed; CI's test lane has it.
+        if (!ValidatedOffscreen.TryCreate(64, 48, out var device, out var messenger, out var api, out var skip,
+                Vortice.Vulkan.VkSampleCountFlags.Count4))
+        {
+            Assert.Skip(skip);
+            return;
+        }
+
+        ValidatedOffscreen.Messages.Clear();
+        try
+        {
+            var window = new StandInWindow(64, 48);
+            using (var ctx = VulkanContext.CreateLayeredForSharedDevice(device!.GraphicsDevice, window))
+            using (var renderer = new VkRenderer(ctx, 64, 48))
+            {
+                for (var frame = 0; frame < 12; frame++)
+                {
+                    renderer.SingleSampleMainPass = frame % 2 == 0;
+                    if (frame is > 0 and < 4) renderer.AddFrameDamage(0, 0, 16, 16);
+                    renderer.BeginFrame(Transparent).ShouldBeTrue();
+                    renderer.FillRectangle(Rect(0, 0, 16, 16), frame % 3 == 0 ? OpaqueBlue : OpaqueGreen);
+                    if (frame >= 4 && renderer.BeginMeshRegion(0f, 24f, 64f, 24f))
+                    {
+                        renderer.DrawMesh(Quad(0.75f), Identity, OpaqueBlue, Light);
+                        renderer.DrawMesh(Quad(0.25f), Identity, new RGBAColor32(255, 0, 0, 255), Light);
+                        renderer.EndMeshRegion();
+                    }
+                    renderer.EndFrame();
+                    if (frame == 8)
+                    {
+                        window.PixelSize = (80, 60);
+                        renderer.BeginFrame(Transparent).ShouldBeFalse();
+                        renderer.Resize(80, 60);
+                    }
+                }
+                ctx.MainTargetHasDepth.ShouldBeTrue();
+            }
+
+            var problems = ValidatedOffscreen.Messages
+                .Where(m => ValidatedOffscreen.IsError(m) || ValidatedOffscreen.IsSyncHazard(m)).ToArray();
+            Assert.True(problems.Length == 0,
+                $"the swapchain changing shape drew {problems.Length} validation error(s) or hazard(s):\n" +
+                string.Join("\n\n", problems));
+        }
+        finally
+        {
+            ValidatedOffscreen.Destroy(device, messenger, api);
+        }
+    }
+
     [Fact]
     public void TheLayeredFramePath_IsValidationClean()
     {

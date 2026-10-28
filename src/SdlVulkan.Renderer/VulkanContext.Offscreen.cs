@@ -27,47 +27,19 @@ public sealed unsafe partial class VulkanContext
     private uint _offscreenWidth;
     private uint _offscreenHeight;
     private bool _isOffscreen;
-    // Whether the target's framebuffers carry a depth image (and so are on the depth shape), and whether
-    // something has asked for it. A request lands at the next BeginOffscreenFrame, where no frame is being
-    // recorded; until then HasDepth is what the frame in hand was recorded with.
-    private bool _offscreenHasDepth;
-    private bool _offscreenWantsDepth;
-
     public bool IsOffscreen => _isOffscreen;
 
     /// <summary>
     /// Whether the offscreen target carries a depth image, which is what lets a mesh region draw on it. False
     /// until <see cref="RequireMeshDepth"/> (or a <c>meshDepth</c> at creation) has been honoured by a
-    /// <see cref="BeginOffscreenFrame"/>; always true for a context that is not offscreen, whose targets
-    /// carry depth.
+    /// <see cref="BeginOffscreenFrame"/>, and always false for a context that is not offscreen.
     /// </summary>
-    public bool OffscreenHasDepth => _offscreenHasDepth;
+    public bool OffscreenHasDepth => _isOffscreen && _mainHasDepth;
 
-    // Whether the main pass of the NEXT frame is on the depth shape: a window's always is, an offscreen
-    // target's once it has asked for depth. What a renderer builds its first pipeline set for.
-    internal bool MainPassWillHaveDepth => !_isOffscreen || _offscreenWantsDepth;
-
-    // Whether the main pass of the frame begun is on the depth shape, so which pipeline set it draws with.
-    internal bool MainPassHasDepth => !_isOffscreen || _offscreenHasDepth;
-
-    // The depth image handle, for the tests: Null while the target has none.
+    // The main target's depth image handle (the offscreen target's, or the swapchain's), for the tests: Null
+    // while the target has none.
     internal VkImage OffscreenDepthImage => _depthImage;
 
-    /// <summary>
-    /// Asks for the offscreen target to carry a depth image, so that <see cref="VkRenderer.BeginMeshRegion"/>
-    /// draws on it from the next <see cref="BeginOffscreenFrame"/> on, the first one if no frame has begun
-    /// since. Meshes are the only thing depth is for; a target that never draws one should not call this,
-    /// and does not pay for the image (16 bytes a pixel at 4x MSAA on a device without lazily allocated
-    /// memory). A consumer that cannot say in advance need not call it at all: a
-    /// <see cref="VkRenderer.BeginMeshRegion"/> on a depth-less frame returns false, draws nothing and
-    /// makes this request itself, so the frame after it has depth. Calling it up front is what makes the
-    /// first frame draw. Once made the request stands, across <see cref="ResizeOffscreen"/> too. No effect
-    /// on a context that is not offscreen, whose targets already carry depth.
-    /// </summary>
-    public void RequireMeshDepth()
-    {
-        if (_isOffscreen) _offscreenWantsDepth = true;
-    }
     public uint OffscreenWidth => _offscreenWidth;
     public uint OffscreenHeight => _offscreenHeight;
     public VkFormat OffscreenFormat => VkFormat.B8G8R8A8Unorm;
@@ -90,7 +62,7 @@ public sealed unsafe partial class VulkanContext
         var ctx = new VulkanContext(device, VkSurfaceKHR.Null, vertexBufferSize, ownsDevice: true);
 
         ctx._isOffscreen = true;
-        ctx._offscreenWantsDepth = meshDepth;
+        ctx._mainWantsDepth = meshDepth;
         ctx._offscreenWidth = width;
         ctx._offscreenHeight = height;
 
@@ -175,16 +147,16 @@ public sealed unsafe partial class VulkanContext
     // whatever has been asked for, so a resize keeps the shape and a late request is honoured at once.
     private void CreateOffscreenFramebuffers(uint width, uint height)
     {
-        _offscreenHasDepth = _offscreenWantsDepth;
+        _mainHasDepth = _mainWantsDepth;
         // Depth attachment — the swapchain path's fields, free here for the same reason the MSAA ones are.
         // None at all on the depth-less shape: that is the allocation this saves.
-        if (_offscreenHasDepth)
+        if (_mainHasDepth)
             CreateDepthAttachment(width, height, out _depthImage, out _depthMemory, out _depthImageView);
 
         // Framebuffer: colour (multisample under MSAA, else the readback image), depth when the shape has
         // it, and under MSAA the readback image as the resolve target.
         var msaa = MsaaSamples != VkSampleCountFlags.Count1;
-        _offscreenFramebuffer = CreateCompatibleFramebuffer(OffscreenRenderPass,
+        _offscreenFramebuffer = CreateCompatibleFramebuffer(MainRenderPass,
             colorView: msaa ? _msaaImageView : _offscreenImageView,
             depthView: _depthImageView,
             resolveView: _offscreenImageView,
@@ -203,9 +175,6 @@ public sealed unsafe partial class VulkanContext
         }
         DestroyDepthAttachment(ref _depthImage, ref _depthMemory, ref _depthImageView);
     }
-
-    // The main pass the offscreen target's frames run in, by shape.
-    private VkRenderPass OffscreenRenderPass => _offscreenHasDepth ? _dev.RenderPass : _dev.RenderPassNoDepth;
 
     // Switches the target to the depth shape: the allocation a mesh asked for. Runs between frames, from
     // BeginOffscreenFrame; the framebuffers it replaces may still be named by a frame in flight, so the
@@ -265,7 +234,7 @@ public sealed unsafe partial class VulkanContext
         NoteUnendedFrameDropped();
         // A mesh asked for depth since the last frame (RequireMeshDepth, or a BeginMeshRegion that found
         // none): the target changes shape here, between frames, so this one records with it.
-        if (_offscreenWantsDepth && !_offscreenHasDepth) AddOffscreenDepth();
+        if (_mainWantsDepth && !_mainHasDepth) AddOffscreenDepth();
 
         var fence = _inFlightFences[_currentFrame];
         // Skip the wait when nothing is in flight under this index. A fence that was reset for a submit
@@ -317,7 +286,7 @@ public sealed unsafe partial class VulkanContext
         if (!_isOffscreen) throw new InvalidOperationException("BeginOffscreenRenderPass requires CreateOffscreen");
 
         Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
-        var clearCount = FillClearValues(clears, clearR, clearG, clearB, clearA, _offscreenHasDepth);
+        var clearCount = FillClearValues(clears, clearR, clearG, clearB, clearA, _mainHasDepth);
         var single = singleSample && SingleSampleMainPassAvailable;
         LastFrameSingleSampled = single;
 
@@ -325,7 +294,7 @@ public sealed unsafe partial class VulkanContext
         {
             VkRenderPassBeginInfo rpBI = new()
             {
-                renderPass = single ? OffscreenSingleSampleRenderPass : OffscreenRenderPass,
+                renderPass = single ? MainSingleSampleRenderPass : MainRenderPass,
                 framebuffer = single ? _offscreenSingleSampleFramebuffer : _offscreenFramebuffer,
                 renderArea = new VkRect2D(0, 0, _offscreenWidth, _offscreenHeight),
                 clearValueCount = (uint)clearCount,
@@ -565,7 +534,7 @@ public sealed unsafe partial class VulkanContext
         if (_msaaMemory != VkDeviceMemory.Null)
             DeviceApi.vkFreeMemory(_msaaMemory);
 
-        _offscreenHasDepth = false;
+        _mainHasDepth = false;
         _offscreenImageView = VkImageView.Null;
         _offscreenImage = VkImage.Null;
         _offscreenMemory = VkDeviceMemory.Null;

@@ -559,6 +559,10 @@ public sealed class SdlEventLoop
 
             if (renderer.FontAtlasDirty)
                 v.NeedsRedraw = true;
+            // A mesh region was refused for want of a depth image, which the target now has coming: one more
+            // frame draws what this one could not.
+            if (renderer.TakeMeshDepthRedraw())
+                v.NeedsRedraw = true;
 
             if (v.FenceStuckSinceTick != 0)
             {

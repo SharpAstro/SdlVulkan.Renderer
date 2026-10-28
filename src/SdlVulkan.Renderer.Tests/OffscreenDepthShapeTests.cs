@@ -209,8 +209,9 @@ public sealed class OffscreenDepthShapeTests(OffscreenGpuFixture gpu)
     }
 
     /// <summary>
-    /// A target on the depth-less shape still hosts a cached layer, whose pass is on the depth shape: the
-    /// layer draws with the depth pipelines and the main pass blits it with the depth-less ones.
+    /// A target on the depth-less shape hosts a cached layer, which is on the depth-less shape too: the
+    /// layer draws with the depth-less pipelines, the main pass blits it with the same ones, and neither
+    /// target has a depth image.
     /// </summary>
     [Fact]
     public void ACachedLayerOnADepthLessTargetStillDraws()
@@ -231,9 +232,185 @@ public sealed class OffscreenDepthShapeTests(OffscreenGpuFixture gpu)
             r.DrawTexture(r.CachedLayerDescriptorSet(r.CachedLayerSlot), 0f, 0f, Size, Size));
         renderer.OnPreRenderPass = null;
 
-        ctx!.OffscreenHasDepth.ShouldBeFalse("the layer's own depth image is not the target's");
+        ctx!.OffscreenHasDepth.ShouldBeFalse();
+        for (var slot = 0; slot < VulkanContext.MaxFramesInFlight; slot++)
+            ctx.CachedLayerDepthImage(slot).ShouldBe(VkImage.Null, "a layer that draws no mesh has no depth image");
         ChannelRed(rgba, 32, 32).ShouldBe(255);
         ChannelRed(rgba, 4, 4).ShouldBe(0);
+    }
+
+    // A frame whose cached layer is recorded by `layer` and blitted over the whole target.
+    private static byte[] LayerFrame(VkRenderer renderer, VulkanContext ctx, Action<VkRenderer> layer)
+    {
+        renderer.OnPreRenderPass = _ =>
+        {
+            renderer.BeginCachedLayer(Size, Size, Black).ShouldBeTrue();
+            layer(renderer);
+            renderer.EndCachedLayer();
+        };
+        try
+        {
+            return Frame(renderer, ctx, r =>
+                r.DrawTexture(r.CachedLayerDescriptorSet(r.CachedLayerSlot), 0f, 0f, Size, Size));
+        }
+        finally
+        {
+            renderer.OnPreRenderPass = null;
+        }
+    }
+
+    [Theory]
+    [InlineData(VkSampleCountFlags.Count1)]
+    [InlineData(VkSampleCountFlags.Count4)]
+    public void ACachedLayerTakesDepthOnlyOnceAMeshRegionAsksForIt(VkSampleCountFlags samples)
+    {
+        Assert.SkipWhen(gpu.Context is null, "no Vulkan ICD on this host");
+        using var ctx = NewContext(samples);
+        Assert.SkipWhen(ctx is null, "no Vulkan ICD on this host");
+        using var renderer = new VkRenderer(ctx!, Size, Size);
+        renderer.EnsureCachedLayerTargets(Size, Size).ShouldBeTrue();
+
+        // The layer's 2D content, before any mesh: no slot has depth, and what it draws is the baseline the
+        // depth shape must reproduce.
+        var baseline = new byte[VulkanContext.MaxFramesInFlight][];
+        for (var frame = 0; frame < VulkanContext.MaxFramesInFlight; frame++)
+            baseline[frame] = LayerFrame(renderer, ctx!, Scene);
+        for (var slot = 0; slot < VulkanContext.MaxFramesInFlight; slot++)
+            ctx!.CachedLayerDepthImage(slot).ShouldBe(VkImage.Null);
+        baseline[0].Count(b => b != 0).ShouldBeGreaterThan(1000);
+        renderer.TakeMeshDepthRedraw().ShouldBeFalse("nothing was refused");
+
+        // A region inside the layer is refused, draws nothing, and is reported for a redraw.
+        var refused = LayerFrame(renderer, ctx!, r =>
+        {
+            r.BeginMeshRegion(0f, 0f, Size, Size).ShouldBeFalse("the layer has no depth image to test against yet");
+            r.DrawMesh(Near, Identity, Red, Light);
+            r.EndMeshRegion();
+        });
+        ChannelRed(refused, Centre, Centre).ShouldBe(0, "a region in a depth-less layer draws nothing");
+        renderer.TakeMeshDepthRedraw().ShouldBeTrue("the refusal asks for another frame");
+        renderer.TakeMeshDepthRedraw().ShouldBeFalse("and only once");
+        ctx!.OffscreenHasDepth.ShouldBeFalse("the layer asked for depth, not the main target");
+
+        // Each slot takes depth at its own turn; from then on the near quad wins over the far one drawn after.
+        for (var frame = 0; frame < VulkanContext.MaxFramesInFlight; frame++)
+        {
+            var rgba = LayerFrame(renderer, ctx, r =>
+            {
+                r.BeginMeshRegion(0f, 0f, Size, Size).ShouldBeTrue();
+                r.DrawMesh(Near, Identity, Red, Light);
+                r.DrawMesh(Far, Identity, Blue, Light);
+                r.EndMeshRegion();
+            });
+            ChannelRed(rgba, Centre, Centre).ShouldBe(255, "the near quad wins over the far one drawn after it");
+        }
+        for (var slot = 0; slot < VulkanContext.MaxFramesInFlight; slot++)
+            ctx.CachedLayerDepthImage(slot).ShouldNotBe(VkImage.Null);
+        ctx.OffscreenHasDepth.ShouldBeFalse("the main target never drew a mesh");
+
+        // 2D drawing in a layer that has depth comes out as it did without.
+        for (var frame = 0; frame < VulkanContext.MaxFramesInFlight; frame++)
+            LayerFrame(renderer, ctx, Scene).ShouldBe(baseline[0], "depth must not change a pixel of 2D drawing");
+    }
+
+    [Fact]
+    public void AnUpFrontRequestGivesACachedLayerDepthFromItsFirstPass()
+    {
+        Assert.SkipWhen(gpu.Context is null, "no Vulkan ICD on this host");
+        using var ctx = NewContext(VkSampleCountFlags.Count4);
+        Assert.SkipWhen(ctx is null, "no Vulkan ICD on this host");
+        using var renderer = new VkRenderer(ctx!, Size, Size);
+        renderer.RequireMeshDepth(MeshDepthTargets.CachedLayer);
+        renderer.EnsureCachedLayerTargets(Size, Size).ShouldBeTrue();
+
+        var rgba = LayerFrame(renderer, ctx!, r =>
+        {
+            r.BeginMeshRegion(0f, 0f, Size, Size).ShouldBeTrue();
+            r.DrawMesh(Near, Identity, Red, Light);
+            r.DrawMesh(Far, Identity, Blue, Light);
+            r.EndMeshRegion();
+        });
+        ChannelRed(rgba, Centre, Centre).ShouldBe(255);
+        ctx!.OffscreenHasDepth.ShouldBeFalse("only the layer was named");
+    }
+
+    // One thumbnail capture of CaptureSize squared, cleared to `clear`, recorded by `draw`; the RGBA that comes
+    // back (a few frames later, when the capture's fence index is waited again).
+    private const uint CaptureSize = 16;
+
+    private static byte[] Capture(VkRenderer renderer, VulkanContext ctx, RGBAColor32 clear, Action<VkRenderer> draw)
+    {
+        var record = true;
+        renderer.OnPreRenderPass = _ =>
+        {
+            if (!record) return;
+            record = false;
+            renderer.BeginThumbnailCapture(CaptureSize, CaptureSize, clear).ShouldBeTrue();
+            draw(renderer);
+            renderer.EndThumbnailCapture();
+        };
+        try
+        {
+            for (var frame = 0; frame < 8; frame++)
+            {
+                Frame(renderer, ctx, _ => { });
+                if (renderer.TryGetThumbnailCapture(out var rgba, out _, out _)) return rgba;
+            }
+        }
+        finally
+        {
+            renderer.OnPreRenderPass = null;
+        }
+        throw new Xunit.Sdk.XunitException("the capture never came back");
+    }
+
+    private static int CaptureRed(byte[] rgba, int x, int y) => rgba[(y * (int)CaptureSize + x) * 4];
+
+    [Theory]
+    [InlineData(VkSampleCountFlags.Count1)]
+    [InlineData(VkSampleCountFlags.Count4)]
+    public void AThumbnailCaptureTakesDepthOnlyOnceAMeshRegionAsksForIt(VkSampleCountFlags samples)
+    {
+        Assert.SkipWhen(gpu.Context is null, "no Vulkan ICD on this host");
+        using var ctx = NewContext(samples);
+        Assert.SkipWhen(ctx is null, "no Vulkan ICD on this host");
+        using var renderer = new VkRenderer(ctx!, Size, Size);
+        renderer.EnsureThumbnailTarget(CaptureSize, CaptureSize).ShouldBeTrue();
+        const int mid = (int)CaptureSize / 2;
+
+        // 2D into the capture: no depth image, and the picture is the baseline for after the switch.
+        var scene = (VkRenderer r) =>
+        {
+            r.FillRectangle(new RectInt(new PointInt(12, 12), new PointInt(2, 2)), Accent);
+            r.FillEllipse(new RectInt(new PointInt(14, 8), new PointInt(2, 2)), Ink);
+            r.DrawTriangles([1f, 1f, 15f, 4f, 3f, 14f], Red);
+        };
+        var baseline = Capture(renderer, ctx!, Black, scene);
+        ctx!.ThumbnailDepthImage.ShouldBe(VkImage.Null, "a capture that draws no mesh has no depth image");
+        baseline.Count(b => b != 0).ShouldBeGreaterThan(200);
+
+        var refused = Capture(renderer, ctx, Black, r =>
+        {
+            r.BeginMeshRegion(0f, 0f, CaptureSize, CaptureSize).ShouldBeFalse("the capture has no depth image yet");
+            r.DrawMesh(Near, Identity, Red, Light);
+            r.EndMeshRegion();
+        });
+        CaptureRed(refused, mid, mid).ShouldBe(0, "a region in a depth-less capture draws nothing");
+        renderer.TakeMeshDepthRedraw().ShouldBeTrue();
+        ctx.ThumbnailDepthImage.ShouldBe(VkImage.Null, "the pass in hand was recorded without depth");
+
+        var drawn = Capture(renderer, ctx, Black, r =>
+        {
+            r.BeginMeshRegion(0f, 0f, CaptureSize, CaptureSize).ShouldBeTrue();
+            r.DrawMesh(Near, Identity, Red, Light);
+            r.DrawMesh(Far, Identity, Blue, Light);
+            r.EndMeshRegion();
+        });
+        ctx.ThumbnailDepthImage.ShouldNotBe(VkImage.Null);
+        CaptureRed(drawn, mid, mid).ShouldBe(255, "the near quad wins over the far one drawn after it");
+        ctx.OffscreenHasDepth.ShouldBeFalse("the main target never drew a mesh");
+
+        Capture(renderer, ctx, Black, scene).ShouldBe(baseline, "depth must not change a pixel of 2D drawing");
     }
 
     /// <summary>

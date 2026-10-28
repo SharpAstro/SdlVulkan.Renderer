@@ -35,12 +35,25 @@ namespace SdlVulkan.Renderer;
 //
 // Memory note: under MSAA each slot needs its own multisample image as well (it cannot borrow the
 // swapchain's, which is in active use, nor a sibling slot's, which would reintroduce exactly the
-// cross-frame hazard above), and every slot carries a depth attachment at the same sample count (see
-// VulkanContext.Depth.cs). At 4x that is eight times the resolve size per slot, so capacity is worth
-// choosing deliberately rather than defaulting to something generous.
+// cross-frame hazard above), and a slot that draws a mesh carries a depth attachment at the same sample
+// count (see VulkanContext.Depth.cs; a slot starts without one, on the depth-less pass shape). At 4x that is
+// eight times the resolve size per slot with depth and four without, so capacity is worth choosing
+// deliberately rather than defaulting to something generous.
+//
+// Depth, per slot, on request. RequireMeshDepth(MeshDepthTargets.CachedLayer), or a BeginMeshRegion inside a
+// depth-less layer pass, marks the layer as wanting depth; each slot then takes a depth image and a new
+// framebuffer on the depth pass at its own next BeginCachedLayerPass (the slot of the frame being
+// recorded: the other is in flight and gets its turn next frame). The framebuffer it replaces may already
+// be bound in the frame being recorded, so it is destroyed through DeferDestroy, not on the spot. A
+// layer that was refused a mesh holds the picture without it until its consumer renders it again.
 public sealed unsafe partial class VulkanContext
 {
+    // The pass by shape: the depth-less one every slot starts on, and the depth one a slot moves to.
     private VkRenderPass _layerRenderPass;
+    private VkRenderPass _layerRenderPassDepth;
+    private readonly bool[] _layerHasDepth = new bool[MaxFramesInFlight];
+    // Whether the pass begun last (BeginCachedLayerPass) is on the depth shape, so which pipeline set it draws.
+    private bool _layerPassHasDepth;
 
     // Per-slot resolve image: the single-sample colour attachment (the MSAA resolve target when MSAA is
     // on) and the image the descriptor set points at.
@@ -130,7 +143,8 @@ public sealed unsafe partial class VulkanContext
 
         _layerTargetW = maxW;
         _layerTargetH = maxH;
-        _layerRenderPass = CreateCachedLayerRenderPass(OffscreenFormat, MsaaSamples);
+        _layerRenderPass = CreateCachedLayerRenderPass(OffscreenFormat, MsaaSamples, withDepth: false);
+        _layerRenderPassDepth = CreateCachedLayerRenderPass(OffscreenFormat, MsaaSamples, withDepth: true);
         for (var i = 0; i < MaxFramesInFlight; i++)
         {
             CreateCachedLayerTarget(i, maxW, maxH);
@@ -225,16 +239,46 @@ public sealed unsafe partial class VulkanContext
             DeviceApi.vkCreateImageView(&msaaViewCI, null, out _layerMsaaViews[slot]).CheckResult();
         }
 
-        CreateDepthAttachment(width, height,
-            out _layerDepthImages[slot], out _layerDepthMemories[slot], out _layerDepthViews[slot]);
+        // Depth only if the layer has already asked for it: a slot that never draws a mesh has no depth image.
+        _layerHasDepth[slot] = _layerWantsDepth;
+        if (_layerHasDepth[slot])
+            CreateDepthAttachment(width, height,
+                out _layerDepthImages[slot], out _layerDepthMemories[slot], out _layerDepthViews[slot]);
+        CreateCachedLayerFramebuffer(slot, width, height);
+    }
 
+    private void CreateCachedLayerFramebuffer(int slot, uint width, uint height)
+    {
         var msaa = MsaaSamples != VkSampleCountFlags.Count1;
-        _layerFramebuffers[slot] = CreateCompatibleFramebuffer(_layerRenderPass,
+        _layerFramebuffers[slot] = CreateCompatibleFramebuffer(
+            _layerHasDepth[slot] ? _layerRenderPassDepth : _layerRenderPass,
             colorView: msaa ? _layerMsaaViews[slot] : _layerViews[slot],
             depthView: _layerDepthViews[slot],
             resolveView: _layerViews[slot],
             width, height);
     }
+
+    // Takes a slot to the depth shape: the allocation a mesh asked for. The slot's previous frame has
+    // retired (BeginFrame waited its fence), but the frame being recorded may already have bound the
+    // framebuffer being replaced, so that one goes through DeferDestroy. The image and its contents stay.
+    private void AddCachedLayerDepth(int slot)
+    {
+        var old = _layerFramebuffers[slot];
+        CreateDepthAttachment(_layerTargetW, _layerTargetH,
+            out _layerDepthImages[slot], out _layerDepthMemories[slot], out _layerDepthViews[slot]);
+        _layerHasDepth[slot] = true;
+        CreateCachedLayerFramebuffer(slot, _layerTargetW, _layerTargetH);
+        DeferDestroy(() => DeviceApi.vkDestroyFramebuffer(old));
+    }
+
+    /// <summary>
+    /// Whether the cached-layer pass begun last by <see cref="BeginCachedLayerPass"/> carries a depth
+    /// attachment, which is what lets a mesh region draw in it.
+    /// </summary>
+    internal bool CachedLayerPassHasDepth => _layerPassHasDepth;
+
+    // A slot's depth image handle, for the tests: Null while the slot has none.
+    internal VkImage CachedLayerDepthImage(int slot) => _layerDepthImages[slot];
 
     /// <remarks>
     /// The shared shape (VulkanDevice.CreateCompatibleRenderPass) -- same attachment formats, sample
@@ -246,9 +290,9 @@ public sealed unsafe partial class VulkanContext
     /// fragment-shader read for this class; a pass declaring a different count is reported as
     /// VUID-vkCmdDraw-renderPass-02684, which is why the pair is shared rather than per pass.
     /// </remarks>
-    private VkRenderPass CreateCachedLayerRenderPass(VkFormat format, VkSampleCountFlags msaaSamples)
+    private VkRenderPass CreateCachedLayerRenderPass(VkFormat format, VkSampleCountFlags msaaSamples, bool withDepth)
         => VulkanDevice.CreateCompatibleRenderPass(DeviceApi, format, DepthFormat, msaaSamples,
-            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.ShaderReadOnlyOptimal);
+            VkAttachmentLoadOp.Clear, VkImageLayout.Undefined, VkImageLayout.ShaderReadOnlyOptimal, withDepth);
 
     /// <summary>
     /// Begins the cached-layer render pass into the (w,h) top-left sub-rect of this frame's slot,
@@ -263,21 +307,27 @@ public sealed unsafe partial class VulkanContext
         if (!_layerTargetReady || _inLayerPass) return false;
         if (w == 0 || h == 0 || w > _layerTargetW || h > _layerTargetH) return false;
 
+        // A mesh asked for depth since the slot was last recorded: it changes shape here, before a pass
+        // begins on it, so this one records with it.
+        if (_layerWantsDepth && !_layerHasDepth[_currentFrame]) AddCachedLayerDepth(_currentFrame);
+        var withDepth = _layerHasDepth[_currentFrame];
+        _layerPassHasDepth = withDepth;
+
         // The pass is timed as its own GPU section, opened before the pass begins and closed after it
         // ends, so on a tiling GPU too it brackets work that has really run (see VulkanContext.GpuTiming.cs).
         BeginGpuSection(CachedLayerGpuSection);
 
         Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
-        FillClearValues(clears, clearColor.Red / 255f, clearColor.Green / 255f,
-            clearColor.Blue / 255f, clearColor.Alpha / 255f);
+        var clearCount = FillClearValues(clears, clearColor.Red / 255f, clearColor.Green / 255f,
+            clearColor.Blue / 255f, clearColor.Alpha / 255f, withDepth);
         fixed (VkClearValue* pClears = clears)
         {
             VkRenderPassBeginInfo rpBI = new()
             {
-                renderPass = _layerRenderPass,
+                renderPass = withDepth ? _layerRenderPassDepth : _layerRenderPass,
                 framebuffer = _layerFramebuffers[_currentFrame],
                 renderArea = new VkRect2D(0, 0, w, h),
-                clearValueCount = ClearValueCount,
+                clearValueCount = (uint)clearCount,
                 pClearValues = pClears
             };
             DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
@@ -339,6 +389,7 @@ public sealed unsafe partial class VulkanContext
                 _layerMsaaMemories[i] = VkDeviceMemory.Null;
             }
             DestroyDepthAttachment(ref _layerDepthImages[i], ref _layerDepthMemories[i], ref _layerDepthViews[i]);
+            _layerHasDepth[i] = false;
             if (_layerViews[i] != VkImageView.Null)
             {
                 DeviceApi.vkDestroyImageView(_layerViews[i]);
@@ -363,6 +414,11 @@ public sealed unsafe partial class VulkanContext
         {
             DeviceApi.vkDestroyRenderPass(_layerRenderPass);
             _layerRenderPass = VkRenderPass.Null;
+        }
+        if (_layerRenderPassDepth != VkRenderPass.Null)
+        {
+            DeviceApi.vkDestroyRenderPass(_layerRenderPassDepth);
+            _layerRenderPassDepth = VkRenderPass.Null;
         }
 
         _layerTargetW = 0;

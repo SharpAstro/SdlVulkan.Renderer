@@ -118,9 +118,15 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public VkCommandPool CommandPool => _dev.CommandPool;
     public VkRenderPass RenderPass => _dev.RenderPass;
 
-    // The depth-less variants of the main passes, for the pipeline sets of a target that has no depth.
-    internal VkRenderPass RenderPassNoDepth => _dev.RenderPassNoDepth;
-    internal VkRenderPass SingleSampleRenderPassNoDepth => _dev.SingleSampleRenderPassNoDepth;
+    /// <summary>The depth-less variant of <see cref="RenderPass"/>: the same shape without the depth attachment,
+    /// which every target is on until a mesh asks for depth (see <see cref="RequireMeshDepth"/>). A side-car
+    /// pipeline is render-pass compatible with one shape or the other, so it is created against this pass, or
+    /// against <see cref="RenderPass"/>, or both, and bound by <see cref="VkRenderer.CurrentPassHasDepth"/>.</summary>
+    public VkRenderPass RenderPassNoDepth => _dev.RenderPassNoDepth;
+
+    /// <summary>The depth-less variant of <see cref="SingleSampleRenderPass"/>; Null when the device does not
+    /// multisample.</summary>
+    public VkRenderPass SingleSampleRenderPassNoDepth => _dev.SingleSampleRenderPassNoDepth;
     public VkDescriptorPool DescriptorPool => _dev.DescriptorPool;
 
     /// <summary>The one linear/clamp sampler every <see cref="VkTexture"/> binds — see
@@ -835,6 +841,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
         AssertFrameThread(nameof(BeginFrame));
         resized = false;
         NoteUnendedFrameDropped();
+        // A mesh asked for depth since the last frame (RequireMeshDepth, or a BeginMeshRegion that found
+        // none): the swapchain's framebuffers change shape here, between frames, so this one records with it.
+        if (_mainWantsDepth && !_mainHasDepth) AddSwapchainDepth();
         var fence = _inFlightFences[_currentFrame];
         // Bounded wait. We rely on the submit signaling this fence — including on drivers (Adreno
         // X1-85) where vkQueueSubmit returns a bogus error yet still signals normally. If a fence is
@@ -967,7 +976,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         bool singleSample = false)
     {
         Span<VkClearValue> clears = stackalloc VkClearValue[ClearValueCount];
-        FillClearValues(clears, clearR, clearG, clearB, clearA);
+        var clearCount = FillClearValues(clears, clearR, clearG, clearB, clearA, _mainHasDepth);
         var single = singleSample && SingleSampleMainPassAvailable;
         LastFrameSingleSampled = single;
 
@@ -975,10 +984,10 @@ public sealed unsafe partial class VulkanContext : IDisposable
         {
             VkRenderPassBeginInfo rpBI = new()
             {
-                renderPass = single ? SingleSampleRenderPass : RenderPass,
+                renderPass = single ? MainSingleSampleRenderPass : MainRenderPass,
                 framebuffer = single ? _singleSampleFramebuffers[_currentImageIndex] : _framebuffers[_currentImageIndex],
                 renderArea = new VkRect2D(0, 0, SwapchainWidth, SwapchainHeight),
-                clearValueCount = ClearValueCount,
+                clearValueCount = (uint)clearCount,
                 pClearValues = pClears
             };
             DeviceApi.vkCmdBeginRenderPass(cmd, &rpBI, VkSubpassContents.Inline);
@@ -1517,29 +1526,65 @@ public sealed unsafe partial class VulkanContext : IDisposable
             DeviceApi.vkCreateImageView(&msaaViewCI, null, out _msaaImageView).CheckResult();
         }
 
-        // One depth image for every framebuffer: frames execute in order and the depth is never
-        // stored, so image N's pass and image N+1's cannot see each other's values.
-        CreateDepthAttachment(extent.width, extent.height, out _depthImage, out _depthMemory, out _depthImageView);
-
         // A swapchain image that has just been created holds nothing, and a resized one holds the
         // wrong size, so no frame may be preserved until each has been painted once.
+        ResetDamageState((int)imgCount);
+        CreateSwapchainFramebuffers(extent.width, extent.height);
+    }
+
+    // The part of the swapchain that follows the depth shape: the depth image, the damage load pass, the
+    // framebuffers and the single-sample targets, built for whatever has been asked for, so a recreation keeps
+    // the shape and a late request is honoured at once. None of it holds a frame's pixels: those are the
+    // swapchain's images and, under MSAA, the multisample image, which stay.
+    private void CreateSwapchainFramebuffers(uint width, uint height)
+    {
+        _mainHasDepth = _mainWantsDepth;
+        // One depth image for every framebuffer: frames execute in order and the depth is never
+        // stored, so image N's pass and image N+1's cannot see each other's values. None at all on the
+        // depth-less shape: that is the allocation this saves.
+        if (_mainHasDepth)
+            CreateDepthAttachment(width, height, out _depthImage, out _depthMemory, out _depthImageView);
+
         CleanupLoadRenderPass();
         _loadRenderPass = CreateLoadRenderPass(SwapchainFormat);
-        ResetDamageState((int)imgCount);
 
         // Create framebuffers. Under MSAA the multisample image is the colour attachment and the
         // swapchain image its resolve target; without it the swapchain image is the colour attachment.
+        var imgCount = _swapchainImageViews.Length;
         _framebuffers = new VkFramebuffer[imgCount];
         var msaa = MsaaSamples != VkSampleCountFlags.Count1;
         for (var i = 0; i < imgCount; i++)
         {
-            _framebuffers[i] = CreateCompatibleFramebuffer(RenderPass,
+            _framebuffers[i] = CreateCompatibleFramebuffer(MainRenderPass,
                 colorView: msaa ? _msaaImageView : _swapchainImageViews[i],
                 depthView: _depthImageView,
                 resolveView: _swapchainImageViews[i],
-                extent.width, extent.height);
+                width, height);
         }
-        CreateSingleSampleSwapchainTargets(SwapchainFormat, extent.width, extent.height);
+        CreateSingleSampleSwapchainTargets(SwapchainFormat, width, height);
+    }
+
+    // The framebuffers and depth images, and nothing else of the swapchain: what a change of shape replaces.
+    private void DestroySwapchainFramebuffers()
+    {
+        CleanupSingleSampleSwapchainTargets();
+        foreach (var fb in _framebuffers)
+            DeviceApi.vkDestroyFramebuffer(fb);
+        _framebuffers = [];
+        DestroyDepthAttachment(ref _depthImage, ref _depthMemory, ref _depthImageView);
+    }
+
+    // Switches the swapchain to the depth shape: the allocation a mesh asked for. Runs between frames, from
+    // BeginFrame; the framebuffers and load passes it replaces may still be named by a frame in flight, so
+    // the device is drained first. Bounded: on a drain that times out (a stuck GPU) the switch waits for a
+    // later frame, the request standing, rather than destroy what a frame may still read. With no swapchain
+    // (surface lost) there is nothing to change and the recreation builds the shape asked for.
+    private void AddSwapchainDepth()
+    {
+        if (_swapchainImageViews.Length == 0) return;
+        if (!TryDrainDevice(DrainTimeoutNs, "swapchain depth")) return;
+        DestroySwapchainFramebuffers();
+        CreateSwapchainFramebuffers(SwapchainWidth, SwapchainHeight);
     }
 
     // The swapchain itself and its images, for CreateSwapchain: everything about presenting through the surface.
@@ -1631,15 +1676,11 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     private void CleanupSwapchain()
     {
-        CleanupSingleSampleSwapchainTargets();
-        foreach (var fb in _framebuffers)
-            DeviceApi.vkDestroyFramebuffer(fb);
+        DestroySwapchainFramebuffers();
         foreach (var iv in _swapchainImageViews)
             DeviceApi.vkDestroyImageView(iv);
         // A layered context's image is its own, where a swapchain's belong to the swapchain, so it goes here.
         CleanupLayeredImage();
-
-        DestroyDepthAttachment(ref _depthImage, ref _depthMemory, ref _depthImageView);
 
         // Cleanup MSAA resources
         if (_msaaImageView != VkImageView.Null)
