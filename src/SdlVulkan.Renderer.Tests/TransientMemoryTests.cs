@@ -4,7 +4,7 @@ using Xunit;
 namespace SdlVulkan.Renderer.Tests;
 
 /// <summary>
-/// Transient attachments — the depth every pass carries, the multisample colour under MSAA — go into
+/// Transient attachments — the depth a target carries once it draws a mesh, the multisample colour under MSAA — go into
 /// lazily allocated memory where the device has any, so a tiler never backs them at all.
 /// </summary>
 /// <remarks>
@@ -35,8 +35,10 @@ public sealed class TransientMemoryTests(OffscreenGpuFixture gpu)
             return;
         }
 
-        // The fixture's offscreen target carries a depth attachment, so the choice has already been
-        // made by the time any test runs; a resize makes it again on this test's watch.
+        // The fixture's offscreen target is single-sample and starts without a depth attachment, so on its
+        // own it allocates no transient image. Asking for depth makes it carry one, and the resize makes
+        // the choice of memory again on this test's watch, whichever test ran first.
+        ctx.RequireMeshDepth();
         ctx.ResizeOffscreen(64, 64);
         ctx.GraphicsDevice.TransientMemoryIsLazy.ShouldBeTrue(
             "the device offers lazily allocated memory and a transient attachment did not take it");
