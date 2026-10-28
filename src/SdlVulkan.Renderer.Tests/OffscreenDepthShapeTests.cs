@@ -453,7 +453,9 @@ public sealed class OffscreenDepthShapeTests(OffscreenGpuFixture gpu)
                     }
                     renderer.EndOffscreenFrame();
                     if (frame == frames - 1 || frame == frames) ctx!.WaitOffscreenFrameComplete();
-                    if (frame == 2 * frames) ctx!.ResizeOffscreen(Size - 8, Size - 8);
+                    // Through the renderer, not the context: it resizes both, so the damage region the next
+                    // frame starts with is the new target's and a clear stays inside the render area.
+                    if (frame == 2 * frames) renderer.ResizeOffscreen(Size - 8, Size - 8);
                 }
                 ctx!.WaitOffscreenFrameComplete();
                 ctx.OffscreenHasDepth.ShouldBeTrue();
