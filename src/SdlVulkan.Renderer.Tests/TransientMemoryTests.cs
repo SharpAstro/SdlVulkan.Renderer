@@ -36,10 +36,11 @@ public sealed class TransientMemoryTests(OffscreenGpuFixture gpu)
         }
 
         // The fixture's offscreen target is single-sample and starts without a depth attachment, so on its
-        // own it allocates no transient image. Asking for depth makes it carry one, and the resize makes
-        // the choice of memory again on this test's watch, whichever test ran first.
+        // own it allocates no transient image. Asking for depth makes it carry one, and a resize makes
+        // the choice of memory again on this test's watch, whichever test ran first. The size has to change
+        // for the target to be rebuilt, so it is not the one a previous test left.
         ctx.RequireMeshDepth();
-        ctx.ResizeOffscreen(64, 64);
+        ctx.ResizeOffscreen(ctx.OffscreenWidth == 64 ? 72u : 64u, 64);
         ctx.GraphicsDevice.TransientMemoryIsLazy.ShouldBeTrue(
             "the device offers lazily allocated memory and a transient attachment did not take it");
     }
