@@ -7,6 +7,20 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.77
+
+**`SDLVK_VALIDATION=1` turns validation on in a Release build too.**
+
+- The Khronos layer, the debug-utils messenger and (with `SDLVK_SYNC_VALIDATION=1`) synchronization validation
+  needed a Debug build **and** the variable, so the Release/AOT build a consumer ships, the one whose GPU hangs, could
+  only be validated by forcing the layer through the loader (`VK_INSTANCE_LAYERS`), with no messenger and no counts.
+  The variable alone now does it, in any build. 6.19's entry said "DEBUG or SDLVK_VALIDATION=1"; the code had
+  required both, and now requires only the variable.
+- Unset, nothing changes: the variable is read once at start-up and checked only while the instance is created, so
+  a Release build without it runs as before, with no layer and no messenger.
+- Messages go to `SdlVulkanLog.Logger` (stderr unless the host sets its own). The inspector's `validation_report`
+  stays Debug-only, as the inspector is.
+
 ## 7.76
 
 **`SdlVulkan.Renderer.Debug`: a twin package built Debug, so a Debug consumer gets the inspector (#148).**
