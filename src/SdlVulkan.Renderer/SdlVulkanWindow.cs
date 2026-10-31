@@ -713,7 +713,7 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         var sdlExtensionNames = VulkanGetInstanceExtensions(out _)
             ?? throw new InvalidOperationException("SDL_Vulkan_GetInstanceExtensions failed");
 
-        // DEBUG build or SDLVK_VALIDATION=1: enable the Khronos validation layer + a debug-utils
+        // SDLVK_VALIDATION=1, in any build: enable the Khronos validation layer + a debug-utils
         // messenger so the layer's output is captured (routed to stderr + the inspector ring buffer)
         // instead of dropped. SDLVK_SYNC_VALIDATION=1 additionally turns on synchronization
         // validation, the GPU memory-hazard checker. All a no-op if the layer isn't installed.

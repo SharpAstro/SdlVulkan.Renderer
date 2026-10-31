@@ -255,7 +255,7 @@ public sealed class InspectorTools
         + "class of bug behind GPU wedges -- after driving the app (open a document, pan/zoom). syncHazards "
         + "> 0 means a read/write ordering hazard was recorded. Returns {enabled, syncValidation, "
         + "totalMessages, syncHazards, recent[]}. Everything is zero/false unless the app runs with the "
-        + "validation layer installed AND enabled (a DEBUG build or SDLVK_VALIDATION=1; sync validation also "
+        + "validation layer installed AND enabled (SDLVK_VALIDATION=1, in any build; sync validation also "
         + "needs SDLVK_SYNC_VALIDATION=1).")]
     public static async Task<string> validation_report(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,

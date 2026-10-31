@@ -21,13 +21,15 @@ namespace SdlVulkan.Renderer;
 /// recovery + fast-exit remain the field mechanism for an actual wedge; this is how you FIND and
 /// prevent the bug in dev/CI so the field never sees it.
 ///
-/// Gating (never on in a shipping build — the layer carries real CPU cost and is not shipped):
+/// Gating (never on by default — the layer carries real CPU cost and is not shipped):
 /// <list type="bullet">
-/// <item>Layer + messenger + logging: DEBUG build <b>and</b> <c>SDLVK_VALIDATION=1</c> — opt-in even
-/// in Debug. The layer validates EVERY <c>vkCmd*</c> call, so with it always-on a Debug session ran
-/// several times slower than Release for no diagnostic benefit when nobody was reading the reports;
-/// a plain Debug run is now fast by default and validation is a deliberate act (the tianwen
-/// <c>run-gui</c> skill sets the variable when a GPU bug is actually being chased).</item>
+/// <item>Layer + messenger + logging: <c>SDLVK_VALIDATION=1</c>, in any build. The layer validates
+/// EVERY <c>vkCmd*</c> call, so with it always-on a Debug session ran several times slower than
+/// Release for no diagnostic benefit when nobody was reading the reports; a plain run is fast by
+/// default and validation is a deliberate act (the tianwen <c>run-gui</c> skill sets the variable
+/// when a GPU bug is actually being chased). A Release build honours it too, so the build that hangs
+/// in the field can be validated as it is; unset, the variable costs one read at start-up and a
+/// branch at instance creation, nothing a frame.</item>
 /// <item>Synchronization validation (extra cost): additionally requires <c>SDLVK_SYNC_VALIDATION=1</c>.</item>
 /// </list>
 /// Everything degrades to a no-op when the layer is not installed on the host.
@@ -48,15 +50,9 @@ internal static unsafe class VulkanValidation
     // instance with no messenger is a safe no-op.
     private static readonly ConcurrentDictionary<nint, VkDebugUtilsMessengerEXT> s_messengers = new();
 
-#if DEBUG
-    private const bool CompiledDebug = true;
-#else
-    private const bool CompiledDebug = false;
-#endif
-
-    /// <summary>Layer + messenger + logging on: a DEBUG build <b>and</b> <c>SDLVK_VALIDATION=1</c>.
-    /// Opt-in even in Debug (see the class doc) — a Release/AOT build can never enable it.</summary>
-    public static bool Enabled { get; } = CompiledDebug && IsEnvSet("SDLVK_VALIDATION");
+    /// <summary>Layer + messenger + logging on: <c>SDLVK_VALIDATION=1</c>, in a Debug or a Release/AOT
+    /// build alike. Opt-in in both (see the class doc).</summary>
+    public static bool Enabled { get; } = IsEnvSet("SDLVK_VALIDATION");
 
     /// <summary>Synchronization validation additionally enabled (opt-in via <c>SDLVK_SYNC_VALIDATION=1</c>).
     /// Only meaningful when <see cref="Enabled"/>.</summary>
