@@ -7,6 +7,21 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.78
+
+**Disposing the renderer waits for the frames in flight before destroying its pipelines.**
+
+- `VkRenderer.Dispose` destroyed its pipelines and font atlases at once, and every host disposes the renderer BEFORE
+  the context, whose `vkDeviceWaitIdle` was the only drain. A frame still on the GPU then held pipelines being
+  destroyed: `VUID-vkDestroyPipeline-pipeline-00765`, "can't be called on VkPipeline ... that is currently in use by
+  VkCommandBuffer", found under the validation layer at TransparencyProbe's exit on an Adreno X1-85. YtPlayer and
+  the Android activity tear down in the same order.
+- It now waits first with `TryWaitAllFramesIdle`: bounded, skipped on a GPU already known stuck, and on a timeout
+  the objects are destroyed anyway, since a teardown has no rebuild behind it and ending beats hanging. A context
+  disposed before its renderer has drained already, so nothing is waited for then.
+- `RendererDisposeTests` disposes the renderer right after a submitted frame under the validation layer and asserts
+  no error; it failed with the message above before the change.
+
 ## 7.77
 
 **`SDLVK_VALIDATION=1` turns validation on in a Release build too.**
