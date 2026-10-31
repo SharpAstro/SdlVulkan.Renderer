@@ -3115,6 +3115,15 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     public override void Dispose()
     {
+        // The pipelines and atlases below may still be in use by a frame in flight: every host disposes the renderer
+        // BEFORE its context, whose drain came too late for them (VUID-vkDestroyPipeline-pipeline-00765). Bounded, and
+        // skipped on a GPU already known stuck; on a timeout they are destroyed anyway, since this is teardown with no
+        // rebuild behind it and ending the app beats hanging on a wedged device. A context disposed first has drained.
+        if (!Surface.IsDisposed)
+        {
+            Surface.TryWaitAllFramesIdle("renderer dispose");
+        }
+
         _sdfFontAtlas?.Dispose();
         _sdfFontAtlas = null;
         _sdfFontAtlasLarge?.Dispose();

@@ -1336,6 +1336,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     public VkBuffer VertexBuffer => _vertexBuffers[_currentFrame];
 
+    /// <summary>Whether <see cref="Dispose"/> has run: its fences are gone, so nothing may wait on them.</summary>
+    internal bool IsDisposed => _disposed;
+
     public void Dispose()
     {
         if (_disposed) return;
