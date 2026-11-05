@@ -47,14 +47,23 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// surface. The window owns the SDL lifecycle (SDL_Quit on dispose); the instance is torn down by
     /// the owning <see cref="VulkanContext"/>/<see cref="VulkanDevice"/>. For multiple windows use
     /// <see cref="SdlVulkanApp"/> instead, which owns one SDL lifecycle + instance + shared device.
+    /// <para><paramref name="keepDisplayAwake"/> is <c>false</c> by default, so the app does NOT hold the display on:
+    /// SDL's own default (<c>SDL_HINT_VIDEO_ALLOW_SCREENSAVER</c> = "0") suppresses the screensaver and display sleep
+    /// for as long as a window is open, which is wrong for a dashboard open all day, and would quietly undercut an
+    /// app that manages power itself (tianwen keeps the system awake during an imaging run but lets the display
+    /// sleep, as you want at a dark site). Pass <c>true</c>, or call <see cref="KeepDisplayAwake"/> later, for a view
+    /// that needs the display on, such as a live view or a focusing screen.</para>
     /// </summary>
     /// <param name="clickThroughOnFocus">Deliver the mouse-down that activates an unfocused window to the app as an
     /// ordinary click (<c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c>), as native Windows and macOS apps do. Default
     /// <c>true</c>; an app whose canvas does something costly or irreversible on a bare click can pass <c>false</c>
     /// to keep SDL's behaviour, where the first click only focuses the window.</param>
+    /// <param name="keepDisplayAwake">Hold the display on while the window is open (<c>SDL_HINT_VIDEO_ALLOW_SCREENSAVER</c>
+    /// "0"). Default <c>false</c>: the display may sleep.</param>
     public static SdlVulkanWindow Create(string title, int width, int height, bool fullscreen = false,
-        bool clickThroughOnFocus = true)
-        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus), title, width, height, ownsSdl: true, fullscreen: fullscreen);
+        bool clickThroughOnFocus = true, bool keepDisplayAwake = false)
+        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake), title, width, height,
+            ownsSdl: true, fullscreen: fullscreen);
 
     /// <summary>
     /// Standalone path for a window whose pixels blend with what is behind it, a desktop companion or an overlay:
@@ -62,13 +71,17 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// with <see cref="VulkanContext.CreateTransparent"/>, clear each frame to alpha 0, and use
     /// <see cref="SetShape"/> to let clicks through outside the silhouette (a layered window, see
     /// <see cref="AlphaPresentation.LayeredWindow"/>, lets them through wherever alpha is zero without one).
+    /// <para><paramref name="keepDisplayAwake"/> is <c>false</c> by default: the app lets the display sleep (SDL's
+    /// own default would hold it on while the window is open), a dashboard open all day, and an app with its own
+    /// power policy such as tianwen, are the reasons. See <see cref="Create"/>.</para>
     /// </summary>
     /// <param name="clickThroughOnFocus">Deliver the mouse-down that activates an unfocused window to the app as an
     /// ordinary click (<c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c>). Default <c>true</c>; an app whose canvas does
     /// something costly or irreversible on a bare click can pass <c>false</c>, so the first click only focuses.</param>
+    /// <param name="keepDisplayAwake">Hold the display on while the window is open. Default <c>false</c>.</param>
     public static SdlVulkanWindow CreateTransparent(string title, int width, int height, bool borderless = true,
-        bool alwaysOnTop = true, bool clickThroughOnFocus = true)
-        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus), title, width, height, ownsSdl: true, maximized: false,
+        bool alwaysOnTop = true, bool clickThroughOnFocus = true, bool keepDisplayAwake = false)
+        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake), title, width, height, ownsSdl: true, maximized: false,
             borderless: borderless, alwaysOnTop: alwaysOnTop, transparent: true);
 
     /// <summary>
@@ -142,10 +155,12 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// <summary>
     /// Initializes SDL (video + events), loads Vulkan, and creates the shared instance. Called once
     /// by the standalone <see cref="Create"/> path and once by <see cref="SdlVulkanApp.Create"/>.
+    /// The display-sleep hint is set first: SDL reads it at video init, so it must precede <c>SDL_Init</c>.
     /// </summary>
-    internal static VkInstance InitSdlAndCreateInstance(bool clickThroughOnFocus = true)
+    internal static VkInstance InitSdlAndCreateInstance(bool clickThroughOnFocus = true, bool keepDisplayAwake = false)
     {
         ApplyInitHints(clickThroughOnFocus);
+        ApplyDisplaySleepHint(keepDisplayAwake);
 
         if (!Init(InitFlags.Video | InitFlags.Events))
             throw new InvalidOperationException($"SDL_Init failed: {GetError()}");
@@ -154,6 +169,33 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         vkInitialize().CheckResult();
 
         return CreateVulkanInstance();
+    }
+
+    /// <summary>
+    /// Chooses, on purpose, whether SDL holds the display on while a window is open. SDL's own default holds it
+    /// (the hint is "0": screensaver NOT allowed); the library lets the display sleep unless asked otherwise.
+    /// Must run before <c>SDL_Init</c> to take effect at video init. It overwrites a value the host set itself for this hint
+    /// (only the <c>SDL_VIDEO_ALLOW_SCREENSAVER</c> environment variable still wins); opt in with <c>keepDisplayAwake</c>.
+    /// </summary>
+    internal static void ApplyDisplaySleepHint(bool keepDisplayAwake)
+        => SetHint(Hints.VideoAllowScreensaver, keepDisplayAwake ? "0" : "1");
+
+    /// <summary>
+    /// Holds the display awake (<paramref name="awake"/> <c>true</c>, <c>SDL_DisableScreenSaver</c>) or lets it sleep
+    /// again (<c>false</c>, <c>SDL_EnableScreenSaver</c>) from now on. This is process-wide in SDL, not per window:
+    /// it affects every window of the app. Meant for a view that needs it while it is up, such as a live view or a
+    /// focusing screen; turn it off again when the view closes. The creation option <c>keepDisplayAwake</c> sets the
+    /// starting state.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">SDL refused the call, as the <c>dummy</c> and <c>offscreen</c> drivers do.</exception>
+    public void KeepDisplayAwake(bool awake) => SetKeepDisplayAwake(awake);
+
+    // The process-wide SDL call behind KeepDisplayAwake, static so it is testable without a window.
+    internal static void SetKeepDisplayAwake(bool awake)
+    {
+        if (!(awake ? DisableScreenSaver() : EnableScreenSaver()))
+            throw new InvalidOperationException(
+                $"{(awake ? "SDL_DisableScreenSaver" : "SDL_EnableScreenSaver")} failed: {GetError()}");
     }
 
     public void GetSizeInPixels(out int w, out int h) => GetWindowSizeInPixels(Handle, out w, out h);
