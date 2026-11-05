@@ -48,6 +48,8 @@ while (running)
 }
 ```
 
+The click that activates an unfocused window is delivered to the app as an ordinary click (`SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH`, set before `SDL_Init`), so one click focuses the window and presses the button. An app whose canvas does something costly or irreversible on a bare click passes `clickThroughOnFocus: false` to `SdlVulkanApp.Create`, `SdlVulkanWindow.Create` or `SdlVulkanWindow.CreateTransparent`.
+
 ## Headless / offscreen rendering
 
 `VulkanContext.CreateOffscreen` builds a context that renders to a single `VkImage` instead of a swapchain. No `VkSurfaceKHR`, no SDL window, no `VK_KHR_swapchain` device extension requested — useful for tests, thumbnail / raster workers, CI without a display server, and server-side rendering.

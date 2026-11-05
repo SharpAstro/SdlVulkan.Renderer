@@ -48,8 +48,13 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// the owning <see cref="VulkanContext"/>/<see cref="VulkanDevice"/>. For multiple windows use
     /// <see cref="SdlVulkanApp"/> instead, which owns one SDL lifecycle + instance + shared device.
     /// </summary>
-    public static SdlVulkanWindow Create(string title, int width, int height, bool fullscreen = false)
-        => CreateInternal(InitSdlAndCreateInstance(), title, width, height, ownsSdl: true, fullscreen: fullscreen);
+    /// <param name="clickThroughOnFocus">Deliver the mouse-down that activates an unfocused window to the app as an
+    /// ordinary click (<c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c>), as native Windows and macOS apps do. Default
+    /// <c>true</c>; an app whose canvas does something costly or irreversible on a bare click can pass <c>false</c>
+    /// to keep SDL's behaviour, where the first click only focuses the window.</param>
+    public static SdlVulkanWindow Create(string title, int width, int height, bool fullscreen = false,
+        bool clickThroughOnFocus = true)
+        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus), title, width, height, ownsSdl: true, fullscreen: fullscreen);
 
     /// <summary>
     /// Standalone path for a window whose pixels blend with what is behind it, a desktop companion or an overlay:
@@ -58,9 +63,12 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// <see cref="SetShape"/> to let clicks through outside the silhouette (a layered window, see
     /// <see cref="AlphaPresentation.LayeredWindow"/>, lets them through wherever alpha is zero without one).
     /// </summary>
+    /// <param name="clickThroughOnFocus">Deliver the mouse-down that activates an unfocused window to the app as an
+    /// ordinary click (<c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c>). Default <c>true</c>; an app whose canvas does
+    /// something costly or irreversible on a bare click can pass <c>false</c>, so the first click only focuses.</param>
     public static SdlVulkanWindow CreateTransparent(string title, int width, int height, bool borderless = true,
-        bool alwaysOnTop = true)
-        => CreateInternal(InitSdlAndCreateInstance(), title, width, height, ownsSdl: true, maximized: false,
+        bool alwaysOnTop = true, bool clickThroughOnFocus = true)
+        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus), title, width, height, ownsSdl: true, maximized: false,
             borderless: borderless, alwaysOnTop: alwaysOnTop, transparent: true);
 
     /// <summary>
@@ -119,11 +127,26 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     }
 
     /// <summary>
+    /// Sets the SDL hints that must be in place before <c>SDL_Init</c>. SDL3 defaults
+    /// <c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c> to "0", so the mouse-down that activates an unfocused window is
+    /// swallowed and every action from another window takes two clicks; "1" delivers it as a normal click. When
+    /// <paramref name="clickThroughOnFocus"/> is false nothing is touched, so SDL's default (or a value the host
+    /// set itself) stands. Internal so the tests can read the hint back without a window.
+    /// </summary>
+    internal static void ApplyInitHints(bool clickThroughOnFocus)
+    {
+        if (clickThroughOnFocus)
+            SetHint(Hints.MouseFocusClickthrough, "1");
+    }
+
+    /// <summary>
     /// Initializes SDL (video + events), loads Vulkan, and creates the shared instance. Called once
     /// by the standalone <see cref="Create"/> path and once by <see cref="SdlVulkanApp.Create"/>.
     /// </summary>
-    internal static VkInstance InitSdlAndCreateInstance()
+    internal static VkInstance InitSdlAndCreateInstance(bool clickThroughOnFocus = true)
     {
+        ApplyInitHints(clickThroughOnFocus);
+
         if (!Init(InitFlags.Video | InitFlags.Events))
             throw new InvalidOperationException($"SDL_Init failed: {GetError()}");
 
