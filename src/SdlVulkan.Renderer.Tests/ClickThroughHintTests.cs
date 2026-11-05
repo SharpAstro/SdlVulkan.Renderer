@@ -9,12 +9,17 @@ namespace SdlVulkan.Renderer.Tests;
 /// SDL3 defaults <c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c> to "0", which swallows the mouse-down that activates an
 /// unfocused window. The library sets it to "1" before <c>SDL_Init</c> unless the app opts out with
 /// <c>clickThroughOnFocus: false</c>. Hints are plain process-global strings that SDL_GetHint reads without
-/// SDL_Init, so no GPU and no window are needed; the collection keeps these tests off each other's hint.
+/// SDL_Init, so no GPU and no window are needed. The collection keeps any other class that touches SDL hints off this one;
+/// the SDL_MOUSE_FOCUS_CLICKTHROUGH environment variable, which SDL_GetHint falls back to, is cleared for the test.
 /// </summary>
 [Collection("SdlHints")]
 public class ClickThroughHintTests : IDisposable
 {
-    public ClickThroughHintTests() => ResetHint(Hints.MouseFocusClickthrough);
+    public ClickThroughHintTests()
+    {
+        Environment.SetEnvironmentVariable("SDL_MOUSE_FOCUS_CLICKTHROUGH", null);
+        ResetHint(Hints.MouseFocusClickthrough);
+    }
 
     public void Dispose() => ResetHint(Hints.MouseFocusClickthrough);
 
