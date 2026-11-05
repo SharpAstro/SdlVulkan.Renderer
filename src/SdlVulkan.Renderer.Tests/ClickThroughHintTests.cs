@@ -1,3 +1,4 @@
+using System;
 using Shouldly;
 using Xunit;
 using static SDL3.SDL;
