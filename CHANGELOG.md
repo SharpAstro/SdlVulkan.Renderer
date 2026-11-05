@@ -7,6 +7,18 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.79
+
+**The click that activates an unfocused window now reaches the app.**
+
+- SDL3 defaults `SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH` to `"0"`, so the mouse-down that focuses a window was swallowed
+  and every action from another window took two clicks (SdlVulkan.Renderer #155). The hint is now set to `"1"`
+  before `SDL_Init`, so one click focuses the window AND presses the button, as in native Windows and macOS apps.
+  Nothing else about focus, hover or drag start changes.
+- New option `clickThroughOnFocus` (default `true`, last parameter) on `SdlVulkanApp.Create`,
+  `SdlVulkanWindow.Create` and `SdlVulkanWindow.CreateTransparent`. An app whose canvas does something costly or
+  irreversible on a bare click passes `false`: the hint is then left alone, so SDL's default stands.
+
 ## 7.78
 
 **Disposing the renderer waits for the frames in flight before destroying its pipelines.**
