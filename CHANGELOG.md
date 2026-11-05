@@ -7,6 +7,24 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.80
+
+**The display may sleep: SDL no longer holds it on by default.**
+
+- SDL3 suppresses the screensaver and display sleep while one of its windows is open (`SDL_HINT_VIDEO_ALLOW_SCREENSAVER`
+  is "0" unless set), and nothing here set it. That is wrong for a dashboard open all day (pilot's GUI) and undercuts
+  tianwen, whose `WindowsPowerRequest` keeps the system awake but deliberately lets the display sleep.
+- `SdlVulkanWindow.InitSdlAndCreateInstance` now sets the hint to "1" before `SDL_Init`. A creation option,
+  `keepDisplayAwake` (default `false`, the last parameter, after `clickThroughOnFocus`), on `SdlVulkanWindow.Create`/`CreateTransparent` and `SdlVulkanApp.Create`,
+  sets it to "0" instead. `SdlVulkanWindow.KeepDisplayAwake(bool)` wraps `SDL_DisableScreenSaver`/`SDL_EnableScreenSaver`
+  at runtime (process-wide) for a live view or focusing screen.
+- Measurement: **not measured: `powercfg /requests` needs elevation** (refused in this session, not worked round), so
+  before and after are both unmeasured; the change sets the behaviour on purpose rather than inheriting SDL's.
+  `ScreenSaverHintTests` asserts the hint reads "1" by default and "0" with `keepDisplayAwake`; the runtime flip
+  is attempted on SDL's dummy and offscreen drivers and skips with SDL's reason, since neither supports
+  `SDL_DisableScreenSaver` ("That operation is not supported"), so the flip is unverified headless.
+- The pilot/tianwen pin bump is a follow-up shared with #154/#155.
+
 ## 7.79
 
 **The click that activates an unfocused window now reaches the app.**

@@ -52,10 +52,15 @@ public sealed class SdlVulkanApp : IDisposable
     /// unfocused window as an ordinary click (<c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c>), as native Windows and macOS
     /// apps do; an app whose canvas does something costly or irreversible on a bare click can pass <c>false</c> to
     /// keep SDL's behaviour, where the first click only focuses the window.
+    /// <para><paramref name="keepDisplayAwake"/> is <c>false</c> by default, so the app does NOT hold the display on:
+    /// SDL's own default suppresses the screensaver and display sleep while any window is open, which is wrong for a
+    /// dashboard open all day, and would undercut an app that manages power itself (tianwen keeps the system
+    /// awake during an imaging run but lets the display sleep). Pass <c>true</c>, or call
+    /// <see cref="SdlVulkanWindow.KeepDisplayAwake"/> later, for a view that needs the display on.</para>
     /// </summary>
     public static SdlVulkanApp Create(VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1,
-        bool clickThroughOnFocus = true)
-        => new(SdlVulkanWindow.InitSdlAndCreateInstance(clickThroughOnFocus), msaaSamples);
+        bool clickThroughOnFocus = true, bool keepDisplayAwake = false)
+        => new(SdlVulkanWindow.InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake), msaaSamples);
 
     /// <summary>
     /// Opens a new OS window with its own Vulkan surface. The first call also creates the shared
