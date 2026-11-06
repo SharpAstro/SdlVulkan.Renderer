@@ -62,8 +62,10 @@
     <ProjectReference Include="..\..\..\DIR.Lib\src\DIR.Lib\DIR.Lib.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalDirLib)' != 'true' OR '$(DebugTwin)' == 'true'">
-    <PackageReference Include="DIR.Lib" Condition="'$(DebugTwin)' != 'true'" />
-    <PackageReference Include="DIR.Lib.Debug" Condition="'$(DebugTwin)' == 'true'" />
+    <!-- A Debug build needs the #if DEBUG inspector types, which only DIR.Lib.Debug carries, so without the
+         sibling source a Debug build takes the Debug package (same assembly, same version). -->
+    <PackageReference Include="DIR.Lib" Condition="'$(DebugTwin)' != 'true' AND '$(Configuration)' != 'Debug'" />
+    <PackageReference Include="DIR.Lib.Debug" Condition="'$(DebugTwin)' == 'true' OR '$(Configuration)' == 'Debug'" />
   </ItemGroup>
 
   <!--

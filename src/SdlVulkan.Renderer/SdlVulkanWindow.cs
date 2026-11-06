@@ -394,6 +394,39 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         return ((int)MathF.Round(scale.ToSurfaceX(designWidth)), (int)MathF.Round(scale.ToSurfaceY(designHeight)));
     }
 
+    /// <summary>Pixels per window coordinate (1 where window coordinates are pixels; 2 on a Retina point window).</summary>
+    public float PixelDensity
+    {
+        get
+        {
+            var d = GetWindowPixelDensity(Handle);
+            return d > 0f ? d : 1f;
+        }
+    }
+
+    /// <summary>
+    /// Sets the window's client size in PIXELS, converting to window coordinates through <see cref="PixelDensity"/>
+    /// (<see cref="SetSize"/> takes window coordinates, which equal pixels only at density 1).
+    /// </summary>
+    public void SetSizeInPixels(int pixelWidth, int pixelHeight)
+    {
+        var d = PixelDensity;
+        SetWindowSize(Handle, Math.Max(1, (int)MathF.Round(pixelWidth / d)), Math.Max(1, (int)MathF.Round(pixelHeight / d)));
+    }
+
+    /// <summary>The usable display area (less taskbar and panels) in PIXELS, for clamping a pixel-sized request.</summary>
+    public bool TryGetUsableSizeInPixels(out int width, out int height)
+    {
+        if (TryGetUsableDisplayBounds(out _, out _, out var w, out var h) && w > 0 && h > 0)
+        {
+            var d = PixelDensity;
+            (width, height) = ((int)MathF.Round(w * d), (int)MathF.Round(h * d));
+            return true;
+        }
+        (width, height) = (0, 0);
+        return false;
+    }
+
     public void ToggleFullscreen()
     {
         var flags = GetWindowFlags(Handle);

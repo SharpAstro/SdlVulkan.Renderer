@@ -258,6 +258,10 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     public bool IsGpuWedged { get; internal set; }
 
     // --- per-window loop state (managed by SdlEventLoop) ---
+
+    /// <summary>Frames this window has submitted and presented; a clean-frame counter the debug
+    /// inspector's screenshot reads to know a restored window is drawing again.</summary>
+    internal long FramesPresented;
     internal bool NeedsRedraw = true;
 
     // Android app lifecycle (see SdlEventLoop.Dispatch/RenderView): the native surface is destroyed

@@ -305,6 +305,22 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         => p.TryGetProperty("clicks", out var c) && c.ValueKind == JsonValueKind.Number
             ? Math.Clamp(c.GetInt32(), 1, 7) : 1;
 
+    private static int PositiveInt(JsonElement p, string name)
+        => p.ValueKind == JsonValueKind.Object && p.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number
+            && v.TryGetInt32(out var i) && i > 0
+            ? i
+            : throw new ArgumentException($"missing or non-positive integer parameter '{name}' (window pixels)");
+
+    /// <summary>Both width and height, or neither; one alone is a mistake worth naming.</summary>
+    private static (int? Width, int? Height) OptionalSize(JsonElement p)
+    {
+        if (p.ValueKind != JsonValueKind.Object) return (null, null);
+        var hasW = p.TryGetProperty("width", out var w) && w.ValueKind == JsonValueKind.Number;
+        var hasH = p.TryGetProperty("height", out var h) && h.ValueKind == JsonValueKind.Number;
+        if (!hasW && !hasH) return (null, null);
+        return (PositiveInt(p, "width"), PositiveInt(p, "height"));
+    }
+
     private static int DragSteps(JsonElement p)
         => p.TryGetProperty("steps", out var s) && s.ValueKind == JsonValueKind.Number
             ? Math.Clamp(s.GetInt32(), 1, 64) : 8;
@@ -318,7 +334,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// presented frame and its readback rides that frame's fence -- the one legal way to read a swapchain
     /// image (see VulkanContext.SwapchainReadback.cs).
     /// </summary>
-    private static readonly string[] FrameSpanningVerbs = ["pressHold", "screenshot"];
+    private static readonly string[] FrameSpanningVerbs = ["pressHold", "screenshot", "resize"];
 
     /// <inheritdoc />
     public IReadOnlyCollection<string> SteppedMethods => FrameSpanningVerbs;
@@ -331,9 +347,17 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
             // Begin runs on the render thread, so asking the context directly is safe. The request marks
             // the NEXT presented frame to capture itself pre-present; the redraw makes that frame happen
             // even when the app is idle.
-            _view.Renderer.Context.RequestPresentCapture();
-            _view.RequestRedraw();
-            return new ScreenshotOperation(_view);
+            var reminimize = p.ValueKind == JsonValueKind.Object
+                && p.TryGetProperty("reminimize", out var rm) && rm.ValueKind == JsonValueKind.True;
+            var (sw, sh) = OptionalSize(p);
+            return new ScreenshotOperation(new SdlInspectorWindow(_view), reminimize, ScreenshotOperation.DefaultPresentBudget, sw, sh);
+        }
+
+        if (method == "resize")
+        {
+            var width = PositiveInt(p, "width");
+            var height = PositiveInt(p, "height");
+            return new ResizeOperation(new SdlInspectorWindow(_view), width, height, ResizeCore.DefaultBudget);
         }
 
         var x = Coord(p, "x");
@@ -379,56 +403,338 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     }
 
     /// <summary>
+    /// The window as the screenshot and resize verbs see it: state, size, a presented-frame counter and the
+    /// capture request. A seam so the state machines run under a Debug test host without SDL. Sizes are
+    /// client PIXELS; the SDL side converts through the window's pixel density.
+    /// </summary>
+    internal interface IInspectorWindow
+    {
+        bool IsMinimized { get; }
+        bool IsMaximized { get; }
+        bool IsGpuWedged { get; }
+        bool GpuFenceStuck { get; }
+        /// <summary>Frames presented so far; a rise proves the window is drawing.</summary>
+        long FramesPresented { get; }
+        /// <summary>Client size in pixels.</summary>
+        (int Width, int Height) SizePixels { get; }
+        (int X, int Y) Position { get; }
+        void Restore();
+        void Maximize();
+        void Minimize();
+        void SetSizePixels(int width, int height);
+        void SetPosition(int x, int y);
+        /// <summary>The usable display area (work area) in pixels; false when the platform cannot say.</summary>
+        bool TryGetUsableSizePixels(out int width, out int height);
+        void RequestRedraw();
+        /// <summary>Marks the next presented frame to capture itself.</summary>
+        void RequestCapture();
+        bool TryTakeCapture(out byte[] rgba, out uint width, out uint height);
+    }
+
+    private sealed class SdlInspectorWindow(SdlWindowView view) : IInspectorWindow
+    {
+        public bool IsMinimized => view.Window.IsMinimized;
+        public bool IsMaximized => view.Window.IsMaximized;
+        public bool IsGpuWedged => view.IsGpuWedged;
+        public bool GpuFenceStuck => view.Renderer.Context.GpuFenceStuck;
+        public long FramesPresented => view.FramesPresented;
+        public (int Width, int Height) SizePixels
+        {
+            get
+            {
+                view.Window.GetSizeInPixels(out var w, out var h);
+                return (w, h);
+            }
+        }
+        public (int X, int Y) Position
+        {
+            get
+            {
+                view.Window.GetPosition(out var x, out var y);
+                return (x, y);
+            }
+        }
+        public void Restore() => view.Window.Restore();
+        public void Maximize() => view.Window.Maximize();
+        public void Minimize() => view.Window.Minimize();
+        public void SetSizePixels(int width, int height) => view.Window.SetSizeInPixels(width, height);
+        public void SetPosition(int x, int y) => view.Window.SetPosition(x, y);
+        public bool TryGetUsableSizePixels(out int width, out int height)
+            => view.Window.TryGetUsableSizeInPixels(out width, out height);
+        public void RequestRedraw() => view.RequestRedraw();
+        public void RequestCapture() => view.Renderer.Context.RequestPresentCapture();
+        public bool TryTakeCapture(out byte[] rgba, out uint width, out uint height)
+            => view.Renderer.Context.TryTakePresentCapture(out rgba, out width, out height);
+    }
+
+    /// <summary>
+    /// Brings a window to a client size in pixels: un-maximises first (a maximised window ignores a size),
+    /// clamps to the work area, sets the size, then waits until a presented frame has that pixel size.
+    /// Shared by the resize verb and by screenshot with a size.
+    /// </summary>
+    internal sealed class ResizeCore(IInspectorWindow window, int width, int height, TimeSpan budget)
+    {
+        internal static readonly TimeSpan DefaultBudget = TimeSpan.FromSeconds(5);
+
+        private readonly long _startTick = Environment.TickCount64;
+        private bool _restoreIssued, _sizeSet;
+        private long _baseline;
+        private int _targetW, _targetH;
+
+        public bool Clamped { get; private set; }
+        public (int Width, int Height) Result { get; private set; }
+
+        /// <summary>Null while still working; an empty string when done; otherwise a plain error.</summary>
+        public string? Poll()
+        {
+            var timedOut = Environment.TickCount64 - _startTick >= budget.TotalMilliseconds;
+            if (!_sizeSet)
+            {
+                if (window.IsMaximized)
+                {
+                    if (!_restoreIssued)
+                    {
+                        window.Restore();
+                        _restoreIssued = true;
+                    }
+                    if (window.IsMaximized)
+                    {
+                        if (timedOut) return "the window stayed maximised: could not resize";
+                        window.RequestRedraw();
+                        return null;
+                    }
+                }
+
+                _targetW = width;
+                _targetH = height;
+                if (window.TryGetUsableSizePixels(out var uw, out var uh))
+                {
+                    _targetW = Math.Min(width, uw);
+                    _targetH = Math.Min(height, uh);
+                    Clamped = _targetW != width || _targetH != height;
+                }
+                _baseline = window.FramesPresented;
+                window.SetSizePixels(_targetW, _targetH);
+                _sizeSet = true;
+                window.RequestRedraw();
+                return null;
+            }
+
+            var size = window.SizePixels;
+            if (window.FramesPresented > _baseline && size.Width == _targetW && size.Height == _targetH)
+            {
+                Result = size;
+                return "";
+            }
+            if (timedOut)
+            {
+                return $"the window did not reach {_targetW}x{_targetH} pixels (now {size.Width}x{size.Height}): the window manager may have refused the size";
+            }
+            window.RequestRedraw();
+            return null;
+        }
+    }
+
+    /// <summary>The resize verb: spans frames because it answers once a frame at the new size has presented.</summary>
+    internal sealed class ResizeOperation(IInspectorWindow window, int width, int height, TimeSpan budget)
+        : IDebugInspectorOperation
+    {
+        private readonly ResizeCore _core = new(window, width, height, budget);
+
+        public bool Exclusive => false;
+        public TimeSpan Timeout => budget + TimeSpan.FromSeconds(10);
+
+        public string? Advance()
+        {
+            var r = _core.Poll();
+            if (r is null) return null;
+            if (r.Length > 0) return Error(r);
+            return ToJson(w =>
+            {
+                w.WriteStartObject();
+                w.WriteNumber("width", _core.Result.Width);
+                w.WriteNumber("height", _core.Result.Height);
+                w.WriteBoolean("clamped", _core.Clamped);
+                w.WriteEndObject();
+            });
+        }
+
+        private static string Error(string message) => ToJson(jw =>
+        {
+            jw.WriteStartObject();
+            jw.WriteString("error", message);
+            jw.WriteEndObject();
+        });
+    }
+
+    /// <summary>
     /// A screenshot spans frames: the capture rides the next presented frame's command buffer and its
     /// readback that frame's fence, so this steps until the snapshot lands (normally two frames).
     /// This replaced a post-present readback of an image the process no longer owned -- the validation
     /// layer flagged every such screenshot, and an illegal barrier on a presented image can park the
     /// GPU queue, so the observer verb itself was a wedge candidate.
+    /// <para>A minimised window renders nothing, so it is restored first and the capture is requested only
+    /// once a frame has presented; the present budget is separate from the capture timeout so a display
+    /// that is off fails fast instead of wedging.</para>
+    /// <para>With a size, the window is resized first (see <see cref="ResizeCore"/>), captured at that size,
+    /// then put back as it was: maximised again, or its floating size and position.</para>
     /// </summary>
-    private sealed class ScreenshotOperation(SdlWindowView view) : IDebugInspectorOperation
+    internal sealed class ScreenshotOperation : IDebugInspectorOperation
     {
+        internal static readonly TimeSpan DefaultPresentBudget = TimeSpan.FromSeconds(5);
+        internal const string NoPresentError = "the window presented no frame: is the display off?";
+
+        private readonly IInspectorWindow _window;
+        private readonly bool _reminimize;
+        private readonly TimeSpan _presentBudget;
+        private readonly bool _unminimised;
+        private readonly long _baselineFrames;
+        private readonly long _startTick = Environment.TickCount64;
+        private readonly (int W, int H)? _size;
+        private ResizeCore? _resize;
+        private bool _captureRequested;
+        private bool _wasMaximized;
+        private (int Width, int Height) _oldSize;
+        private (int X, int Y) _oldPos;
+
+        internal ScreenshotOperation(IInspectorWindow window, bool reminimize, TimeSpan presentBudget,
+            int? width = null, int? height = null)
+        {
+            _window = window;
+            _reminimize = reminimize;
+            _presentBudget = presentBudget;
+            _size = width is { } w && height is { } h ? (w, h) : null;
+            _baselineFrames = window.FramesPresented;
+            if (window.IsMinimized)
+            {
+                _unminimised = true;
+                window.Restore();
+            }
+            else if (_size is not null)
+            {
+                BeginResize();
+            }
+            else
+            {
+                // The request marks the NEXT presented frame to capture itself pre-present.
+                window.RequestCapture();
+                _captureRequested = true;
+            }
+            window.RequestRedraw();
+        }
+
+        private void BeginResize()
+        {
+            _wasMaximized = _window.IsMaximized;
+            _oldSize = _window.SizePixels;
+            _oldPos = _window.Position;
+            _resize = new ResizeCore(_window, _size!.Value.W, _size.Value.H, ResizeCore.DefaultBudget);
+        }
+
+        /// <summary>Puts the window back as it was before the resize; the minimised path is separate.</summary>
+        private void PutBack()
+        {
+            if (_resize is null) return;
+            if (_wasMaximized)
+            {
+                _window.Maximize();
+            }
+            else
+            {
+                _window.SetSizePixels(_oldSize.Width, _oldSize.Height);
+                _window.SetPosition(_oldPos.X, _oldPos.Y);
+            }
+            _window.RequestRedraw();
+        }
+
         /// <summary>Not exclusive: the window must keep rendering, because a frame IS the capture vehicle.</summary>
         public bool Exclusive => false;
 
         /// <summary>Generous: the capture normally lands within two frames; a busy GPU only has to
         /// finish the capture frame, not be quick about it.</summary>
-        public TimeSpan Timeout => TimeSpan.FromSeconds(15);
+        public TimeSpan Timeout => TimeSpan.FromSeconds(15)
+            + (_unminimised ? _presentBudget : TimeSpan.Zero)
+            + (_size is not null ? ResizeCore.DefaultBudget : TimeSpan.Zero);
 
         public string? Advance()
         {
-            if (view.IsGpuWedged)
+            var reply = Step();
+            if (reply is not null)
+            {
+                PutBack();
+                if (_unminimised && _reminimize)
+                {
+                    _window.Minimize();
+                }
+            }
+            return reply;
+        }
+
+        private string? Step()
+        {
+            if (_window.IsGpuWedged)
             {
                 // No frame will ever carry the capture: the window is inert once its GPU is given up on,
                 // though the loop (and so this inspector) may well be running again to keep it closable.
-                return ToJson(static jw =>
-                {
-                    jw.WriteStartObject();
-                    jw.WriteString("error", "screenshot unavailable: the window's GPU was declared wedged");
-                    jw.WriteEndObject();
-                });
+                return Error("screenshot unavailable: the window's GPU was declared wedged");
             }
 
-            var ctx = view.Renderer.Context;
-            if (ctx.TryTakePresentCapture(out var rgba, out var w, out var h))
+            if (!_captureRequested && _resize is null)
             {
-                return EncodeScreenshot(rgba, (int)w, (int)h);
+                if (_window.FramesPresented > _baselineFrames)
+                {
+                    if (_size is not null)
+                    {
+                        BeginResize();
+                    }
+                    else
+                    {
+                        _window.RequestCapture();
+                        _captureRequested = true;
+                    }
+                }
+                else if (Environment.TickCount64 - _startTick >= _presentBudget.TotalMilliseconds)
+                {
+                    return Error(NoPresentError);
+                }
+
+                _window.RequestRedraw();
+                return null;
             }
 
-            if (ctx.GpuFenceStuck)
+            if (!_captureRequested)
+            {
+                var r = _resize!.Poll();
+                if (r is null) return null;
+                if (r.Length > 0) return Error(r);
+                _window.RequestCapture();
+                _captureRequested = true;
+                _window.RequestRedraw();
+                return null;
+            }
+
+            if (_window.TryTakeCapture(out var rgba, out var w, out var h))
+            {
+                return EncodeScreenshot(rgba, (int)w, (int)h, _unminimised);
+            }
+
+            if (_window.GpuFenceStuck)
             {
                 // Structured error rather than more waiting: never queue work behind a fence that is
                 // not signalling. The caller can retry once the GPU recovers.
-                return ToJson(static jw =>
-                {
-                    jw.WriteStartObject();
-                    jw.WriteString("error", "screenshot unavailable: GPU stalled");
-                    jw.WriteEndObject();
-                });
+                return Error("screenshot unavailable: GPU stalled");
             }
 
-            view.RequestRedraw(); // keep frames coming until the capture frame's fence is waited
+            _window.RequestRedraw(); // keep frames coming until the capture frame's fence is waited
             return null;
         }
+
+        private static string Error(string message) => ToJson(jw =>
+        {
+            jw.WriteStartObject();
+            jw.WriteString("error", message);
+            jw.WriteEndObject();
+        });
     }
 
     private string ExecuteDescribe()
@@ -567,7 +873,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         _ => node.GetType().Name,
     };
 
-    private static string EncodeScreenshot(byte[] rgba, int width, int height)
+    private static string EncodeScreenshot(byte[] rgba, int width, int height, bool unminimised = false)
     {
         // RGBA of a UI is mostly flat color, so gzip shrinks the wire payload ~10-50x before base64.
         var gz = Gzip(rgba);
@@ -579,6 +885,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
             w.WriteNumber("height", height);
             w.WriteString("format", "rgba+gzip"); // raw RGBA, gzip-compressed; the bridge encodes the PNG
             w.WriteString("base64", b64);
+            if (unminimised) w.WriteBoolean("unminimised", true);
             w.WriteEndObject();
         });
     }

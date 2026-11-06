@@ -7,6 +7,20 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.82
+
+**Inspector: screenshot un-minimises the window itself, and a resize verb captures layouts at real window sizes.**
+
+- `screenshot` on a minimised window restores it, waits for the first presented frame and captures, reporting that
+  it un-minimised; `reminimize: true` puts it back. With no present inside a short budget it fails at once instead
+  of wedging.
+- New `resize` verb (host command and MCP tool): `width`/`height` in window pixels, un-maximises if needed, clamps
+  to the display work area and answers when a frame at that size has been laid out.
+- `screenshot` takes optional `width`/`height`: it resizes, captures and puts the window back as it was.
+- The inspector `selftest` parses `ping` with `GetRawText` (the reply is an object) and now takes a screenshot at a
+  size, checking the size and that the window is as it was.
+- pilot and tianwen should bump their `SdlVulkan.Renderer.Debug` pin to 7.82 after release.
+
 ## 7.81
 
 **The OS is told who the app is: `SDL_SetAppMetadata` runs before `SDL_Init`.**

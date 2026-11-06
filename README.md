@@ -308,6 +308,20 @@ Backend notes:
   `TitleChanged`, …) are raised on the **GTK thread**, so handlers must be thread-safe or marshal back
   themselves.
 
+## Debug inspector: screenshot and resize
+
+The `#if DEBUG` `DebugInspector` (client: `SdlVulkan.Renderer.Inspector`, which also has a `selftest` mode) answers
+these window verbs:
+
+- `screenshot` un-minimises a minimised window itself, waits for the first presented frame and captures, and the
+  reply says it did so. `reminimize: true` puts the window back minimised afterwards. If no frame is presented
+  within a short budget it fails at once with "the window presented no frame: is the display off?".
+- `resize` takes `width` and `height` in window pixels, un-maximises if needed, sets the client size clamped to the
+  display work area, and answers once the next frame at that size has been laid out.
+- `screenshot` with optional `width` and `height` resizes, captures at that size and puts the window back as it was
+  (maximised, its floating size, or minimised), so a layout can be captured at real window sizes. The size is
+  clamped to the work area like `resize`, so the reply's width and height are what was actually captured.
+
 ## Debug twin package (`SdlVulkan.Renderer.Debug`)
 
 The in-process `DebugInspector` is `#if DEBUG`, and a published `SdlVulkan.Renderer` is built Release, so a

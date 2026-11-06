@@ -73,13 +73,19 @@ public sealed class InspectorTools
         return result.GetRawText();
     }
 
-    [McpServerTool, Description("Capture a PNG screenshot of the instance's current window frame.")]
+    [McpServerTool, Description("Capture a PNG screenshot of the instance's current window frame. With width and height (window pixels) the window is resized first, captured at that size and then put back as it was (maximised, its floating size and position, or minimised with reminimize). A minimized window is restored first, the capture waits for its first presented frame, and the window stays restored unless reminimize is true (the wire reply carries unminimised:true then). If the window presents no frame within a few seconds the call fails at once with 'the window presented no frame: is the display off?'.")]
     public static async Task<ImageContentBlock> screenshot(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        [Description("When the window was minimized and the screenshot restored it, minimize it again after the capture. Default false. No effect on a window that was not minimized.")] bool reminimize = false,
+        [Description("Optional client width in WINDOW PIXELS to capture at (give height too). The window is resized, captured, then put back as it was: maximised again, or its old floating size and position. Clamped to the display work area.")] int captureWidth = 0,
+        [Description("Optional client height in window pixels; see captureWidth.")] int captureHeight = 0,
         CancellationToken ct = default)
     {
         var target = await ResolveAsync(discovery, instance, ct);
-        var result = await socket.SendAsync(target, "screenshot", null, ct);
+        var args = (captureWidth > 0 || captureHeight > 0)
+            ? Json.Obj(("reminimize", reminimize), ("width", captureWidth), ("height", captureHeight))
+            : reminimize ? Json.Obj(("reminimize", true)) : null;
+        var result = await socket.SendAsync(target, "screenshot", args, ct);
         var width = result.GetProperty("width").GetInt32();
         var height = result.GetProperty("height").GetInt32();
         var format = result.GetProperty("format").GetString();
@@ -208,7 +214,7 @@ public sealed class InspectorTools
         return result.GetString() ?? "ok";
     }
 
-    [McpServerTool, Description("Minimize (iconify) the instance's window. While minimized the app idles its render loop (~0% CPU/GPU, no frames), so this is the way to verify idle-on-minimize behaviour unattended. Other inspector commands (ping, describe, restore) still work while minimized; only screenshot is unavailable until restored (there is no swapchain to read). Use restore to bring it back.")]
+    [McpServerTool, Description("Minimize (iconify) the instance's window. While minimized the app idles its render loop (~0% CPU/GPU, no frames), so this is the way to verify idle-on-minimize behaviour unattended. Other inspector commands (ping, describe, restore) still work while minimized, and screenshot restores the window itself to capture (pass reminimize:true to put it back). Use restore to bring it back.")]
     public static async Task<string> minimize(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
         [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
         CancellationToken ct = default)
@@ -216,6 +222,18 @@ public sealed class InspectorTools
         var target = await ResolveAsync(discovery, instance, ct);
         var result = await socket.SendAsync(target, "minimize", null, ct);
         return result.GetString() ?? "ok";
+    }
+
+    [McpServerTool, Description("Resize the instance's window so its client area is width x height in WINDOW PIXELS (the pixels the app renders, converted to window coordinates through the display's pixel density). A maximized window is un-maximized first, the size is clamped to the display work area, and the call answers once a frame at that size has been presented: {width,height,clamped}. The window stays at the new size (use restore or maximize to change it back); screenshot with width/height puts the window back by itself.")]
+    public static async Task<string> resize(InspectorDiscoveryClient discovery, InspectorSocketClient socket,
+        [Description("Client width in window pixels.")] int width,
+        [Description("Client height in window pixels.")] int height,
+        [Description("Target instance pid (0 = the only running instance).")] int instance = 0,
+        CancellationToken ct = default)
+    {
+        var target = await ResolveAsync(discovery, instance, ct);
+        var result = await socket.SendAsync(target, "resize", Json.Obj(("width", width), ("height", height)), ct);
+        return result.GetRawText();
     }
 
     [McpServerTool, Description("Maximize the instance's window to fill the screen (work area).")]

@@ -29,7 +29,7 @@ internal static class SelfTest
         try
         {
             var pong = await socket.SendAsync(target, "ping");
-            Console.Error.WriteLine($"[selftest] ping -> {pong.GetString()}");
+            Console.Error.WriteLine($"[selftest] ping -> {pong.GetRawText()}");
 
             var tree = await socket.SendAsync(target, "describe");
             var regions = tree.GetProperty("regions");
@@ -54,6 +54,27 @@ internal static class SelfTest
             await File.WriteAllBytesAsync(path, png);
             Console.Error.WriteLine($"[selftest] screenshot -> {width}x{height} ({format}), wire={payload.Length} bytes, png={png.Length} bytes");
             Console.Error.WriteLine($"[selftest] saved: {path}");
+            // Screenshot at a size: the verb resizes, captures and puts the window back as it was.
+            const int WantW = 700, WantH = 900;
+            var sized = await socket.SendAsync(target, "screenshot", $"{{\"width\":{WantW},\"height\":{WantH}}}");
+            var sw = sized.GetProperty("width").GetInt32();
+            var sh = sized.GetProperty("height").GetInt32();
+            Console.Error.WriteLine($"[selftest] screenshot {WantW}x{WantH} -> {sw}x{sh}");
+            // The window may be clamped to the display work area, so only a size at or under the request passes.
+            if (sw > WantW || sh > WantH || sw <= 0 || sh <= 0)
+            {
+                Console.Error.WriteLine($"[selftest] FAIL: asked for {WantW}x{WantH}, got {sw}x{sh}");
+                return 1;
+            }
+            var again = await socket.SendAsync(target, "screenshot");
+            var aw = again.GetProperty("width").GetInt32();
+            var ah = again.GetProperty("height").GetInt32();
+            if (aw != width || ah != height)
+            {
+                Console.Error.WriteLine($"[selftest] FAIL: window not put back: was {width}x{height}, now {aw}x{ah}");
+                return 1;
+            }
+            Console.Error.WriteLine($"[selftest] window put back at {aw}x{ah}");
             // Read-only on purpose: this smoke must stay app-agnostic, so it never injects input or
             // posts signals (which would mutate whatever app it is pointed at, and would need
             // app-specific labels/signals). Drive-path coverage belongs in the consuming app's tests.
