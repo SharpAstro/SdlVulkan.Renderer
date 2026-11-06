@@ -102,6 +102,16 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// push constants as <see cref="PipelineLayout"/>.</summary>
     public VkPipelineLayout MaskedPipelineLayout { get; }
 
+    /// <summary>Layout for the Slug glyph store's set: binding 0 one read-only storage buffer (the
+    /// glyph words, <see cref="VkSlugGlyphStore"/>), visible to the vertex and fragment stages. A
+    /// layout of its own, like <see cref="MaskedDescriptorSetLayout"/>, so the single-sampler layout
+    /// every other textured draw shares stays untouched.</summary>
+    public VkDescriptorSetLayout SlugDescriptorSetLayout { get; }
+
+    /// <summary>Pipeline layout over <see cref="SlugDescriptorSetLayout"/>, with the same 84-byte push
+    /// constants as <see cref="PipelineLayout"/>.</summary>
+    public VkPipelineLayout SlugPipelineLayout { get; }
+
     /// <summary>
     /// True when the GPU is known wedged — the owning <see cref="VulkanContext"/>'s per-frame fence
     /// has been timing out. The context is the sole writer (it mirrors its own fence-stuck state
@@ -163,6 +173,23 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         }
     }
 
+    private uint _maxStorageBufferRange;
+    /// <summary>Device <c>maxStorageBufferRange</c> limit in bytes (queried lazily, then cached; at least
+    /// 128 MiB by the spec): the most one storage-buffer descriptor can address, so the ceiling of the
+    /// Slug glyph store's single buffer.</summary>
+    public uint MaxStorageBufferRange
+    {
+        get
+        {
+            if (_maxStorageBufferRange == 0)
+            {
+                InstanceApi.vkGetPhysicalDeviceProperties(PhysicalDevice, out var props);
+                _maxStorageBufferRange = props.limits.maxStorageBufferRange;
+            }
+            return _maxStorageBufferRange;
+        }
+    }
+
     // Descriptor pool operations need external synchronization for multi-threaded access
     private readonly Lock _descriptorPoolLock = new();
     // Every pool created so far, in creation order — all destroyed together at teardown.
@@ -176,6 +203,8 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     private readonly Stack<VkDescriptorSet> _freeDescriptorSets = new();
     // Masked sets recycle separately: see AllocateMaskedDescriptorSet for why the two cannot mix.
     private readonly Stack<VkDescriptorSet> _freeMaskedDescriptorSets = new();
+    // Slug sets recycle on their own for the same reason.
+    private readonly Stack<VkDescriptorSet> _freeSlugDescriptorSets = new();
     private VkDescriptorPool _currentPool;
     private uint _setsLeftInCurrentPool;
     // Whether this device's Dispose also destroys the VkInstance. True on the standalone and
@@ -197,6 +226,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
         VkDescriptorSet descriptorSet, VkPipelineLayout pipelineLayout,
         VkDescriptorSetLayout maskedSetLayout, VkPipelineLayout maskedPipelineLayout,
+        VkDescriptorSetLayout slugSetLayout, VkPipelineLayout slugPipelineLayout,
         VkFormat colorFormat, VkFormat depthFormat, VkSampleCountFlags msaaSamples, bool ownsInstance)
     {
         _ownsInstance = ownsInstance;
@@ -223,6 +253,8 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         PipelineLayout = pipelineLayout;
         MaskedDescriptorSetLayout = maskedSetLayout;
         MaskedPipelineLayout = maskedPipelineLayout;
+        SlugDescriptorSetLayout = slugSetLayout;
+        SlugPipelineLayout = slugPipelineLayout;
         MsaaSamples = msaaSamples;
         DepthFormat = depthFormat;
 
@@ -398,26 +430,9 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         };
         deviceApi.vkCreateCommandPool(&poolCI, null, out var commandPool).CheckResult();
 
-        // Descriptor pool — large enough for font atlas + textures
+        // Descriptor pool — large enough for font atlas + textures (and the Slug store's storage buffers).
         // FreeDescriptorSet flag allows individual sets to be freed when textures are evicted
-        VkDescriptorPoolSize poolSize = new()
-        {
-            type = VkDescriptorType.CombinedImageSampler,
-            // Two per set, not one: a masked set (see MaskedDescriptorSetLayout) binds a texture AND
-            // a mask, so a pool whose descriptor count matched its set count would run out of
-            // descriptors at half its stated set capacity. The allocator recovers from that -- an
-            // OutOfPoolMemory refusal just retires the pool -- but it would retire every pool at
-            // half use, doubling the pools a masked-heavy page creates for no reason.
-            descriptorCount = DescriptorSetsPerPool * MaxDescriptorsPerSet
-        };
-        VkDescriptorPoolCreateInfo dpCI = new()
-        {
-            flags = VkDescriptorPoolCreateFlags.FreeDescriptorSet,
-            maxSets = DescriptorSetsPerPool,
-            poolSizeCount = 1,
-            pPoolSizes = &poolSize
-        };
-        deviceApi.vkCreateDescriptorPool(&dpCI, null, out var descriptorPool).CheckResult();
+        var descriptorPool = CreateDescriptorPool(deviceApi);
 
         VkDescriptorSetLayoutBinding binding = new()
         {
@@ -459,6 +474,22 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         };
         deviceApi.vkCreateDescriptorSetLayout(&maskedDslCI, null, out var maskedSetLayout).CheckResult();
 
+        // A THIRD layout, one read-only storage buffer, for the Slug glyph store. Vertex AND fragment: the
+        // vertex stage reads a glyph's header to place its quad, the fragment stage walks its curves.
+        VkDescriptorSetLayoutBinding slugBinding = new()
+        {
+            binding = 0,
+            descriptorType = VkDescriptorType.StorageBuffer,
+            descriptorCount = 1,
+            stageFlags = VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment
+        };
+        VkDescriptorSetLayoutCreateInfo slugDslCI = new()
+        {
+            bindingCount = 1,
+            pBindings = &slugBinding
+        };
+        deviceApi.vkCreateDescriptorSetLayout(&slugDslCI, null, out var slugSetLayout).CheckResult();
+
         // Allocate the font atlas descriptor set
         var setLayout = descriptorSetLayout;
         VkDescriptorSetAllocateInfo dsAI = new()
@@ -498,12 +529,111 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         };
         deviceApi.vkCreatePipelineLayout(&maskedPlCI, null, out var maskedPipelineLayout).CheckResult();
 
+        // Same push constants again, the Slug set layout.
+        var slugLayout = slugSetLayout;
+        VkPipelineLayoutCreateInfo slugPlCI = new()
+        {
+            setLayoutCount = 1,
+            pSetLayouts = &slugLayout,
+            pushConstantRangeCount = 1,
+            pPushConstantRanges = &pushRange
+        };
+        deviceApi.vkCreatePipelineLayout(&slugPlCI, null, out var slugPipelineLayout).CheckResult();
+
         return new VulkanDevice(
             instance, instanceApi, physicalDevice, device, deviceApi,
             graphicsQueue, queueFamily, commandPool, renderPass, singleSamplePass,
             renderPassNoDepth, singleSamplePassNoDepth, descriptorPool, descriptorSetLayout, descriptorSet, pipelineLayout,
-            maskedSetLayout, maskedPipelineLayout, colorFormat, depthFormat,
+            maskedSetLayout, maskedPipelineLayout, slugSetLayout, slugPipelineLayout, colorFormat, depthFormat,
             msaaSamples, ownsInstance);
+    }
+
+    /// <summary>
+    /// One pool of <see cref="DescriptorSetsPerPool"/> sets, every kind this device allocates sized for the
+    /// whole capacity, so a pool never runs out of descriptors before it runs out of sets.
+    /// </summary>
+    private static VkDescriptorPool CreateDescriptorPool(VkDeviceApi deviceApi)
+    {
+        var poolSizes = stackalloc VkDescriptorPoolSize[2];
+        poolSizes[0] = new()
+        {
+            type = VkDescriptorType.CombinedImageSampler,
+            // Two per set, not one: a masked set (see MaskedDescriptorSetLayout) binds a texture AND
+            // a mask, so a pool whose descriptor count matched its set count would run out of
+            // descriptors at half its stated set capacity. The allocator recovers from that -- an
+            // OutOfPoolMemory refusal just retires the pool -- but it would retire every pool at
+            // half use, doubling the pools a masked-heavy page creates for no reason.
+            descriptorCount = DescriptorSetsPerPool * MaxDescriptorsPerSet
+        };
+        // A Slug set (see SlugDescriptorSetLayout) binds one storage buffer. Room for every set of the pool,
+        // for the same reason: the allocator would otherwise retire the pool at the first Slug set.
+        poolSizes[1] = new()
+        {
+            type = VkDescriptorType.StorageBuffer,
+            descriptorCount = DescriptorSetsPerPool
+        };
+        VkDescriptorPoolCreateInfo dpCI = new()
+        {
+            flags = VkDescriptorPoolCreateFlags.FreeDescriptorSet,
+            maxSets = DescriptorSetsPerPool,
+            poolSizeCount = 2,
+            pPoolSizes = poolSizes
+        };
+        deviceApi.vkCreateDescriptorPool(&dpCI, null, out var pool).CheckResult();
+        return pool;
+    }
+
+    /// <summary>
+    /// Allocates a set with <see cref="SlugDescriptorSetLayout"/> (one storage buffer). The caller writes it
+    /// with <see cref="UpdateSlugDescriptorSet"/> before any frame binds it, and hands it back with
+    /// <see cref="FreeSlugDescriptorSet"/> once no frame can still hold it.
+    /// </summary>
+    public VkDescriptorSet AllocateSlugDescriptorSet()
+    {
+        lock (_descriptorPoolLock)
+        {
+            if (_freeSlugDescriptorSets.Count > 0) return _freeSlugDescriptorSets.Pop();
+
+            var set = TryAllocateFromCurrentPool(SlugDescriptorSetLayout);
+            if (set == VkDescriptorSet.Null)
+            {
+                AddDescriptorPool();
+                set = TryAllocateFromCurrentPool(SlugDescriptorSetLayout);
+                if (set == VkDescriptorSet.Null)
+                    throw new InvalidOperationException(
+                        "slug descriptor set allocation failed against a freshly created pool");
+            }
+            return set;
+        }
+    }
+
+    /// <summary>Points a Slug set at <paramref name="buffer"/>, bytes [0, <paramref name="range"/>).</summary>
+    public void UpdateSlugDescriptorSet(VkDescriptorSet targetSet, VkBuffer buffer, ulong range)
+    {
+        VkDescriptorBufferInfo info = new()
+        {
+            buffer = buffer,
+            offset = 0,
+            range = range
+        };
+        VkWriteDescriptorSet write = new()
+        {
+            dstSet = targetSet,
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = VkDescriptorType.StorageBuffer,
+            pBufferInfo = &info
+        };
+        DeviceApi.vkUpdateDescriptorSets(1, &write, 0, null);
+    }
+
+    /// <summary>Hands a Slug set back for re-issue. See <see cref="FreeDescriptorSet"/>.</summary>
+    public void FreeSlugDescriptorSet(VkDescriptorSet set)
+    {
+        lock (_descriptorPoolLock)
+        {
+            if (set != VkDescriptorSet.Null) _freeSlugDescriptorSets.Push(set);
+        }
     }
 
     /// <summary>
@@ -650,19 +780,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// <summary>Caller holds <see cref="_descriptorPoolLock"/>.</summary>
     private void AddDescriptorPool()
     {
-        VkDescriptorPoolSize poolSize = new()
-        {
-            type = VkDescriptorType.CombinedImageSampler,
-            descriptorCount = DescriptorSetsPerPool * MaxDescriptorsPerSet
-        };
-        VkDescriptorPoolCreateInfo dpCI = new()
-        {
-            flags = VkDescriptorPoolCreateFlags.FreeDescriptorSet,
-            maxSets = DescriptorSetsPerPool,
-            poolSizeCount = 1,
-            pPoolSizes = &poolSize
-        };
-        DeviceApi.vkCreateDescriptorPool(&dpCI, null, out var pool).CheckResult();
+        var pool = CreateDescriptorPool(DeviceApi);
         _descriptorPools.Add(pool);
         _currentPool = pool;
         _setsLeftInCurrentPool = DescriptorSetsPerPool;
@@ -1093,7 +1211,22 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// this returns, no in-flight command buffer from either window can still reference those resources,
     /// so re-binding them to the destination window's renderer is race-free.
     /// </summary>
-    public void WaitIdle() => DeviceApi.vkDeviceWaitIdle();
+    public void WaitIdle()
+    {
+        NoteDeviceWait();
+        DeviceApi.vkDeviceWaitIdle();
+    }
+
+    // Times anything on this device drained it or waited on its queue: the stalls a per-frame path must never cause.
+    // It lives on the device, not on a context, so a wait made through the device itself (WaitIdle, a queue wait of
+    // the offscreen readback, a teardown) is seen as well as the ones a context routes through TryDrainDevice. The
+    // per-frame fence wait of BeginFrame and a one-shot's own wait are the schedule itself and are not counted.
+    private long _deviceWaits;
+
+    internal void NoteDeviceWait() => Interlocked.Increment(ref _deviceWaits);
+
+    /// <summary>How many drains or queue waits have been made on this device, for tests that hold a path to none.</summary>
+    internal long DeviceWaits => Interlocked.Read(ref _deviceWaits);
 
     public void Dispose()
     {
@@ -1106,6 +1239,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         // (the "Not responding" failure mode the recovery path was hardened against).
         if (!IsGpuStuck)
         {
+            NoteDeviceWait();
             DeviceApi.vkDeviceWaitIdle();
         }
 
@@ -1116,6 +1250,8 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         DeviceApi.vkDestroyDescriptorSetLayout(DescriptorSetLayout);
         DeviceApi.vkDestroyPipelineLayout(MaskedPipelineLayout);
         DeviceApi.vkDestroyDescriptorSetLayout(MaskedDescriptorSetLayout);
+        DeviceApi.vkDestroyPipelineLayout(SlugPipelineLayout);
+        DeviceApi.vkDestroyDescriptorSetLayout(SlugDescriptorSetLayout);
         foreach (var pool in _descriptorPools)
             DeviceApi.vkDestroyDescriptorPool(pool);
         DeviceApi.vkDestroyRenderPass(RenderPass);

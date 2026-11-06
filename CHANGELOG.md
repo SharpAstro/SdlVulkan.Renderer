@@ -7,6 +7,66 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.83
+
+**Slug text beside MTSDF: a glyph's outline drawn by its own coverage on the GPU, and a probe that A/Bs the two on one page (#162).**
+
+- **What it is.** Eric Lengyel's Slug algorithm: each glyph is encoded once on the CPU (DIR.Lib's `SlugGlyphEncoder`,
+  from DIR.Lib 11.48, which this release moves to from 11.40) into a blob of curves and bands, and the fragment shader
+  computes the outline's coverage at every pixel from it. There is no atlas, no field to magnify and nothing that depends
+  on the pass's sample count, so the edge is exact at any size and as smooth on `SingleSampleMainPass` as on a 4x
+  multisampled pass. MTSDF stays; Slug is the choice where size varies widely, or the glyph set is large (CJK).
+- **The store.** `VkSlugGlyphStore` (internal, one per renderer, created on first use): ONE growable device-local storage
+  buffer of the encoded glyphs, keyed by glyph identity as `VkSdfFontAtlas` keys its cells. A miss never blocks: the
+  glyph is queued for encoding on worker threads and skipped this frame (`FontAtlasDirty` asks for another). Blobs reach the
+  buffer through the deferred upload path, in the frame's command buffer before the render pass, a bounded number of words a
+  frame. A full buffer doubles by copy into a new buffer, with a new descriptor set, and the old one goes through
+  `DeferDestroy`: no `vkDeviceWaitIdle`, no stall. It has its own descriptor-set and pipeline layout
+  (`VulkanDevice.SlugDescriptorSetLayout` / `SlugPipelineLayout`), so the shared layout and the 84-byte push block are
+  untouched.
+- **Shaders and pipelines.** `slug.vert`, `slug.frag` and `sluginst.vert` (which shares `slug.frag`), baked to SPIR-V as
+  the others are. `VkPipelineSet.SlugPipeline` and `SlugInstancedPipeline` exist on every pass shape: with and without the
+  depth attachment, multisampled and the single-sample pass. `slug.frag` takes a pixel's footprint in em space as the
+  length of `(dFdx, dFdy)` of each em coordinate, not `fwidth` as the Slug reference shader does: it is exact for any
+  rotation (`fwidth` overstates a rotated pixel's span by up to the square root of 2 at 45 degrees), so rotated text
+  differs a little from another Slug implementation's.
+- **API.** Batch: `BeginSlugGlyphBatch(color, fontSize)`, `AddBatchedSlugGlyphAtBaseline` / `AddBatchedSlugGlyphAtBaselineByGid`
+  (rotation, horizontal scale, ink-left), then `EndGlyphBatch`: one draw however many glyphs. Persistent (a page laid
+  out once and kept): `WriteSlugGlyphInstance` writes one `SlugInstanceFloats` instance per glyph and
+  `DrawPersistentSlugGlyphs(buffer, byteOffset, count, color, originX, originY, scale)` draws a page's glyphs of any size
+  in ONE draw per colour, where `DrawPersistentSdfGlyphs` takes one per colour and atlas page. New public:
+  `SlugDrawCalls` (was internal) and `SlugStoreStats` (glyphs, words used and capacity, growth count, failures,
+  pending), so a consumer can see what the store is doing.
+- **Tests.** The shader's coverage is held to a CPU port of itself (`SlugCoverageOracle`) on DejaVu and on three dense CJK
+  glyphs (a committed Noto Sans JP subset, OFL), at 12 and 200 px, in both pass shapes, no pixel more than 8/255 off;
+  the instanced path against the oracle through a rotation and a horizontal stretch and against the batch path; the
+  store's encode, upload, growth and dropped-frame handling; and the probe's page (below), all under the validation layer
+  when the host has it.
+- **`tools/SlugProbe`**, run by hand (own csproj, not in the solution, not packed): draws one A4-like page, 794 x 1123 px
+  of 15 px DejaVu Sans text with a heading and a CJK block (3183 glyph quads, 3 colours), as persistent MTSDF and as
+  persistent Slug on a headless offscreen context, and prints draws and GPU ms per frame (timestamps), the worst
+  number of curves a pixel's two rays walk on the densest CJK glyph (counted from the blob as the shader walks its bands
+  and sorted lists), one dense CJK glyph alone at 300 px (first draw and after), and the longest frame while a burst of
+  1200 new glyphs misses the store and makes it grow. Exit 0, or 2 with no Vulkan device. `SlugProbeSmokeTests` runs the
+  same page code for a few frames on the offscreen fixture. #162's bars, measured on a Qualcomm Adreno X1-85 (Windows on
+  Arm, Vulkan 1.4.295, 300 frames each, MSAA x4; the tiler's frame totals are reliable, its section times are not, so
+  only totals are reported):
+
+  | | MTSDF | Slug |
+  |---|---|---|
+  | draws a frame, whole page | 3 | 3 (one a colour) |
+  | GPU ms a frame, median / p95 | 0.245 / 0.246 | 0.824 / 1.384 |
+  | dense CJK glyph (U+9B31, 186 curves) alone at 300 px, GPU ms first draw / after | 0.053 / 0.032 | 0.133 / 0.111 |
+
+  Worst per-pixel curve count on that glyph: 37 at 15 px and 38 at 300 px (the horizontal and vertical ray together;
+  23 and 22 for the worse single ray; the longest band list is 41 of the glyph's 186 curves, so the bands cut a pixel's
+  walk to a fifth of the glyph). A burst of 1200 new glyphs took 26 frames to land and grew the store four times (65 536
+  to 1 048 576 words); the longest frame was 2.5 ms wall, 0.93 ms GPU, against a 0.92 ms steady median wall frame: a growth
+  is a copy in the frame, not a stall. At MSAA x1 the page is 0.208 ms (MTSDF) and 0.649 ms (Slug) and the burst's
+  longest frame 8.9 ms wall (one noisy frame; the same run's GPU longest is 1.7 ms). So on this GPU Slug costs about 3x
+  MTSDF's fragment time at reading size; in return it needs no atlas page, so a page of any sizes and any glyph
+  count is one draw a colour. The MTSDF page here is three draws only because its glyphs fit one atlas page.
+
 ## 7.82
 
 **Inspector: screenshot un-minimises the window itself, and a resize verb captures layouts at real window sizes.**

@@ -476,6 +476,7 @@ public sealed unsafe partial class VulkanContext
             DeviceApi.vkFreeMemory(stagingMemory);
             throw new VkException(copyResult, "offscreen readback copy was never submitted");
         }
+        _dev.NoteDeviceWait();
         DeviceApi.vkQueueWaitIdle(GraphicsQueue);
         DeviceApi.vkFreeCommandBuffers(CommandPool, 1, &cmd);
 
