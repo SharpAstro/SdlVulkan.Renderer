@@ -60,9 +60,14 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// to keep SDL's behaviour, where the first click only focuses the window.</param>
     /// <param name="keepDisplayAwake">Hold the display on while the window is open (<c>SDL_HINT_VIDEO_ALLOW_SCREENSAVER</c>
     /// "0"). Default <c>false</c>: the display may sleep.</param>
+    /// <param name="appMetadata">Tells the OS who the app is (see <see cref="SdlAppMetadata"/>): the reverse-DNS
+    /// <see cref="SdlAppMetadata.Identifier"/>, e.g. <c>com.sharpastro.tianwen</c>, is what the taskbar groups windows
+    /// by, what becomes the Wayland <c>app_id</c> and X11 <c>WM_CLASS</c>, and what the macOS menu and a
+    /// power-inhibit reason show. Null: the entry assembly's name and version, so no app is anonymous.</param>
     public static SdlVulkanWindow Create(string title, int width, int height, bool fullscreen = false,
-        bool clickThroughOnFocus = true, bool keepDisplayAwake = false)
-        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake), title, width, height,
+        bool clickThroughOnFocus = true, bool keepDisplayAwake = false,
+        SdlAppMetadata? appMetadata = null)
+        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake, appMetadata), title, width, height,
             ownsSdl: true, fullscreen: fullscreen);
 
     /// <summary>
@@ -79,9 +84,11 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// ordinary click (<c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c>). Default <c>true</c>; an app whose canvas does
     /// something costly or irreversible on a bare click can pass <c>false</c>, so the first click only focuses.</param>
     /// <param name="keepDisplayAwake">Hold the display on while the window is open. Default <c>false</c>.</param>
+    /// <param name="appMetadata">As for <see cref="Create"/>.</param>
     public static SdlVulkanWindow CreateTransparent(string title, int width, int height, bool borderless = true,
-        bool alwaysOnTop = true, bool clickThroughOnFocus = true, bool keepDisplayAwake = false)
-        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake), title, width, height, ownsSdl: true, maximized: false,
+        bool alwaysOnTop = true, bool clickThroughOnFocus = true, bool keepDisplayAwake = false,
+        SdlAppMetadata? appMetadata = null)
+        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake, appMetadata), title, width, height, ownsSdl: true, maximized: false,
             borderless: borderless, alwaysOnTop: alwaysOnTop, transparent: true);
 
     /// <summary>
@@ -155,10 +162,13 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// <summary>
     /// Initializes SDL (video + events), loads Vulkan, and creates the shared instance. Called once
     /// by the standalone <see cref="Create"/> path and once by <see cref="SdlVulkanApp.Create"/>.
-    /// The display-sleep hint is set first: SDL reads it at video init, so it must precede <c>SDL_Init</c>.
+    /// The app metadata is applied first, because SDL reads it during <c>SDL_Init</c> and when it creates windows.
+    /// The display-sleep hint is set next: SDL reads it at video init, so it must precede <c>SDL_Init</c> too.
     /// </summary>
-    internal static VkInstance InitSdlAndCreateInstance(bool clickThroughOnFocus = true, bool keepDisplayAwake = false)
+    internal static VkInstance InitSdlAndCreateInstance(bool clickThroughOnFocus = true, bool keepDisplayAwake = false,
+        SdlAppMetadata? appMetadata = null)
     {
+        SdlAppMetadata.Resolve(appMetadata).Apply();
         ApplyInitHints(clickThroughOnFocus);
         ApplyDisplaySleepHint(keepDisplayAwake);
 

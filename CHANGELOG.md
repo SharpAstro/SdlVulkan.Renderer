@@ -7,6 +7,25 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.81
+
+**The OS is told who the app is: `SDL_SetAppMetadata` runs before `SDL_Init`.**
+
+- Nothing set it, so every app built on this library was "SDL Application" to the system: the taskbar could not group
+  its windows under its own name, Wayland and X11 windows carried no usable `app_id` / `WM_CLASS`, the macOS menu and
+  a power-inhibit reason had no app to name.
+- `SdlVulkanApp.Create`, `SdlVulkanWindow.Create` and `SdlVulkanWindow.CreateTransparent` take an optional
+  `SdlAppMetadata? appMetadata` (name, version, reverse-DNS identifier such as `com.sharpastro.tianwen`, optional
+  creator and url), applied in `InitSdlAndCreateInstance`, the one path they all share, before SDL starts. Existing
+  calls compile unchanged.
+- With nothing passed, the name and version fall back to the entry assembly's (informational version, without the
+  `+revision` suffix, else its assembly version), so an ordinary app is not anonymous. No identifier is made up: a wrong one would
+  group the app wrongly. Without an entry assembly (NativeAOT can have none) the fields stay unset rather than throw, so
+  such apps should pass `appMetadata` explicitly.
+- Consumers (pilot GUI, tianwen GUI, the FITS viewer) pass their identity on their next pin bump.
+- `AppMetadataTests` checks the resolver (arguments, fallback) and reads the applied values back through
+  `SDL_GetAppMetadataProperty` without `SDL_Init`.
+
 ## 7.80
 
 **The display may sleep: SDL no longer holds it on by default.**
