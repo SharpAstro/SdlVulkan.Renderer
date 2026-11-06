@@ -57,10 +57,15 @@ public sealed class SdlVulkanApp : IDisposable
     /// dashboard open all day, and would undercut an app that manages power itself (tianwen keeps the system
     /// awake during an imaging run but lets the display sleep). Pass <c>true</c>, or call
     /// <see cref="SdlVulkanWindow.KeepDisplayAwake"/> later, for a view that needs the display on.</para>
+    /// <para><paramref name="appMetadata"/> tells the OS who the app is, before SDL starts: a reverse-DNS identifier
+    /// such as <c>com.sharpastro.tianwen</c> is what the taskbar groups every window of the app by, what becomes the
+    /// Wayland <c>app_id</c> and X11 <c>WM_CLASS</c>, and what the macOS menu and a power-inhibit reason show (see
+    /// <see cref="SdlAppMetadata"/>). Null: the entry assembly's name and version, so no app is anonymous.</para>
     /// </summary>
     public static SdlVulkanApp Create(VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1,
-        bool clickThroughOnFocus = true, bool keepDisplayAwake = false)
-        => new(SdlVulkanWindow.InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake), msaaSamples);
+        bool clickThroughOnFocus = true, bool keepDisplayAwake = false,
+        SdlAppMetadata? appMetadata = null)
+        => new(SdlVulkanWindow.InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake, appMetadata), msaaSamples);
 
     /// <summary>
     /// Opens a new OS window with its own Vulkan surface. The first call also creates the shared
