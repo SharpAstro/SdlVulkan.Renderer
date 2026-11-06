@@ -45,4 +45,10 @@
     <Content Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The page and the measuring of tools/SlugProbe, compiled here too so SlugProbeSmokeTests runs the very code the
+         probe runs by hand (the probe is not in the solution, so nothing else would build it on CI). -->
+    <Compile Include="..\..\tools\SlugProbe\SlugProbePage.cs" Link="SlugProbe\SlugProbePage.cs" />
+  </ItemGroup>
+
 </Project>

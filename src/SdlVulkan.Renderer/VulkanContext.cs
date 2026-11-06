@@ -580,8 +580,17 @@ public sealed unsafe partial class VulkanContext : IDisposable
     private void FlushPresentQueueAfterDrain(bool drained)
     {
         if (!drained) return;
+        _dev.NoteDeviceWait();
         NoteDeviceLost(DeviceApi.vkQueueWaitIdle(GraphicsQueue), "vkQueueWaitIdle (swapchain teardown)");
     }
+
+    /// <summary>
+    /// How many drains or queue waits have been made on this context's device (TryDrainDevice, TryWaitPriorFramesIdle,
+    /// the queue flush of a swapchain teardown, <see cref="VulkanDevice.WaitIdle"/>, the offscreen readback's queue
+    /// wait, teardown), for tests that hold a path to none. Device-wide, so a wait made through the device directly
+    /// is counted, not only those routed through this context; see <see cref="VulkanDevice.DeviceWaits"/>.
+    /// </summary>
+    internal long DeviceWaits => _dev.DeviceWaits;
 
     public void RecreateSwapchain(uint width, uint height)
     {
@@ -715,6 +724,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// </summary>
     private bool TryDrainDevice(ulong timeoutNs, string context, bool attemptEvenIfStuck = false)
     {
+        _dev.NoteDeviceWait();
         // Guard on the GPU's known-good state. When the per-frame fence is already known stuck,
         // BeginFrame has been timing out — which is exactly how the event loop escalated into
         // recovery — and on the UI-thread callers (resize, surface loss) burning the full timeout
@@ -775,6 +785,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// </remarks>
     public bool TryWaitPriorFramesIdle(string context)
     {
+        _dev.NoteDeviceWait();
         if (_fenceWaitStuck)
         {
             SdlVulkanLog.Logger.AtlasDrainSkippedGpuStuck(context);
@@ -1361,6 +1372,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // would hang the quit, the same "Not responding" failure mode the recovery path avoids).
         if (!_fenceWaitStuck)
         {
+            _dev.NoteDeviceWait();
             DeviceApi.vkDeviceWaitIdle();
         }
 

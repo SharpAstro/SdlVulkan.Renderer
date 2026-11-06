@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Measures the Slug text path against MTSDF on the same page, so a consumer can A/B them (SdlVulkan.Renderer #162's
+    bars). NOT part of the solution / package build. Run it directly, from the repo root, with the project path
+    tools/SlugProbe and the Release configuration. After the run's own arguments and a bare double dash it takes the
+    options frames, size, msaa, burst and cjk-font, each a word with two leading dashes and a value (XML forbids
+    writing a double dash in a comment, so see Program.cs for the spelling): the defaults are 300 frames, 15 px,
+    MSAA 4, a burst of 1200 glyphs and the three-glyph CJK subset the tests committed. The CJK block takes the
+    distinct glyphs its face has, and the report says how many: the subset's block repeats three, a full CJK face's
+    does not.
+    It draws one A4-like page (reading-size Latin text, a heading and a CJK block) as persistent MTSDF glyphs and as
+    persistent Slug glyphs on a headless offscreen Vulkan context (no window, no SDL), then prints for each technique
+    the draw calls and GPU time per frame; the worst number of curves a pixel walks on the densest CJK glyph; the GPU
+    time of one dense CJK glyph at 300 px, first draw against after; and the longest frame while a burst of new glyphs
+    misses the Slug store and makes it grow. A measurement of a few hundred frames, not a load test.
+    Exit code 0 on success, 2 when there is no Vulkan device, 1 on an error.
+    The page-and-measure code is SlugProbePage.cs, which the test project compiles too (SlugProbeSmokeTests).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The fonts the tests committed (DejaVu Sans, and a Noto Sans JP subset of three dense glyphs, OFL), not copied. -->
+    <Content Include="..\..\src\SdlVulkan.Renderer.Tests\Fixtures\DejaVuSans.ttf" Link="Fixtures\DejaVuSans.ttf" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\src\SdlVulkan.Renderer.Tests\Fixtures\NotoSansJP-Subset.otf" Link="Fixtures\NotoSansJP-Subset.otf" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

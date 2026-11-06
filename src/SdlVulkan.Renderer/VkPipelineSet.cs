@@ -57,6 +57,18 @@ public sealed unsafe class VkPipelineSet : IDisposable
     /// glyph by its size on screen (sdfinst.frag), so one draw holds glyphs of any mix of sizes.</summary>
     public VkPipeline SdfInstancedPipeline { get; }
 
+    /// <summary>Slug text (slug.vert/slug.frag): the coverage of the glyph's outline, computed in the shader from
+    /// the blob in <see cref="VkSlugGlyphStore"/>'s storage buffer, so it is analytic and independent of the pass's
+    /// sample count. Drawn through <c>VulkanDevice.SlugPipelineLayout</c>, NOT the shared one, with the store's set;
+    /// the push block is the shared 84 bytes. Built for every pass shape the set is built for, the single-sample
+    /// passes included.</summary>
+    public VkPipeline SlugPipeline { get; }
+
+    /// <summary>Slug text laid out once and kept (<c>VkRenderer.DrawPersistentSlugGlyphs</c>): one INSTANCE per glyph,
+    /// its quad expanded from the vertex index and padded by a pixel at the zoom (sluginst.vert), the coverage of
+    /// slug.frag, so one draw holds glyphs of any size. Same layout, set and push block as <see cref="SlugPipeline"/>.</summary>
+    public VkPipeline SlugInstancedPipeline { get; }
+
     /// <summary>Rounded-box fill: one SDF quad per rect, so a translucent fill blends exactly once
     /// and the corners are antialiased. Backs <c>VkRenderer.FillRoundedRectangle</c>.</summary>
     public VkPipeline RoundRectPipeline { get; }
@@ -81,9 +93,12 @@ public sealed unsafe class VkPipelineSet : IDisposable
     private VkPipelineSet(VkDeviceApi deviceApi, VkPipeline flat, VkPipeline textured, VkPipeline ellipse, VkPipeline page, VkPipeline stroke,
         VkPipeline sdf, VkPipeline sdfLarge, VkPipeline roundRect,
         VkPipeline flatMultiply, VkPipeline flatScreen, VkPipeline flatDarken, VkPipeline flatLighten,
-        VkPipeline masked, VkMeshPipeline? mesh, VkPipeline ellipseInstanced, VkPipeline sdfInstanced)
+        VkPipeline masked, VkMeshPipeline? mesh, VkPipeline ellipseInstanced, VkPipeline sdfInstanced, VkPipeline slug,
+        VkPipeline slugInstanced)
     {
         _deviceApi = deviceApi;
+        SlugPipeline = slug;
+        SlugInstancedPipeline = slugInstanced;
         SdfInstancedPipeline = sdfInstanced;
         FlatPipeline = flat;
         TexturedPipeline = textured;
@@ -135,6 +150,9 @@ public sealed unsafe class VkPipelineSet : IDisposable
         var sdfLargeFrag = LoadEmbeddedModule(deviceApi, "sdflarge.frag");
         var sdfInstVert = LoadEmbeddedModule(deviceApi, "sdfinst.vert");
         var sdfInstFrag = LoadEmbeddedModule(deviceApi, "sdfinst.frag");
+        var slugVert = LoadEmbeddedModule(deviceApi, "slug.vert");
+        var slugFrag = LoadEmbeddedModule(deviceApi, "slug.frag");
+        var slugInstVert = LoadEmbeddedModule(deviceApi, "sluginst.vert");
         var roundRectVert = LoadEmbeddedModule(deviceApi, "roundrect.vert");
         var roundRectFrag = LoadEmbeddedModule(deviceApi, "roundrect.frag");
 
@@ -221,6 +239,31 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var sdfInstanced = CreatePipeline(deviceApi, renderPass, ctx.PipelineLayout, sdfInstVert, sdfInstFrag,
                 &sdfInstBinding, 1, sdfInstAttrs, 5, msaaSamples: msaa);
 
+            // Slug pipeline: vec2 pos + vec2 em + uint blobOffset (20B) per vertex, six a glyph. The em coordinate is
+            // what slug.frag interpolates and measures coverage in; the blob offset is where the glyph's words start in
+            // the store's buffer. Its own pipeline layout (the store's storage-buffer set), the same push block.
+            VkVertexInputBindingDescription slugBinding = new(VkRenderer.SlugFloatsPerVertex * sizeof(float));
+            var slugAttrs = stackalloc VkVertexInputAttributeDescription[3];
+            slugAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                 // aPos
+            slugAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float)); // aEm
+            slugAttrs[2] = new(2, VkFormat.R32Uint, 4 * sizeof(float));      // aBlob
+            var slug = CreatePipeline(deviceApi, renderPass, ctx.GraphicsDevice.SlugPipelineLayout, slugVert, slugFrag,
+                &slugBinding, 1, slugAttrs, 3, msaaSamples: msaa);
+
+            // Instanced Slug pipeline: ONE INSTANCE per glyph = vec2 origin + vec2 axisU + vec2 axisV + vec4 em box +
+            // uint blobOffset (44B), the quad's six vertices from gl_VertexIndex. The fragment stage is slug.frag's
+            // (sluginst.vert's outputs are its inputs), so there is one copy of the coverage code.
+            VkVertexInputBindingDescription slugInstBinding = new(VkRenderer.SlugInstanceFloats * sizeof(float),
+                VkVertexInputRate.Instance);
+            var slugInstAttrs = stackalloc VkVertexInputAttributeDescription[5];
+            slugInstAttrs[0] = new(0, VkFormat.R32G32Sfloat, 0);                       // aOrigin
+            slugInstAttrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));       // aAxisU
+            slugInstAttrs[2] = new(2, VkFormat.R32G32Sfloat, 4 * sizeof(float));       // aAxisV
+            slugInstAttrs[3] = new(3, VkFormat.R32G32B32A32Sfloat, 6 * sizeof(float)); // aEm
+            slugInstAttrs[4] = new(4, VkFormat.R32Uint, 10 * sizeof(float));           // aBlob
+            var slugInstanced = CreatePipeline(deviceApi, renderPass, ctx.GraphicsDevice.SlugPipelineLayout,
+                slugInstVert, slugFrag, &slugInstBinding, 1, slugInstAttrs, 5, msaaSamples: msaa);
+
             // Rounded-rect pipeline: vec2 pos + vec2 localPx + vec2 halfPx + float radiusPx.
             // The box parameters ride on vertex attributes rather than push constants so the shared
             // 84-byte push block stays identical across every pipeline (see roundrect.vert).
@@ -254,7 +297,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
             var mesh = withDepth ? VkMeshPipeline.Create(deviceApi, renderPass, msaa) : null;
 
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, sdfLarge, roundRect,
-                flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced, sdfInstanced);
+                flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced, sdfInstanced, slug,
+                slugInstanced);
         }
         finally
         {
@@ -275,6 +319,9 @@ public sealed unsafe class VkPipelineSet : IDisposable
             deviceApi.vkDestroyShaderModule(sdfLargeFrag);
             deviceApi.vkDestroyShaderModule(sdfInstVert);
             deviceApi.vkDestroyShaderModule(sdfInstFrag);
+            deviceApi.vkDestroyShaderModule(slugVert);
+            deviceApi.vkDestroyShaderModule(slugFrag);
+            deviceApi.vkDestroyShaderModule(slugInstVert);
             deviceApi.vkDestroyShaderModule(roundRectVert);
             deviceApi.vkDestroyShaderModule(roundRectFrag);
         }
@@ -297,6 +344,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(SdfPipeline);
         _deviceApi.vkDestroyPipeline(SdfLargePipeline);
         _deviceApi.vkDestroyPipeline(SdfInstancedPipeline);
+        _deviceApi.vkDestroyPipeline(SlugPipeline);
+        _deviceApi.vkDestroyPipeline(SlugInstancedPipeline);
         Mesh?.Dispose();
     }
 
