@@ -10,7 +10,7 @@ needs to plan, build, check and land.
   push, open a PR or merge; the controller lands the flight. Leave nothing uncommitted, and put scratch output
   outside the plane.
 - Sibling clones are not yours. `DIR.Lib` source sits beside this repo, not inside a plane, so a plane restores the
-  pinned `DIR.Lib` package, as CI does. A change that needs `DIR.Lib` to change is its own flight in that repo: name it
+  `DIR.Lib` package (a floating pin, `11.48.*`, in `src/Directory.Packages.props`), as CI does. A change that needs `DIR.Lib` to change is its own flight in that repo: name it
   and leave it.
 - No display or window is reachable from a plane. The tests render through a headless offscreen Vulkan context and
   `Assert.Skip` when no Vulkan ICD is present, so a skipped test proves nothing about rendering. The tools under
@@ -25,8 +25,12 @@ dotnet build -c Release
 dotnet test src/SdlVulkan.Renderer.Tests -c Release
 ```
 
+- `dotnet build -c Release` also builds `net10.0-android` (the library's target list when no `RuntimeIdentifier` is set),
+  so it needs the android workload. CI installs it first (`dotnet workload install android`); a machine without it fails
+  the build there, not in this change.
 - Tests are xunit.v3 with Shouldly; code targets `net10.0`. No linter is configured.
-- Package versions live in `src/Directory.Packages.props`, never in a `.csproj`.
+- Package versions for `src/` live in `src/Directory.Packages.props`, never in a `.csproj` there. The tools under
+  `tools/` sit outside it and carry their own versions in their `.csproj` files.
 - A release bump is one line, `VersionMajorMinor` in `src/Directory.Build.props`, with its note in `CHANGELOG.md`.
   Do not hand-edit anything derived from it.
 - CI also runs a Linux WebView smoke and a Windows job (non-gating); a change to the WebView packages is checked by
