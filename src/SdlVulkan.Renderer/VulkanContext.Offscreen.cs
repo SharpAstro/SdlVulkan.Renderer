@@ -53,13 +53,26 @@ public sealed unsafe partial class VulkanContext
     /// <param name="meshDepth">Give the target a depth image from the start, so a mesh region draws on its
     /// first frame: <see cref="RequireMeshDepth"/> before anything is allocated. False leaves the target
     /// without one until a mesh asks for it.</param>
+    /// <param name="hdr">Render through the HDR path (VulkanContext.Hdr.cs): the frame is drawn as ever into the
+    /// B8G8R8A8 target, which is then the SDR layer, and one composite pass writes an R16G16B16A16_SFLOAT scRGB target,
+    /// read by <see cref="ReadbackOffscreenScRgb"/>. Always offered here (there is no surface to refuse it), which is what
+    /// lets the HDR path be tested headless. <see cref="ReadbackOffscreenRgba"/> still reads the SDR layer.</param>
     public static VulkanContext CreateOffscreen(VkInstance instance, uint width, uint height,
         uint vertexBufferSize = 4 * 1024 * 1024, VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1,
-        bool meshDepth = false)
+        bool meshDepth = false, bool hdr = false)
     {
         // Headless device (no surface, no swapchain extension). The offscreen context owns it.
         var device = VulkanDevice.CreateOffscreen(instance, msaaSamples);
-        var ctx = new VulkanContext(device, VkSurfaceKHR.Null, vertexBufferSize, ownsDevice: true);
+        return CreateOffscreenOnDevice(device, ownsDevice: true, width, height, vertexBufferSize, meshDepth, hdr);
+    }
+
+    // An offscreen target on a device made by VulkanDevice.CreateOffscreen: its own (the public factory) or one another
+    // offscreen context already made, which is how a test puts an HDR target and an SDR one side by side on one device
+    // without a second instance.
+    internal static VulkanContext CreateOffscreenOnDevice(VulkanDevice device, bool ownsDevice, uint width, uint height,
+        uint vertexBufferSize = 4 * 1024 * 1024, bool meshDepth = false, bool hdr = false)
+    {
+        var ctx = new VulkanContext(device, VkSurfaceKHR.Null, vertexBufferSize, ownsDevice, wantsHdr: hdr);
 
         ctx._isOffscreen = true;
         ctx._mainWantsDepth = meshDepth;
@@ -86,7 +99,9 @@ public sealed unsafe partial class VulkanContext
             arrayLayers = 1,
             samples = VkSampleCountFlags.Count1,
             tiling = VkImageTiling.Optimal,
-            usage = VkImageUsageFlags.ColorAttachment | VkImageUsageFlags.TransferSrc,
+            // Sampled too when this is the SDR layer of an HDR target: the composite reads it.
+            usage = VkImageUsageFlags.ColorAttachment | VkImageUsageFlags.TransferSrc
+                | (_wantsHdr ? VkImageUsageFlags.Sampled : 0),
             sharingMode = VkSharingMode.Exclusive
         };
         DeviceApi.vkCreateImage(&imgCI, null, out _offscreenImage).CheckResult();
@@ -141,6 +156,7 @@ public sealed unsafe partial class VulkanContext
         }
 
         CreateOffscreenFramebuffers(width, height);
+        if (_wantsHdr) CreateHdrOffscreenTarget(width, height);
     }
 
     // The part of the target that follows the depth shape: the depth image and the framebuffers. Built for
@@ -319,6 +335,7 @@ public sealed unsafe partial class VulkanContext
         if (!_isOffscreen) throw new InvalidOperationException("EndOffscreenFrame requires CreateOffscreen");
 
         DeviceApi.vkCmdEndRenderPass(cmd);
+        if (_hdrActive) RecordHdrComposite(cmd);
         EndGpuFrameTiming(cmd);
         DeviceApi.vkEndCommandBuffer(cmd);
 
@@ -414,7 +431,25 @@ public sealed unsafe partial class VulkanContext
         if (!_isOffscreen) throw new InvalidOperationException("ReadbackOffscreenRgba requires CreateOffscreen");
 
         var pixelCount = (int)(_offscreenWidth * _offscreenHeight);
-        var size = (ulong)(pixelCount * 4);
+        // B8G8R8A8 -> convert to R8G8B8A8 for caller convenience.
+        var src = ReadbackImageBytes(_offscreenImage, 4);
+        var result = new byte[pixelCount * 4];
+        for (var i = 0; i < pixelCount; i++)
+        {
+            result[i * 4 + 0] = src[i * 4 + 2]; // R <- B
+            result[i * 4 + 1] = src[i * 4 + 1]; // G
+            result[i * 4 + 2] = src[i * 4 + 0]; // B <- R
+            result[i * 4 + 3] = src[i * 4 + 3]; // A
+        }
+        return result;
+    }
+
+    // The raw bytes of the offscreen-sized image, in the image's own format and row order, which the caller decodes.
+    // The image is in ColorAttachmentOptimal (where the offscreen passes leave it) and goes back there.
+    private byte[] ReadbackImageBytes(VkImage image, int bytesPerPixel)
+    {
+        var pixelCount = (int)(_offscreenWidth * _offscreenHeight);
+        var size = (ulong)(pixelCount * bytesPerPixel);
 
         // Host-visible staging buffer to receive the image copy.
         VkBufferCreateInfo bufCI = new()
@@ -439,7 +474,7 @@ public sealed unsafe partial class VulkanContext
         VkCommandBufferBeginInfo bi = new() { flags = VkCommandBufferUsageFlags.OneTimeSubmit };
         DeviceApi.vkBeginCommandBuffer(cmd, &bi);
 
-        TransitionImageLayout(cmd, _offscreenImage,
+        TransitionImageLayout(cmd, image,
             VkImageLayout.ColorAttachmentOptimal, VkImageLayout.TransferSrcOptimal,
             VkAccessFlags.ColorAttachmentWrite, VkAccessFlags.TransferRead,
             VkPipelineStageFlags.ColorAttachmentOutput, VkPipelineStageFlags.Transfer);
@@ -453,10 +488,10 @@ public sealed unsafe partial class VulkanContext
             imageOffset = new VkOffset3D(0, 0, 0),
             imageExtent = new VkExtent3D(_offscreenWidth, _offscreenHeight, 1)
         };
-        DeviceApi.vkCmdCopyImageToBuffer(cmd, _offscreenImage, VkImageLayout.TransferSrcOptimal,
+        DeviceApi.vkCmdCopyImageToBuffer(cmd, image, VkImageLayout.TransferSrcOptimal,
             stagingBuffer, 1, &region);
 
-        TransitionImageLayout(cmd, _offscreenImage,
+        TransitionImageLayout(cmd, image,
             VkImageLayout.TransferSrcOptimal, VkImageLayout.ColorAttachmentOptimal,
             VkAccessFlags.TransferRead, VkAccessFlags.ColorAttachmentWrite,
             VkPipelineStageFlags.Transfer, VkPipelineStageFlags.ColorAttachmentOutput);
@@ -480,18 +515,10 @@ public sealed unsafe partial class VulkanContext
         DeviceApi.vkQueueWaitIdle(GraphicsQueue);
         DeviceApi.vkFreeCommandBuffers(CommandPool, 1, &cmd);
 
-        // Map and copy out. B8G8R8A8 → convert to R8G8B8A8 for caller convenience.
+        // Map and copy out.
         void* mapped;
         DeviceApi.vkMapMemory(stagingMemory, 0, size, 0, &mapped);
-        var result = new byte[pixelCount * 4];
-        var src = new Span<byte>(mapped, pixelCount * 4);
-        for (var i = 0; i < pixelCount; i++)
-        {
-            result[i * 4 + 0] = src[i * 4 + 2]; // R ← B
-            result[i * 4 + 1] = src[i * 4 + 1]; // G
-            result[i * 4 + 2] = src[i * 4 + 0]; // B ← R
-            result[i * 4 + 3] = src[i * 4 + 3]; // A
-        }
+        var result = new Span<byte>(mapped, pixelCount * bytesPerPixel).ToArray();
         DeviceApi.vkUnmapMemory(stagingMemory);
 
         DeviceApi.vkDestroyBuffer(stagingBuffer);
@@ -518,6 +545,7 @@ public sealed unsafe partial class VulkanContext
     private void CleanupOffscreenTarget()
     {
         DestroyOffscreenFramebuffers();
+        if (_hdrActive) CleanupHdrOffscreenTarget();
         if (_offscreenImageView != VkImageView.Null)
             DeviceApi.vkDestroyImageView(_offscreenImageView);
         if (_offscreenImage != VkImage.Null)

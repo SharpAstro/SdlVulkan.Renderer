@@ -432,8 +432,10 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public bool PresentsAlpha => AlphaPresentation != AlphaPresentation.None;
 
     private VulkanContext(VulkanDevice device, VkSurfaceKHR surface, uint vertexBufferSize, bool ownsDevice,
-        bool wantsAlpha = false, ILayeredTarget? layered = null)
+        bool wantsAlpha = false, ILayeredTarget? layered = null, bool wantsHdr = false)
     {
+        // Never for a transparent window: its alpha is carried another way (see VulkanContext.Hdr.cs).
+        _wantsHdr = wantsHdr && !wantsAlpha && layered is null;
         _dev = device;
         _surface = surface;
         _vertexBufferSize = vertexBufferSize;
@@ -443,12 +445,16 @@ public sealed unsafe partial class VulkanContext : IDisposable
         _layered = layered;
     }
 
+    /// <param name="hdr">Ask for an scRGB swapchain (<see cref="HdrActive"/>): taken when the surface offers
+    /// <c>R16G16B16A16_SFLOAT</c> with <c>EXTENDED_SRGB_LINEAR_EXT</c>, else today's SDR swapchain, unchanged. Off by
+    /// default; with it off nothing HDR is created and no frame does anything differently. See VulkanContext.Hdr.cs.</param>
     public static VulkanContext Create(VkInstance instance, VkSurfaceKHR surface, uint width, uint height,
-        uint vertexBufferSize = 4 * 1024 * 1024, VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
+        uint vertexBufferSize = 4 * 1024 * 1024, VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1,
+        bool hdr = false)
     {
         // Single-window path: this context creates and owns its device.
         var device = VulkanDevice.Create(instance, surface, msaaSamples);
-        return CreateOwning(device, surface, width, height, vertexBufferSize, wantsAlpha: false);
+        return CreateOwning(device, surface, width, height, vertexBufferSize, wantsAlpha: false, wantsHdr: hdr);
     }
 
     /// <summary>
@@ -472,9 +478,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     }
 
     private static VulkanContext CreateOwning(VulkanDevice device, VkSurfaceKHR surface, uint width, uint height,
-        uint vertexBufferSize, bool wantsAlpha, ILayeredTarget? layered = null)
+        uint vertexBufferSize, bool wantsAlpha, ILayeredTarget? layered = null, bool wantsHdr = false)
     {
-        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: true, wantsAlpha, layered);
+        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: true, wantsAlpha, layered, wantsHdr);
 
         ctx.CreateSyncObjects();
         ctx.AllocateCommandBuffers();
@@ -493,9 +499,11 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// (page geometry buffers, image textures) stay valid across all windows that share it, so a
     /// document session can move between windows without re-uploading them.
     /// </summary>
+    /// <param name="hdr">Ask for an scRGB swapchain, as <see cref="Create"/>'s. The shared device stays B8G8R8A8: the
+    /// frame renders into an SDR layer on it as ever, so HDR and SDR windows share one device and its resources.</param>
     public static VulkanContext CreateForSharedDevice(VulkanDevice device, VkSurfaceKHR surface,
-        uint width, uint height, uint vertexBufferSize = 4 * 1024 * 1024)
-        => CreateShared(device, surface, width, height, vertexBufferSize, wantsAlpha: false);
+        uint width, uint height, uint vertexBufferSize = 4 * 1024 * 1024, bool hdr = false)
+        => CreateShared(device, surface, width, height, vertexBufferSize, wantsAlpha: false, wantsHdr: hdr);
 
     /// <summary>
     /// <see cref="CreateForSharedDevice"/> for a transparent window: pass <see cref="SdlVulkanApp.DeviceFor"/>'s
@@ -510,9 +518,10 @@ public sealed unsafe partial class VulkanContext : IDisposable
             LayeredTargetFor(device, window));
 
     private static VulkanContext CreateShared(VulkanDevice device, VkSurfaceKHR surface,
-        uint width, uint height, uint vertexBufferSize, bool wantsAlpha, ILayeredTarget? layered = null)
+        uint width, uint height, uint vertexBufferSize, bool wantsAlpha, ILayeredTarget? layered = null,
+        bool wantsHdr = false)
     {
-        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: false, wantsAlpha, layered);
+        var ctx = new VulkanContext(device, surface, vertexBufferSize, ownsDevice: false, wantsAlpha, layered, wantsHdr);
 
         ctx.CreateSyncObjects();
         ctx.AllocateCommandBuffers();
@@ -1028,6 +1037,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
             // presentation engine already owned, which the validation layer flags on every screenshot
             // and which entitles a driver to park the queue (the stuck-fence wedge shape).
             RecordPresentCapture(cmd);
+            // HDR only: the composite on the scRGB image, from the SDR layer the main pass just finished (and the
+            // capture above just read). Nothing on an SDR context runs this.
+            if (_hdrActive) RecordHdrComposite(cmd);
             // A layered context's frame reaches its window through a readback, recorded here for the same reason:
             // after all the rendering, in the frame's own command buffer. A frame that died before its render pass
             // has nothing to show, and the window keeps what it had.
@@ -1381,6 +1393,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         DestroyGpuTiming();
 
         CleanupSwapchain();
+        CleanupHdrComposite();
         CleanupLoadRenderPass();
         if (_isOffscreen) CleanupOffscreenTarget();
         CleanupThumbnailTarget();
@@ -1489,7 +1502,14 @@ public sealed unsafe partial class VulkanContext : IDisposable
             var imageCount = caps.minImageCount + 1;
             if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
                 imageCount = caps.maxImageCount;
-            imgCount = CreateSwapchainImages(caps, extent, format, imageCount);
+            // HDR asked for: take scRGB when the surface offers it. Asked of the surface itself, each time the swapchain is
+            // built, because the formats are per surface (a window on another display). Not asked at all otherwise.
+            SurfaceFormatChoice? scRgb = null;
+            if (_wantsHdr && ChooseHdrSurfaceFormat() is { IsScRgb: true } choice) scRgb = choice;
+            imgCount = scRgb is { } hdrChoice
+                ? CreateSwapchainImages(caps, extent, hdrChoice.Format, imageCount, hdrChoice.ColorSpace)
+                : CreateSwapchainImages(caps, extent, format, imageCount);
+            if (scRgb is not null) AdoptHdrSwapchain(extent, imgCount);
         }
         SwapchainFormat = format;
         SwapchainWidth = extent.width;
@@ -1545,6 +1565,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // wrong size, so no frame may be preserved until each has been painted once.
         ResetDamageState((int)imgCount);
         CreateSwapchainFramebuffers(extent.width, extent.height);
+        if (_hdrActive) CreateHdrSwapchainComposite(extent);
     }
 
     // The part of the swapchain that follows the depth shape: the depth image, the damage load pass, the
@@ -1605,7 +1626,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
     // The swapchain itself and its images, for CreateSwapchain: everything about presenting through the surface.
     // Returns how many images the surface handed out.
     private uint CreateSwapchainImages(in VkSurfaceCapabilitiesKHR caps, VkExtent2D extent, VkFormat format,
-        uint imageCount)
+        uint imageCount, VkColorSpaceKHR colorSpace = VkColorSpaceKHR.SrgbNonLinear)
     {
         // Prefer Mailbox over Fifo when the driver offers it: Fifo (vsync) can block
         // vkAcquireNextImageKHR for up to a full vblank interval, adding up to ~16 ms of
@@ -1652,7 +1673,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
             surface = _surface,
             minImageCount = imageCount,
             imageFormat = format,
-            imageColorSpace = VkColorSpaceKHR.SrgbNonLinear,
+            imageColorSpace = colorSpace,
             imageExtent = extent,
             imageArrayLayers = 1,
             imageUsage = imageUsage,
@@ -1694,6 +1715,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
         DestroySwapchainFramebuffers();
         foreach (var iv in _swapchainImageViews)
             DeviceApi.vkDestroyImageView(iv);
+        // HDR only: the SDR layers behind those views, the float views, the composite's framebuffers and descriptors.
+        if (_hdrLayerImages.Length != 0) CleanupHdrSwapchain();
         // A layered context's image is its own, where a swapchain's belong to the swapchain, so it goes here.
         CleanupLayeredImage();
 

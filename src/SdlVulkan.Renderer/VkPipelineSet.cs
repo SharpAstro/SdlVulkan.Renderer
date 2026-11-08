@@ -123,7 +123,31 @@ public sealed unsafe class VkPipelineSet : IDisposable
         get { lock (_hdrImageLock) return _hdrImageSdr != VkPipeline.Null || _hdrImageScRgb != VkPipeline.Null; }
     }
 
-    private static VkPipeline CreateHdrImagePipeline(VulkanDevice device, VkRenderPass renderPass,
+    /// <summary>
+    /// The pipeline that lays the SDR layer over the scRGB target (<c>hdrcomposite.vert</c>/<c>.frag</c>): a
+    /// full-target triangle with no vertex buffer, blending One / OneMinusSrcAlpha because the frag writes premultiplied
+    /// colour. Built by <see cref="VulkanContext"/> for its composite pass, once, when it first gets an HDR swapchain.
+    /// </summary>
+    internal static VkPipeline CreateHdrCompositePipeline(VulkanDevice device, VkRenderPass renderPass,
+        VkPipelineLayout layout)
+    {
+        var deviceApi = device.DeviceApi;
+        var vert = LoadEmbeddedModule(deviceApi, "hdrcomposite.vert");
+        var frag = LoadEmbeddedModule(deviceApi, "hdrcomposite.frag");
+        try
+        {
+            return CreatePipeline(deviceApi, renderPass, layout, vert, frag, null, 0, null, 0,
+                srcColorFactor: VkBlendFactor.One, dstColorFactor: VkBlendFactor.OneMinusSrcAlpha);
+        }
+        finally
+        {
+            deviceApi.vkDestroyShaderModule(vert);
+            deviceApi.vkDestroyShaderModule(frag);
+        }
+    }
+
+    // Internal so VulkanContext's composite pass, a float target of its own shape, builds the scRGB variant too.
+    internal static VkPipeline CreateHdrImagePipeline(VulkanDevice device, VkRenderPass renderPass,
         VkSampleCountFlags samples, bool scRgbOutput)
     {
         var deviceApi = device.DeviceApi;
