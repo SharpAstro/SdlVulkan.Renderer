@@ -547,6 +547,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             single);
         var region = Surface.LastFrameRegion;
         _damageRegion = (region.offset.x, region.offset.y, (int)region.extent.width, (int)region.extent.height);
+        _scissor = region; // the pass begin set it to the region
         _lastBoundPipeline = VkPipeline.Null; // fresh command buffer — nothing is bound
         return true;
     }
@@ -970,6 +971,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // clip popped to empty mid-frame reset the scissor to whatever the field held — nothing, on a
         // context that had never begun a swapchain frame.
         _damageRegion = (0, 0, (int)_width, (int)_height);
+        _scissor = new VkRect2D(0, 0, _width, _height);
         _lastBoundPipeline = VkPipeline.Null; // fresh command buffer — nothing is bound
         return true;
     }
@@ -1595,6 +1597,16 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// layout are built on the first draw, for the pass shape open at that moment, and no existing pipeline, pass
     /// or descriptor changes.
     /// </para>
+    /// <para>
+    /// On a context presenting scRGB (<see cref="VulkanContext.HdrActive"/>), in the main pass, the image is not
+    /// tone-mapped: it is queued for the composite, which draws it as scRGB (scaled by 203/80, primaries converted,
+    /// clamped to <see cref="VulkanContext.HdrPeakScRgb"/>, <c>sourcePeakNits</c> unused) in the order drawn, beneath
+    /// the whole SDR layer, with the clip in force. Here the draw clears its rectangle (within the clip) to alpha 0 in
+    /// the SDR layer, so what was drawn before it in that rectangle is covered and what is drawn after it lies over it
+    /// (an image with alpha below 1 shows black, not the earlier drawing, through its transparency). The composite is
+    /// not preserved from frame to frame, so every frame must draw every HDR image it shows. In a cached layer or a
+    /// thumbnail capture (8-bit passes) it is the tone-mapped draw whatever the context presents.
+    /// </para>
     /// </summary>
     /// <param name="texture">A float texture; its RGB is linear light in units of <paramref name="referenceWhiteNits"/>.</param>
     /// <param name="x">Left edge in pixels.</param>
@@ -1628,8 +1640,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
 
-        // Always the SDR (tone-mapped) output here; an scRGB target selects GetHdrImagePipeline(true).
-        BindPipeline(_pipelines.GetHdrImagePipeline(scRgbOutput: false));
+        // On an HDR frame of the main target (the context presents scRGB, VulkanContext.HdrActive) the image is queued
+        // for the composite, which draws it scRGB beneath the SDR layer; anywhere else (an SDR context, a cached layer,
+        // a thumbnail capture, all 8-bit) it is the tone-mapped draw below.
+        var toComposite = Surface.HdrActive && !_inCachedLayer && !_inThumbnailCapture;
+        // Always the SDR (tone-mapped) output unless queued; an scRGB target selects GetHdrImagePipeline(true).
+        if (!toComposite)
+            BindPipeline(_pipelines.GetHdrImagePipeline(scRgbOutput: false));
 
         var pc = _hdrPushConstants ??= new float[(int)(VulkanDevice.HdrImagePushBytes / sizeof(float))];
         Array.Copy(_pushConstants, pc, 16);
@@ -1643,8 +1660,16 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         }
         pc[28] = HdrColor.Headroom(sourcePeakNits, referenceWhiteNits);
         pc[29] = HdrColor.NitsScale(referenceWhiteNits);
-        pc[30] = 0f;
+        // The display's peak in scRGB, which only the scRGB output reads (HdrColor.ClampToPeak).
+        pc[30] = toComposite ? Surface.HdrPeakScRgb : 0f;
         pc[31] = 0f;
+
+        if (toComposite)
+        {
+            Surface.QueueHdrImage(Surface.VertexBuffer, offset, texture.DescriptorSet, _scissor, pc);
+            PunchHdrHole(x, y, w, h);
+            return;
+        }
 
         var layout = Surface.GraphicsDevice.HdrImagePipelineLayout;
         fixed (float* pPC = pc)
@@ -1661,6 +1686,28 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
     }
 
+    // Clears the image's rectangle, within the clip, to alpha 0 in the SDR layer, so the composite shows the queued HDR
+    // image through it and everything drawn after it lies over it. vkCmdClearAttachments ignores the scissor, so the
+    // rectangle is intersected with it here, and a rectangle that ends mid-pixel takes the pixel (as the damage region does).
+    private void PunchHdrHole(float x, float y, float w, float h)
+    {
+        var x0 = Math.Max((int)MathF.Floor(MathF.Min(x, x + w)), _scissor.offset.x);
+        var y0 = Math.Max((int)MathF.Floor(MathF.Min(y, y + h)), _scissor.offset.y);
+        var x1 = Math.Min((int)MathF.Ceiling(MathF.Max(x, x + w)), _scissor.offset.x + (int)_scissor.extent.width);
+        var y1 = Math.Min((int)MathF.Ceiling(MathF.Max(y, y + h)), _scissor.offset.y + (int)_scissor.extent.height);
+        if (x1 <= x0 || y1 <= y0) return;
+
+        VkClearAttachment attachment = new() { aspectMask = VkImageAspectFlags.Color, colorAttachment = 0 };
+        attachment.clearValue.color = new VkClearColorValue(0f, 0f, 0f, 0f);
+        VkClearRect rect = new()
+        {
+            rect = new VkRect2D(x0, y0, (uint)(x1 - x0), (uint)(y1 - y0)),
+            baseArrayLayer = 0,
+            layerCount = 1
+        };
+        Surface.DeviceApi.vkCmdClearAttachments(_currentCmd, 1, &attachment, 1, &rect);
+    }
+
     /// <summary>
     /// Sets the scissor rect for clipping. Call ResetScissor to restore to full viewport.
     /// </summary>
@@ -1669,7 +1716,12 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var api = Surface.DeviceApi;
         VkRect2D scissor = new(x, y, w, h);
         api.vkCmdSetScissor(_currentCmd, 0, scissor);
+        _scissor = scissor;
     }
+
+    // The scissor in force on the command buffer, which only an HDR image draw reads (to replay it against the composite
+    // and to bound the hole it punches). Set by every SetScissor and by the pass begins.
+    private VkRect2D _scissor;
 
     /// <summary>
     /// Resets the scissor rect to the full viewport.

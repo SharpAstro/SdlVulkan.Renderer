@@ -84,8 +84,9 @@ public sealed unsafe partial class VulkanContext
 
         // TryTake CLEARS as it reads, so it must be asked exactly once per frame whichever path is
         // taken -- the image is about to be painted either way.
+        // An HDR frame is composited whole (VulkanContext.Hdr.cs), so it is repainted whole, damage or not.
         var partial = _damage.TryTake(idx, out var dx, out var dy, out var dw, out var dh)
-            && loadPass != VkRenderPass.Null;
+            && loadPass != VkRenderPass.Null && !_hdrActive;
         // ...unless the frame never reaches the GPU, in which case nothing was painted and what the image
         // owed is gone with the take: repaint it in full on its next turn (OnFrameDropped). A cached
         // delegate over a field, because this runs every frame and a closure per frame is garbage per
