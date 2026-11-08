@@ -149,14 +149,49 @@ public sealed unsafe partial class VulkanContext
 
     // What the surface offers, asked of the surface itself: scRGB when it is there, else the SDR choice (unused).
     private SurfaceFormatChoice ChooseHdrSurfaceFormat()
+        => HdrSurfaceFormat.Choose(QuerySurfaceFormats(), hdrRequested: true);
+
+    private VkSurfaceFormatKHR[] QuerySurfaceFormats()
     {
         uint count = 0;
         InstanceApi.vkGetPhysicalDeviceSurfaceFormatsKHR(PhysicalDevice, _surface, &count, null);
-        if (count == 0) return HdrSurfaceFormat.Choose([], hdrRequested: true);
+        if (count == 0) return [];
         var formats = new VkSurfaceFormatKHR[count];
         fixed (VkSurfaceFormatKHR* p = formats)
             InstanceApi.vkGetPhysicalDeviceSurfaceFormatsKHR(PhysicalDevice, _surface, &count, p);
-        return HdrSurfaceFormat.Choose(formats, hdrRequested: true);
+        return formats;
+    }
+
+    // ---- Display facts ---------------------------------------------------------------------------------------
+
+    private HdrDisplayInfo _hdrDisplay = HdrDisplayInfo.Sdr;
+
+    /// <summary>The display facts this context was last given (<see cref="ApplyHdrDisplay"/>): SDR until the event loop,
+    /// or the app, has read them. Only a context that asked for HDR (<see cref="HdrRequested"/>) acts on them.</summary>
+    public HdrDisplayInfo HdrDisplay => _hdrDisplay;
+
+    /// <summary>
+    /// Takes the display facts of the window this context presents to (<see cref="SdlVulkanWindow.HdrDisplay"/>), when
+    /// SDL says the display or the HDR state changed: never per frame. Returns what <see cref="HdrDisplayState.Decide"/>
+    /// made of them; when <see cref="HdrDisplayDecision.RecreateSwapchain"/> is set the caller rebuilds the swapchain
+    /// (<see cref="RecreateSwapchain"/>, through <see cref="VkRenderer.Resize"/> so the layout follows), which re-asks the
+    /// surface and so adopts or drops scRGB. A context that did not ask for HDR (and any layered, transparent or offscreen
+    /// one, which never does) only records the facts and does not touch the surface.
+    /// </summary>
+    public HdrDisplayDecision ApplyHdrDisplay(HdrDisplayInfo facts)
+    {
+        // An offscreen target has no surface to ask, and is never moved to another display: it only records the facts.
+        var asked = _wantsHdr && !_isOffscreen;
+        var offered = asked ? QuerySurfaceFormats() : [];
+        var decision = HdrDisplayState.Decide(new HdrDisplayState(_hdrDisplay, _hdrActive), facts, offered, asked);
+        _hdrDisplay = facts;
+        // A rebuild into scRGB starts from the current values too, whatever changed first.
+        if (decision.UpdateComposite || decision.RecreateSwapchain)
+        {
+            SdrWhiteScRgb = facts.SdrWhiteScRgb;
+            HdrHeadroom = facts.Headroom;
+        }
+        return decision;
     }
 
     // After CreateSwapchainImages made an scRGB swapchain: the swapchain's images move aside, and the SDR layers take

@@ -364,6 +364,39 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         }
     }
 
+    private HdrDisplayInfo _hdrDisplay = HdrDisplayInfo.Sdr;
+
+    /// <summary>The HDR facts of the display this window is on, as of the last <see cref="RefreshHdrDisplay"/>: the
+    /// event loop refreshes them when the window is added and when SDL reports the display or the HDR state changed,
+    /// never per frame. SDR (no HDR, SDR white 1.0, no headroom) before the first refresh.</summary>
+    public HdrDisplayInfo HdrDisplay => _hdrDisplay;
+
+    /// <summary>Raised, on the thread that dispatches SDL events, when <see cref="RefreshHdrDisplay"/> finds the
+    /// facts changed. Carries the new facts.</summary>
+    public event Action<HdrDisplayInfo>? HdrDisplayChanged;
+
+    /// <summary>
+    /// Reads the window's and its display's HDR properties from SDL (<c>WindowHDREnabledBoolean</c>,
+    /// <c>WindowSDRWhiteLevelFloat</c>, <c>WindowHDRHeadroomFloat</c>, <c>DisplayHDREnabledBoolean</c>). On Windows the
+    /// window's values follow the HDR desktop and only the display property says whether the panel is HDR, so HDR counts
+    /// as active only when both say so (<see cref="HdrDisplayInfo.From"/>). Stores the result as
+    /// <see cref="HdrDisplay"/> and returns whether it changed (<see cref="HdrDisplayChanged"/> is raised then).
+    /// </summary>
+    public bool RefreshHdrDisplay()
+    {
+        var windowProps = GetWindowProperties(Handle);
+        var displayProps = GetDisplayProperties(GetDisplayForWindow(Handle));
+        var facts = HdrDisplayInfo.From(
+            GetBooleanProperty(windowProps, Props.WindowHDREnabledBoolean, false),
+            GetBooleanProperty(displayProps, Props.DisplayHDREnabledBoolean, false),
+            GetFloatProperty(windowProps, Props.WindowSDRWhiteLevelFloat, 1f),
+            GetFloatProperty(windowProps, Props.WindowHDRHeadroomFloat, 1f));
+        if (facts == _hdrDisplay) return false;
+        _hdrDisplay = facts;
+        HdrDisplayChanged?.Invoke(facts);
+        return true;
+    }
+
     /// <summary>
     /// Returns the DPI display scale factor for this window (e.g. 1.5 for 150% scaling).
     /// Uses SDL3's <c>GetWindowDisplayScale</c> which correctly handles per-monitor DPI.
