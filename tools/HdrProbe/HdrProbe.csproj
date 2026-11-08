@@ -12,7 +12,11 @@
     With the "show" switch (dotnet run, two dashes, then the switch, itself two dashes and the word
     show; XML forbids spelling it out here) it also opens a window on the first capable display and
     presents scRGB patches above SDR white through a real swapchain, for a person to look at. Judge
-    them on the panel; a screenshot clips them at 1.0 (see HdrShow.cs).
+    them on the panel; a screenshot clips them at 1.0 (see HdrShow.cs). When that window is closed
+    (Escape) a second one opens, drawn through the LIBRARY: a float texture ramp and the BT.2020
+    primaries through DrawHdrImage on a VulkanContext created with HDR on (see HdrLibraryPanel.cs).
+    Two phases, one after the other, because the library owns its own SDL lifetime, instance and
+    device; the first proves the present path alone, the second the library on top of it.
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>

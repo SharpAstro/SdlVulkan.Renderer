@@ -52,7 +52,8 @@ internal static unsafe class Program
     }
 
     /// <param name="show">After the listing, open a window on the first HDR-capable display and present
-    /// scRGB patches at known brightness (<see cref="HdrShow"/>), so the answer can be seen and not only
+    /// scRGB patches at known brightness (<see cref="HdrShow"/>), then a second window drawn through the library
+    /// (<see cref="HdrLibraryPanel"/>: a float ramp and BT.2020 primaries through DrawHdrImage), so the answer can be seen and not only
     /// read. Off by default: the listing is the probe, the show is the demonstration.</param>
     private static int Run(bool show)
     {
@@ -221,16 +222,26 @@ internal static unsafe class Program
                 ? "VERDICT: the loader offers VK_EXT_swapchain_colorspace but no surface listed an HDR colour space; check Windows HDR is on for the display."
                 : "VERDICT: no HDR present is possible through Vulkan here; the loader offers no VK_EXT_swapchain_colorspace, so the driver is the block, not the panel.");
 
+        var showLibrary = false;
         if (show)
         {
             if (hdrDevice >= 0)
+            {
+                // Phase 1: raw Vulkan, the present path alone (clear rectangles, no library).
                 HdrShow.Run(instance, api, devices[hdrDevice], deviceNames[hdrDevice], hdrDisplay, hdrBounds);
+                showLibrary = true;
+            }
             else
                 Console.WriteLine("   (--show: nothing to show, no display offers an scRGB surface.)");
         }
 
         api.vkDestroyInstance();
         Quit();
+
+        // Phase 2, after the probe's own instance and SDL are gone: the library owns its SDL lifetime, instance and
+        // device, so it cannot share the probe's. A float texture through DrawHdrImage on an hdr: true context.
+        if (showLibrary)
+            HdrLibraryPanel.Run(hdrBounds);
         return anyHdrCapable ? 0 : 2;
     }
 }
