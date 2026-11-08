@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Measures an SDR UI frame, headless, so a change to the renderer can be shown to cost the SDR path nothing
+    (SdlVulkan.Renderer #165: "a regression on the SDR path is a blocker"). NOT part of the solution / package build.
+    Run it directly, from the repo root, in Release, with the project path tools/SdrFrameBench; after the run's own
+    arguments and a bare double dash it takes the options frames, msaa, width and height, each a word with two leading
+    dashes and a value (XML forbids writing a double dash in a comment, so see Program.cs for the spelling).
+    It draws one fixed UI scene (rectangles, rounded rectangles, ellipses, strokes, text and images, the same every
+    frame, from a fixed seed) on an offscreen Vulkan context (no window, no SDL) and prints, for CPU time (record and
+    submit), GPU time (VulkanContext.GpuTiming) and the whole frame's wall time, the mean and the 95th percentile in
+    ms. Exit code 0 on success, 2 when there is no Vulkan device, 1 on an error. A few hundred frames, not a load test.
+
+    BEFORE AND AFTER. The library is referenced through the RendererProject property, so the same bench builds
+    against another source tree: export the base (git archive) and pass its library project with the build property
+    RendererProject (a dash p, the name, an equals sign and the path to that tree's
+    src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj), and an output folder of your own. The scene uses only API that
+    exists before the HDR work, so it builds against either tree.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Which tree's library to measure: this one unless a path is given. -->
+    <RendererProject Condition="'$(RendererProject)' == ''">$(MSBuildThisFileDirectory)..\..\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj</RendererProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(RendererProject)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The font the tests committed (DejaVu Sans), not copied. -->
+    <Content Include="..\..\src\SdlVulkan.Renderer.Tests\Fixtures\DejaVuSans.ttf" Link="Fixtures\DejaVuSans.ttf" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
