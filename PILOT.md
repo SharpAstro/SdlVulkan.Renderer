@@ -34,8 +34,11 @@ dotnet test src/SdlVulkan.Renderer.Tests -c Release
 
 ## How a flight merges
 
-- main takes PRs by any method (no merge queue). Take main by a merge (`git fetch origin`, `git merge origin/main`),
-  never a rebase, and never push with `--force`.
+- main has no merge queue, but its ruleset requires **linear history**, so a PR lands by squash or rebase, never as a
+  merge commit. Take main by a merge (`git fetch origin`, `git merge origin/main`), never a rebase, and never push with
+  `--force`. A merge that resolved a conflict cannot be rebased onto main; say so in the leg's report, so the PR
+  lands squashed.
+- Keep a flight's commits few and each one whole.
 
 ## Writing
 
