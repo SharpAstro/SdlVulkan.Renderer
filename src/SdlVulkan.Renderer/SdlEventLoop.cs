@@ -860,8 +860,8 @@ public sealed class SdlEventLoop
             case EventType.WindowDisplayChanged:
             case EventType.WindowHDRStateChanged:
                 // The window moved to another display, or HDR was switched on or off (or SDR white moved) in the OS.
-                if (TryView(evt.Window.WindowID, out var vh))
-                    RefreshHdrDisplay(vh);
+                if (TryView(evt.Window.WindowID, out var vdc))
+                    RefreshHdrDisplay(vdc);
                 break;
 
             case EventType.WindowRestored:
