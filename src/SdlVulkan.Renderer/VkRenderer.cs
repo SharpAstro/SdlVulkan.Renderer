@@ -1579,6 +1579,88 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
     }
 
+    // 128-byte push block of the HDR image pipeline: proj (16 floats, copied from _pushConstants), the three rows of
+    // the primaries matrix as vec4s, then (source peak, NitsScale, display peak in scRGB, unused). Allocated on the
+    // first HDR draw, so a renderer that never draws one holds nothing for it.
+    private float[]? _hdrPushConstants;
+
+    /// <summary>
+    /// Draws a float texture (<see cref="VkTexture.CreateFromRgbaFloat"/>) of scene-linear light into the rectangle,
+    /// tone-mapped for the SDR target of today's swapchain: primaries converted to BT.709
+    /// (<see cref="HdrColor.ToBt709"/>), a per-channel roll-off to the target's white (<see cref="HdrColor.ToneMap"/>)
+    /// and the sRGB encode (<see cref="HdrColor.SrgbInverseEotf"/>), in <c>hdrimage.frag</c>. Alpha is the texture's,
+    /// straight, blended as the other image draws do.
+    /// <para>
+    /// Costs nothing until it is called: the pipeline (<see cref="VkPipelineSet.GetHdrImagePipeline"/>) and its
+    /// layout are built on the first draw, for the pass shape open at that moment, and no existing pipeline, pass
+    /// or descriptor changes.
+    /// </para>
+    /// </summary>
+    /// <param name="texture">A float texture; its RGB is linear light in units of <paramref name="referenceWhiteNits"/>.</param>
+    /// <param name="x">Left edge in pixels.</param>
+    /// <param name="y">Top edge in pixels.</param>
+    /// <param name="w">Width in pixels.</param>
+    /// <param name="h">Height in pixels.</param>
+    /// <param name="primaries">Primaries of the texture's RGB.</param>
+    /// <param name="sourcePeakNits">The brightest the image gets, in cd/m²: what the tone curve maps to the
+    /// target's white. At or below <paramref name="referenceWhiteNits"/> the curve is the identity.</param>
+    /// <param name="referenceWhiteNits">The luminance in cd/m² that a texture value of 1.0 stands for
+    /// (<see cref="HdrColor.ReferenceWhiteNits"/>, BT.2408).</param>
+    public void DrawHdrImage(VkTexture texture, float x, float y, float w, float h,
+        HdrPrimaries primaries = HdrPrimaries.Bt709, float sourcePeakNits = 1000f,
+        float referenceWhiteNits = HdrColor.ReferenceWhiteNits)
+    {
+        ArgumentNullException.ThrowIfNull(texture);
+        if (_pipelines is null) return;
+
+        var api = Surface.DeviceApi;
+
+        ReadOnlySpan<float> vertices =
+        [
+            x, y, 0f, 0f,
+            x + w, y, 1f, 0f,
+            x + w, y + h, 1f, 1f,
+            x, y, 0f, 0f,
+            x + w, y + h, 1f, 1f,
+            x, y + h, 0f, 1f
+        ];
+
+        var offset = Surface.WriteVertices(vertices);
+        if (offset == uint.MaxValue) return;
+
+        // Always the SDR (tone-mapped) output here; an scRGB target selects GetHdrImagePipeline(true).
+        BindPipeline(_pipelines.GetHdrImagePipeline(scRgbOutput: false));
+
+        var pc = _hdrPushConstants ??= new float[(int)(VulkanDevice.HdrImagePushBytes / sizeof(float))];
+        Array.Copy(_pushConstants, pc, 16);
+        var m = HdrColor.ToBt709(primaries);
+        for (var row = 0; row < 3; row++)
+        {
+            pc[16 + row * 4] = m[row * 3];
+            pc[16 + row * 4 + 1] = m[row * 3 + 1];
+            pc[16 + row * 4 + 2] = m[row * 3 + 2];
+            pc[16 + row * 4 + 3] = 0f;
+        }
+        pc[28] = HdrColor.Headroom(sourcePeakNits, referenceWhiteNits);
+        pc[29] = HdrColor.NitsScale(referenceWhiteNits);
+        pc[30] = 0f;
+        pc[31] = 0f;
+
+        var layout = Surface.GraphicsDevice.HdrImagePipelineLayout;
+        fixed (float* pPC = pc)
+            api.vkCmdPushConstants(_currentCmd, layout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, VulkanDevice.HdrImagePushBytes, pPC);
+
+        var textureSet = texture.DescriptorSet;
+        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
+            layout, 0, 1, &textureSet, 0, null);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
+    }
+
     /// <summary>
     /// Sets the scissor rect for clipping. Call ResetScissor to restore to full viewport.
     /// </summary>

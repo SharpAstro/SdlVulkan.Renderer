@@ -102,6 +102,46 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// push constants as <see cref="PipelineLayout"/>.</summary>
     public VkPipelineLayout MaskedPipelineLayout { get; }
 
+    /// <summary>Bytes of push constants the HDR image pipeline takes: the projection (64), the three rows of the
+    /// primaries matrix (48) and a vec4 of peaks and scale (16). 128 is the minimum every device must offer.</summary>
+    internal const uint HdrImagePushBytes = 128;
+
+    private VkPipelineLayout _hdrImagePipelineLayout;
+    private readonly object _hdrImageLayoutLock = new();
+
+    /// <summary>
+    /// Pipeline layout for <see cref="VkPipelineSet.GetHdrImagePipeline"/>: the shared single-sampler
+    /// <see cref="DescriptorSetLayout"/> (so every <see cref="VkTexture"/> set binds through it) with a
+    /// <see cref="HdrImagePushBytes"/>-byte push range, because the shared 84-byte block has no room for a matrix.
+    /// Created on first use, so a device that never draws an HDR image never makes it.
+    /// </summary>
+    internal VkPipelineLayout HdrImagePipelineLayout
+    {
+        get
+        {
+            lock (_hdrImageLayoutLock)
+            {
+                if (_hdrImagePipelineLayout != VkPipelineLayout.Null) return _hdrImagePipelineLayout;
+                var setLayout = DescriptorSetLayout;
+                VkPushConstantRange range = new()
+                {
+                    stageFlags = VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment,
+                    offset = 0,
+                    size = HdrImagePushBytes
+                };
+                VkPipelineLayoutCreateInfo ci = new()
+                {
+                    setLayoutCount = 1,
+                    pSetLayouts = &setLayout,
+                    pushConstantRangeCount = 1,
+                    pPushConstantRanges = &range
+                };
+                DeviceApi.vkCreatePipelineLayout(&ci, null, out _hdrImagePipelineLayout).CheckResult();
+                return _hdrImagePipelineLayout;
+            }
+        }
+    }
+
     /// <summary>Layout for the Slug glyph store's set: binding 0 one read-only storage buffer (the
     /// glyph words, <see cref="VkSlugGlyphStore"/>), visible to the vertex and fragment stages. A
     /// layout of its own, like <see cref="MaskedDescriptorSetLayout"/>, so the single-sampler layout
@@ -1251,6 +1291,8 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         DeviceApi.vkDestroyPipelineLayout(MaskedPipelineLayout);
         DeviceApi.vkDestroyDescriptorSetLayout(MaskedDescriptorSetLayout);
         DeviceApi.vkDestroyPipelineLayout(SlugPipelineLayout);
+        if (_hdrImagePipelineLayout != VkPipelineLayout.Null)
+            DeviceApi.vkDestroyPipelineLayout(_hdrImagePipelineLayout);
         DeviceApi.vkDestroyDescriptorSetLayout(SlugDescriptorSetLayout);
         foreach (var pool in _descriptorPools)
             DeviceApi.vkDestroyDescriptorPool(pool);
@@ -1451,19 +1493,8 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         fixed (VkSurfaceFormatKHR* p = formats)
             instanceApi.vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, p);
 
-        if (count == 1 && formats[0].format == VkFormat.Undefined)
-            return VkFormat.B8G8R8A8Unorm;
-
-        var hasBgra = false;
-        var hasRgba = false;
-        foreach (var f in formats)
-        {
-            if (f.format == VkFormat.B8G8R8A8Unorm) hasBgra = true;
-            else if (f.format == VkFormat.R8G8B8A8Unorm) hasRgba = true;
-        }
-        if (hasBgra) return VkFormat.B8G8R8A8Unorm;
-        if (hasRgba) return VkFormat.R8G8B8A8Unorm;
-        return formats[0].format;
+        // The choice itself is a pure function (HdrSurfaceFormat.PickSdr), so its answers are tested without a surface.
+        return HdrSurfaceFormat.PickSdr(formats);
     }
 
     /// <summary>How many subpass dependencies every render pass here declares. See
