@@ -67,6 +67,12 @@
     <PackageReference Include="DIR.Lib" Condition="'$(DebugTwin)' != 'true' AND '$(Configuration)' != 'Debug'" />
     <PackageReference Include="DIR.Lib.Debug" Condition="'$(DebugTwin)' == 'true' OR '$(Configuration)' == 'Debug'" />
   </ItemGroup>
+  <!-- The choice above depends on Configuration, and restore decides it: a restore with no -c is a Debug restore,
+       and a later Release build that skips restore packs from that assets file, so SdlVulkan.Renderer shipped
+       depending on DIR.Lib.Debug (7.83 and 7.84). Refuse to pack the Release package from a Debug restore. -->
+  <Target Name="RequireReleaseRestoreForPack" BeforeTargets="GenerateNuspec" Condition="'$(DebugTwin)' != 'true' AND '$(Configuration)' != 'Debug' AND Exists('$(ProjectAssetsFile)')">
+    <Error Condition="$([System.IO.File]::ReadAllText('$(ProjectAssetsFile)').Contains('&quot;DIR.Lib.Debug/'))" Text="SdlVulkan.Renderer ($(Configuration)) was restored against DIR.Lib.Debug, so its package would depend on DIR.Lib.Debug. Restore with the same configuration as the build: dotnet restore -p:Configuration=$(Configuration)." />
+  </Target>
 
   <!--
     SharpAstro.AppShell supplies IActivatableWindow, which SdlVulkanWindow implements so that a

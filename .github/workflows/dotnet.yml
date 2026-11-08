@@ -59,7 +59,10 @@ jobs:
       # so it needs the android workload. ubuntu runners already ship the Android SDK + JDK.
       run: dotnet workload install android
     - name: Restore dependencies
-      run: dotnet restore
+      # The configuration MUST be given: the renderer picks DIR.Lib or DIR.Lib.Debug by Configuration, a bare
+      # restore is a Debug one, and the --no-restore build below then packed SdlVulkan.Renderer depending on
+      # DIR.Lib.Debug (7.83, 7.84). The csproj's RequireReleaseRestoreForPack now fails such a pack.
+      run: dotnet restore -p:Configuration=$BUILD_CONF
     - name: Build
       run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
     # SdlVulkan.Renderer.Debug: the same library packed from a Debug build at the same stamped version. A
@@ -129,7 +132,8 @@ jobs:
       # so it needs the android workload. ubuntu runners already ship the Android SDK + JDK.
       run: dotnet workload install android
     - name: Restore dependencies
-      run: dotnet restore
+      # Same configuration as the build, as in the build job: a bare restore is a Debug one.
+      run: dotnet restore -p:Configuration=$BUILD_CONF
     - name: Build test project
       # Only the test project (net10.0) — NOT the whole solution: building the net10.0-android TFM needs
       # the Android SDK, which the ubuntu-24.04-arm runner doesn't ship (ubuntu-latest x64 does). The

@@ -7,6 +7,23 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.85
+
+**Packaging fix: the `SdlVulkan.Renderer` package depends on `DIR.Lib` again, not `DIR.Lib.Debug`.**
+
+- 7.83 and 7.84 shipped `SdlVulkan.Renderer` (the Release package) with a dependency on `DIR.Lib.Debug`. The
+  csproj picks `DIR.Lib` or `DIR.Lib.Debug` by `Configuration` (since 7.83, so a Debug build without the DIR.Lib
+  sibling gets the inspector types), and that choice is made at restore: CI's `dotnet restore` named no
+  configuration, so it was a Debug restore, and the `build -c Release --no-restore` after it packed from that
+  assets file. The library itself was the Release build; only its dependency was wrong. A consumer that also
+  references `DIR.Lib` got both packages, which carry the same assembly.
+- CI now restores with `-p:Configuration=$BUILD_CONF` (build and test jobs).
+- The csproj's new `RequireReleaseRestoreForPack` target fails a non-Debug, non-twin pack whose assets file
+  holds `DIR.Lib.Debug`, with the restore command to run instead, so this cannot ship silently again (also
+  for a local `dotnet build -c Release --no-restore` after a plain restore).
+- `SdlVulkan.Renderer.Debug` is unchanged: it depends on `DIR.Lib.Debug`, as intended.
+
+
 ## 7.84
 
 **HDR images: an opt-in scRGB swapchain, float textures and an HDR image draw, with no cost to the SDR path (#165).**
