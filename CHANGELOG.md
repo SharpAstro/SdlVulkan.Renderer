@@ -7,6 +7,52 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.84
+
+**HDR images: an opt-in scRGB swapchain, float textures and an HDR image draw, with no cost to the SDR path (#165).**
+
+- **Opt-in, per context.** `VulkanContext.Create`, `CreateForSharedDevice` and `CreateOffscreen` take `hdr` (default
+  false). `SdlVulkanWindow` and `SdlVulkanApp` now enable `VK_EXT_swapchain_colorspace` on the instance when the loader
+  offers it. When the surface offers `R16G16B16A16_SFLOAT` in `EXTENDED_SRGB_LINEAR_EXT` (scRGB; HDR10 is not produced)
+  the context presents it (`HdrActive`); otherwise it is exactly today's SDR context and nothing HDR exists.
+  Transparent, layered and Dozen-device windows never take scRGB.
+- **How it composes, and why SDR pays nothing.** On an HDR window the frame still renders into a swapchain-sized
+  B8G8R8A8 SDR layer, so every pipeline, blend, MSAA resolve, cached layer, thumbnail and readback is bit-identical to
+  the SDR path and the device's passes stay 8-bit (one shared device serves HDR and SDR windows). `EndFrame` records one
+  composite pass on the float image: queued HDR images, then the layer (premultiplied, sRGB decoded, scaled by
+  `SdrWhiteScRgb`). An SDR context allocates no layer, pass or composite pipeline (`HdrCompositeTests` asserts it). An HDR
+  frame is repainted in full and must draw every HDR image every frame.
+- **Float textures and `DrawHdrImage`.** `VkTexture.CreateFromRgbaFloat` / `CreateDeferredFromRgbaFloat` make an
+  `R16G16B16A16_SFLOAT` texture from scene-linear floats (1.0 is 203 cd/m2, BT.2408). `VkRenderer.DrawHdrImage(texture, x,
+  y, w, h, primaries, sourcePeakNits, referenceWhiteNits)` draws it: as scRGB through the composite on an HDR window
+  (scaled by 203/80, primaries to BT.709, clamped to the display's peak), and tone-mapped on any 8-bit target (identity
+  to 0.75 of white, then an extended Reinhard roll-off to white at the source peak, then the sRGB encode). Its pipeline is
+  built on the first HDR draw, not before. `HdrColor` (the CPU maths, which `hdrimage.frag` transcribes and
+  `HdrImageRenderTests` holds it to), `HdrPrimaries` (BT.709, BT.2020) and `HdrSurfaceFormat` are public.
+- **Display facts.** `SdlVulkanWindow.HdrDisplay` / `HdrDisplayChanged` carry SDL's answer for the display the window is
+  on (HDR on, SDR white, headroom). The event loop reads them when a window is added and on SDL's display-changed and
+  HDR-state-changed events, never per frame, and hands them to `VulkanContext.ApplyHdrDisplay`, which keeps
+  `SdrWhiteScRgb` / `HdrHeadroom` current and rebuilds the swapchain when a move to another display makes scRGB
+  available or not. A context that did not opt in only records them.
+- **Proof.** `tools/HdrProbe --show` gains a second phase: after the raw-Vulkan scRGB patches, a window drawn through the
+  library, a float ramp from 0 to the panel's peak beside an SDR white swatch and the BT.2020 primaries at SDR white and at
+  the peak beside the SDR primaries, through `DrawHdrImage` on an `hdr: true` context (a panel judges it; a screenshot
+  clips). `tools/SdrFrameBench` is a headless SDR UI scene timed offscreen (CPU, GPU and wall ms, mean and p95; exit 2 with
+  no Vulkan device) that builds against another source tree through the `RendererProject` property.
+- **SDR before and after, one sitting, Adreno X1-85, 1280x800, MSAA x4, 300 frames a run, four runs of each alternating
+  (base = the flight's merge-base 40b39c9 exported with `git archive`; the machine is shared, so runs are noisy):**
+
+  | run | base CPU mean / p95 | head CPU mean / p95 | base GPU mean / p95 | head GPU mean / p95 |
+  |---|---|---|---|---|
+  | 1 | 0.531 / 0.710 | 0.625 / 1.355 | 0.658 / 0.673 | 0.664 / 0.663 |
+  | 2 | 2.501 / 5.429 | 1.476 / 4.334 | 0.874 / 0.910 | 0.865 / 0.905 |
+  | 3 | 0.944 / 2.720 | 0.574 / 0.999 | 0.966 / 1.122 | 0.940 / 1.111 |
+  | 4 | 0.537 / 0.723 | 0.518 / 0.736 | 0.825 / 0.872 | 0.895 / 1.100 |
+
+  GPU mean over the four runs: base 0.831 ms, head 0.841 ms; the machine's own drift between runs (0.66 to 0.97 ms on
+  either side) is larger than that. CPU: the two quiet pairs (runs 1 and 4) read 0.531 / 0.537 base and 0.625 / 0.518 head,
+  and the head's best (0.518) is under the base's (0.531). No SDR regression beyond noise.
+
 ## 7.83
 
 **Slug text beside MTSDF: a glyph's outline drawn by its own coverage on the GPU, and a probe that A/Bs the two on one page (#162).**
