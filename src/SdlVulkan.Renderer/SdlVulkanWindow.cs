@@ -827,9 +827,16 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         // validation, the GPU memory-hazard checker. All a no-op if the layer isn't installed.
         bool useValidation = VulkanValidation.Enabled && VulkanValidation.LayerAvailable();
 
+        // VK_EXT_swapchain_colorspace, when the loader offers it: without it a surface lists only SrgbNonLinear
+        // formats and an scRGB swapchain (VulkanContext's opt-in hdr) cannot be asked for. Nothing else changes
+        // when it is absent, and enabling it adds no work per frame; it only lengthens the surface format list,
+        // which every choice here reads by format and colour space together.
+        var hdrColorSpace = InstanceExtensionAvailable(SwapchainColorSpaceExtension);
+        string[] baseExtensions = hdrColorSpace ? [.. sdlExtensionNames, SwapchainColorSpaceExtension] : sdlExtensionNames;
+
         using var extensionArray = useValidation
-            ? new VkStringArray(WithValidationExtensions(sdlExtensionNames))
-            : new VkStringArray(sdlExtensionNames);
+            ? new VkStringArray(WithValidationExtensions(baseExtensions))
+            : new VkStringArray(baseExtensions);
         using var validationLayers = useValidation ? new VkStringArray([VulkanValidation.LayerName]) : default;
 
         // Ask for the highest instance version the loader offers, capped at what this renderer needs.
@@ -879,6 +886,27 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         if (useValidation)
             VulkanValidation.InstallMessenger(instance, GetApi(instance));
         return instance;
+    }
+
+    // Vortice's name constants are UTF-8 spans (see WithValidationExtensions), so the literal is spelled out here.
+    internal const string SwapchainColorSpaceExtension = "VK_EXT_swapchain_colorspace";
+
+    /// <summary>Whether the Vulkan loader offers an instance extension (<c>vkEnumerateInstanceExtensionProperties</c>).</summary>
+    internal static unsafe bool InstanceExtensionAvailable(string name)
+    {
+        uint count = 0;
+        if (vkEnumerateInstanceExtensionProperties((byte*)null, &count, null) != VkResult.Success || count == 0)
+            return false;
+        var props = new VkExtensionProperties[count];
+        fixed (VkExtensionProperties* p = props)
+        {
+            if (vkEnumerateInstanceExtensionProperties((byte*)null, &count, p) != VkResult.Success)
+                return false;
+            for (var i = 0; i < count; i++)
+                if (new string((sbyte*)p[i].extensionName) == name)
+                    return true;
+        }
+        return false;
     }
 
     // The SDL-required instance extensions plus VK_EXT_debug_utils (for the messenger) and, when sync
