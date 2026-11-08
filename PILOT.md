@@ -26,7 +26,7 @@ dotnet test src/SdlVulkan.Renderer.Tests -c Release
 ```
 
 - Tests are xunit.v3 with Shouldly; code targets `net10.0`. No linter is configured.
-- Package versions live in `src/SdlVulkan.Renderer/Directory.Packages.props`, never in a `.csproj`.
+- Package versions live in `src/Directory.Packages.props`, never in a `.csproj`.
 - A release bump is one line, `VersionMajorMinor` in `src/Directory.Build.props`, with its note in `CHANGELOG.md`.
   Do not hand-edit anything derived from it.
 - CI also runs a Linux WebView smoke and a Windows job (non-gating); a change to the WebView packages is checked by
