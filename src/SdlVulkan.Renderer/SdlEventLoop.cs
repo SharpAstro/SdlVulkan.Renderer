@@ -572,6 +572,7 @@ public sealed class SdlEventLoop
                 v.FenceStuckSinceTick = 0;
             }
             v.NextRenderAttemptTick = 0;
+            v.FramesPresented++;
             v.LastCleanFrameTick = Environment.TickCount64;
             v.RecoverStreak = 0; // a clean frame ends any recovery storm accounting
             v.RecoveriesSinceCleanFrame = 0; // ... and proves the device is taking work

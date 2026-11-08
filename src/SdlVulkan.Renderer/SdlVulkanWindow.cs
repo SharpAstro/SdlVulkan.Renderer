@@ -47,9 +47,28 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// surface. The window owns the SDL lifecycle (SDL_Quit on dispose); the instance is torn down by
     /// the owning <see cref="VulkanContext"/>/<see cref="VulkanDevice"/>. For multiple windows use
     /// <see cref="SdlVulkanApp"/> instead, which owns one SDL lifecycle + instance + shared device.
+    /// <para><paramref name="keepDisplayAwake"/> is <c>false</c> by default, so the app does NOT hold the display on:
+    /// SDL's own default (<c>SDL_HINT_VIDEO_ALLOW_SCREENSAVER</c> = "0") suppresses the screensaver and display sleep
+    /// for as long as a window is open, which is wrong for a dashboard open all day, and would quietly undercut an
+    /// app that manages power itself (tianwen keeps the system awake during an imaging run but lets the display
+    /// sleep, as you want at a dark site). Pass <c>true</c>, or call <see cref="KeepDisplayAwake"/> later, for a view
+    /// that needs the display on, such as a live view or a focusing screen.</para>
     /// </summary>
-    public static SdlVulkanWindow Create(string title, int width, int height, bool fullscreen = false)
-        => CreateInternal(InitSdlAndCreateInstance(), title, width, height, ownsSdl: true, fullscreen: fullscreen);
+    /// <param name="clickThroughOnFocus">Deliver the mouse-down that activates an unfocused window to the app as an
+    /// ordinary click (<c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c>), as native Windows and macOS apps do. Default
+    /// <c>true</c>; an app whose canvas does something costly or irreversible on a bare click can pass <c>false</c>
+    /// to keep SDL's behaviour, where the first click only focuses the window.</param>
+    /// <param name="keepDisplayAwake">Hold the display on while the window is open (<c>SDL_HINT_VIDEO_ALLOW_SCREENSAVER</c>
+    /// "0"). Default <c>false</c>: the display may sleep.</param>
+    /// <param name="appMetadata">Tells the OS who the app is (see <see cref="SdlAppMetadata"/>): the reverse-DNS
+    /// <see cref="SdlAppMetadata.Identifier"/>, e.g. <c>com.sharpastro.tianwen</c>, is what the taskbar groups windows
+    /// by, what becomes the Wayland <c>app_id</c> and X11 <c>WM_CLASS</c>, and what the macOS menu and a
+    /// power-inhibit reason show. Null: the entry assembly's name and version, so no app is anonymous.</param>
+    public static SdlVulkanWindow Create(string title, int width, int height, bool fullscreen = false,
+        bool clickThroughOnFocus = true, bool keepDisplayAwake = false,
+        SdlAppMetadata? appMetadata = null)
+        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake, appMetadata), title, width, height,
+            ownsSdl: true, fullscreen: fullscreen);
 
     /// <summary>
     /// Standalone path for a window whose pixels blend with what is behind it, a desktop companion or an overlay:
@@ -57,10 +76,19 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     /// with <see cref="VulkanContext.CreateTransparent"/>, clear each frame to alpha 0, and use
     /// <see cref="SetShape"/> to let clicks through outside the silhouette (a layered window, see
     /// <see cref="AlphaPresentation.LayeredWindow"/>, lets them through wherever alpha is zero without one).
+    /// <para><paramref name="keepDisplayAwake"/> is <c>false</c> by default: the app lets the display sleep (SDL's
+    /// own default would hold it on while the window is open), a dashboard open all day, and an app with its own
+    /// power policy such as tianwen, are the reasons. See <see cref="Create"/>.</para>
     /// </summary>
+    /// <param name="clickThroughOnFocus">Deliver the mouse-down that activates an unfocused window to the app as an
+    /// ordinary click (<c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c>). Default <c>true</c>; an app whose canvas does
+    /// something costly or irreversible on a bare click can pass <c>false</c>, so the first click only focuses.</param>
+    /// <param name="keepDisplayAwake">Hold the display on while the window is open. Default <c>false</c>.</param>
+    /// <param name="appMetadata">As for <see cref="Create"/>.</param>
     public static SdlVulkanWindow CreateTransparent(string title, int width, int height, bool borderless = true,
-        bool alwaysOnTop = true)
-        => CreateInternal(InitSdlAndCreateInstance(), title, width, height, ownsSdl: true, maximized: false,
+        bool alwaysOnTop = true, bool clickThroughOnFocus = true, bool keepDisplayAwake = false,
+        SdlAppMetadata? appMetadata = null)
+        => CreateInternal(InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake, appMetadata), title, width, height, ownsSdl: true, maximized: false,
             borderless: borderless, alwaysOnTop: alwaysOnTop, transparent: true);
 
     /// <summary>
@@ -119,11 +147,31 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     }
 
     /// <summary>
+    /// Sets the SDL hints that must be in place before <c>SDL_Init</c>. SDL3 defaults
+    /// <c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c> to "0", so the mouse-down that activates an unfocused window is
+    /// swallowed and every action from another window takes two clicks; "1" delivers it as a normal click. When
+    /// <paramref name="clickThroughOnFocus"/> is false nothing is touched, so SDL's default (or a value the host
+    /// set itself) stands. Internal so the tests can read the hint back without a window.
+    /// </summary>
+    internal static void ApplyInitHints(bool clickThroughOnFocus)
+    {
+        if (clickThroughOnFocus)
+            SetHint(Hints.MouseFocusClickthrough, "1");
+    }
+
+    /// <summary>
     /// Initializes SDL (video + events), loads Vulkan, and creates the shared instance. Called once
     /// by the standalone <see cref="Create"/> path and once by <see cref="SdlVulkanApp.Create"/>.
+    /// The app metadata is applied first, because SDL reads it during <c>SDL_Init</c> and when it creates windows.
+    /// The display-sleep hint is set next: SDL reads it at video init, so it must precede <c>SDL_Init</c> too.
     /// </summary>
-    internal static VkInstance InitSdlAndCreateInstance()
+    internal static VkInstance InitSdlAndCreateInstance(bool clickThroughOnFocus = true, bool keepDisplayAwake = false,
+        SdlAppMetadata? appMetadata = null)
     {
+        SdlAppMetadata.Resolve(appMetadata).Apply();
+        ApplyInitHints(clickThroughOnFocus);
+        ApplyDisplaySleepHint(keepDisplayAwake);
+
         if (!Init(InitFlags.Video | InitFlags.Events))
             throw new InvalidOperationException($"SDL_Init failed: {GetError()}");
 
@@ -131,6 +179,33 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         vkInitialize().CheckResult();
 
         return CreateVulkanInstance();
+    }
+
+    /// <summary>
+    /// Chooses, on purpose, whether SDL holds the display on while a window is open. SDL's own default holds it
+    /// (the hint is "0": screensaver NOT allowed); the library lets the display sleep unless asked otherwise.
+    /// Must run before <c>SDL_Init</c> to take effect at video init. It overwrites a value the host set itself for this hint
+    /// (only the <c>SDL_VIDEO_ALLOW_SCREENSAVER</c> environment variable still wins); opt in with <c>keepDisplayAwake</c>.
+    /// </summary>
+    internal static void ApplyDisplaySleepHint(bool keepDisplayAwake)
+        => SetHint(Hints.VideoAllowScreensaver, keepDisplayAwake ? "0" : "1");
+
+    /// <summary>
+    /// Holds the display awake (<paramref name="awake"/> <c>true</c>, <c>SDL_DisableScreenSaver</c>) or lets it sleep
+    /// again (<c>false</c>, <c>SDL_EnableScreenSaver</c>) from now on. This is process-wide in SDL, not per window:
+    /// it affects every window of the app. Meant for a view that needs it while it is up, such as a live view or a
+    /// focusing screen; turn it off again when the view closes. The creation option <c>keepDisplayAwake</c> sets the
+    /// starting state.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">SDL refused the call, as the <c>dummy</c> and <c>offscreen</c> drivers do.</exception>
+    public void KeepDisplayAwake(bool awake) => SetKeepDisplayAwake(awake);
+
+    // The process-wide SDL call behind KeepDisplayAwake, static so it is testable without a window.
+    internal static void SetKeepDisplayAwake(bool awake)
+    {
+        if (!(awake ? DisableScreenSaver() : EnableScreenSaver()))
+            throw new InvalidOperationException(
+                $"{(awake ? "SDL_DisableScreenSaver" : "SDL_EnableScreenSaver")} failed: {GetError()}");
     }
 
     public void GetSizeInPixels(out int w, out int h) => GetWindowSizeInPixels(Handle, out w, out h);
@@ -317,6 +392,39 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         var density = GetWindowPixelDensity(Handle);
         var scale = new DesignScale(DisplayScale / (density > 0f ? density : 1f));
         return ((int)MathF.Round(scale.ToSurfaceX(designWidth)), (int)MathF.Round(scale.ToSurfaceY(designHeight)));
+    }
+
+    /// <summary>Pixels per window coordinate (1 where window coordinates are pixels; 2 on a Retina point window).</summary>
+    public float PixelDensity
+    {
+        get
+        {
+            var d = GetWindowPixelDensity(Handle);
+            return d > 0f ? d : 1f;
+        }
+    }
+
+    /// <summary>
+    /// Sets the window's client size in PIXELS, converting to window coordinates through <see cref="PixelDensity"/>
+    /// (<see cref="SetSize"/> takes window coordinates, which equal pixels only at density 1).
+    /// </summary>
+    public void SetSizeInPixels(int pixelWidth, int pixelHeight)
+    {
+        var d = PixelDensity;
+        SetWindowSize(Handle, Math.Max(1, (int)MathF.Round(pixelWidth / d)), Math.Max(1, (int)MathF.Round(pixelHeight / d)));
+    }
+
+    /// <summary>The usable display area (less taskbar and panels) in PIXELS, for clamping a pixel-sized request.</summary>
+    public bool TryGetUsableSizeInPixels(out int width, out int height)
+    {
+        if (TryGetUsableDisplayBounds(out _, out _, out var w, out var h) && w > 0 && h > 0)
+        {
+            var d = PixelDensity;
+            (width, height) = ((int)MathF.Round(w * d), (int)MathF.Round(h * d));
+            return true;
+        }
+        (width, height) = (0, 0);
+        return false;
     }
 
     public void ToggleFullscreen()

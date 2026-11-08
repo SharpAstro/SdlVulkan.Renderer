@@ -11,7 +11,7 @@ SDL3 + Vortice.Vulkan rendering library built on [DIR.Lib](https://github.com/Sh
   - `VulkanContext.CreateOffscreen(instance, w, h, ...)` — headless path rendering to a standalone `VkImage`; no surface, no swapchain, no SDL window. See **Headless / offscreen rendering** below.
   - `VulkanContext.CreateTransparent(window, w, h, ...)`: on-screen path for a window whose pixels blend with the desktop. See **Transparent windows** below.
 - **`VkRenderer`** — `Renderer<VulkanContext>` implementation with FillRectangle, DrawRectangle, FillEllipse, DrawText, plus batched glyph and persistent-vertex-buffer draw APIs. Exposes `FontAtlasDirty` so callers can trigger redraws after glyph rasterization. Has `BeginFrame` / `BeginOffscreenFrame` variants that match the two `VulkanContext` modes.
-- **`VkPipelineSet`** — Vulkan pipeline creation from pre-baked SPIR-V (flat, textured, ellipse, page, stroke, SDF, round-rect, blend variants). Shaders are authored as GLSL 450 and baked to committed SPIR-V by `tools/BakeShaders`, re-run by hand after editing one — see **Dependencies** below.
+- **`VkPipelineSet`** — Vulkan pipeline creation from pre-baked SPIR-V (flat, textured, ellipse, page, stroke, SDF, round-rect, blend variants, mesh, Slug). Shaders are authored as GLSL 450 and baked to committed SPIR-V by `tools/BakeShaders`, re-run by hand after editing one — see **Dependencies** below.
 - **`VkFontAtlas`** — Dynamic bitmap glyph atlas with ManagedFontRasterizer (from DIR.Lib) rasterization and Vulkan texture upload. Supports grow (512→4096), deferred eviction, and `skipUnflushed` to prevent sampling stale GPU texture data.
 - **`VkSdfFontAtlas`** — Signed-distance-field glyph atlas side-car for resolution-independent text. `SdfRasterSize = 64` (overridable per atlas), `fwidth`-driven AA in the fragment shader auto-tunes to ±0.5 screen pixels at any zoom. Four-channel R8G8B8A8Unorm MTSDF texture — RGB carry pseudo-distance, which the shader medians to keep corners sharp, and A the true distance. Keyed on `(font, size, gid, glyph name)`: glyph identity rather than code point, so subset fonts that reuse code points don't collide.
 
@@ -47,6 +47,14 @@ while (running)
     if (renderer.FontAtlasDirty) needsRedraw = true;
 }
 ```
+
+The click that activates an unfocused window is delivered to the app as an ordinary click (`SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH`, set before `SDL_Init`), so one click focuses the window and presses the button. An app whose canvas does something costly or irreversible on a bare click passes `clickThroughOnFocus: false` to `SdlVulkanApp.Create`, `SdlVulkanWindow.Create` or `SdlVulkanWindow.CreateTransparent`.
+
+By default the app lets the display sleep (SDL's own default would hold it on while a window is open). Pass
+`keepDisplayAwake: true` to `SdlVulkanWindow.Create`/`CreateTransparent` or `SdlVulkanApp.Create`, or call
+`window.KeepDisplayAwake(true/false)` at runtime (process-wide), for a live view or focusing screen.
+
+**Tell the OS who the app is.** Every creator (`SdlVulkanApp.Create`, `SdlVulkanWindow.Create`, `CreateTransparent`) takes an optional `SdlAppMetadata` (name, version, reverse-DNS identifier such as `com.sharpastro.tianwen`, optional creator and url) and hands it to `SDL_SetAppMetadata` before `SDL_Init`. The taskbar groups the app's windows by it, Wayland and X11 take it as `app_id` / `WM_CLASS`, and the macOS menu and a power-inhibit reason show it. Pass nothing and the entry assembly's name and version are used (under NativeAOT there may be no entry assembly, so pass `appMetadata` explicitly there): `SdlVulkanApp.Create(appMetadata: new("TianWen", "1.4.2", "com.sharpastro.tianwen"))`.
 
 ## Headless / offscreen rendering
 
@@ -214,6 +222,35 @@ screen shows, and `buddy` runs this API end to end and times its frames (`buddy 
 gives it an opaque swapchain). A capture is the compositor's picture, not necessarily the panel's: add `--look` to
 hold each picture on screen and answer by eye, which the tool prints beside the capture's verdict.
 
+## Slug text
+
+Text drawn from the glyph's **outline**, not from an atlas: each glyph is encoded once on the CPU (DIR.Lib's `SlugGlyphEncoder`, Eric Lengyel's Slug algorithm) into a blob of curves and bands, and the fragment shader computes the coverage at every pixel from it. Nothing is rasterized at a size, so there is no atlas to fill, no field to magnify, and nothing depends on the pass's sample count: the edge is analytic, as smooth on `SingleSampleMainPass` as on a multisampled pass. It sits beside MTSDF (`VkSdfFontAtlas`), which stays the default text path.
+
+**Pick Slug over MTSDF when** the size of the text varies widely (zoomable pages, a PDF or CAD view, text on a rotated or horizontally stretched axis), when the glyph set is large (CJK: an atlas page fills and recycles, the Slug store is one buffer that grows), or when corners and thin strokes must stay exact at any magnification. **Keep MTSDF when** the text is small, fixed-size UI: its fragment cost is lower (the probe below measures it).
+
+```csharp
+// Batch: one colour and one size, ONE draw however many glyphs.
+renderer.BeginSlugGlyphBatch(color, fontSize);
+renderer.AddBatchedSlugGlyphAtBaseline(fontPath, new Rune('A'), -1, penX, baselineY);   // or ...ByGid(fontPath, gid, null, ...)
+renderer.EndGlyphBatch();
+
+// Persistent: a page laid out once and kept; glyphs of ANY mix of sizes, one draw per colour.
+var kind = renderer.WriteSlugGlyphInstance(fontPath, gid, null, penX, baselineY, fontSize, rotation: 0f, xScale: 1f,
+    instances.AsSpan(i * VkRenderer.SlugInstanceFloats, VkRenderer.SlugInstanceFloats));   // Quad, Blank (a space) or Pending
+var (buffer, memory) = renderer.CreatePersistentVertexBuffer(instances);
+renderer.DrawPersistentSlugGlyphs(buffer, 0, glyphCount, color, originX, originY, zoom);   // each frame, at any origin and zoom
+```
+
+A glyph the store has not encoded yet is **never waited for**: it is queued, skipped this frame (`Pending`, and `FontAtlasDirty` asks for another frame), and drawn once its blob has been uploaded; write the instance again then. `renderer.SlugStoreStats` reports what the store holds, how often it has grown and whether anything is pending; `renderer.SlugDrawCalls` counts the draws. Pipelines exist for every pass shape (with and without depth, multisampled and single-sample).
+
+**Measure it on your machine and your page: `tools/SlugProbe`.** A headless run (no window; exit 2 with no Vulkan device) that draws one A4-like page of reading-size text with a CJK block as persistent MTSDF and as persistent Slug, and prints draws and GPU ms per frame, the worst number of curves a pixel walks on the densest CJK glyph, one dense CJK glyph alone at 300 px (first draw and after), and the longest frame while a burst of new glyphs misses the store and makes it grow:
+
+```
+dotnet run --project tools/SlugProbe -c Release
+```
+
+Options `--frames`, `--size`, `--msaa`, `--burst` and `--cjk-font` (see `tools/SlugProbe/Program.cs`). The CJK block takes the distinct glyphs its face has and the report says how many; the committed Noto Sans JP subset has only three, so its block repeats them, and `--cjk-font PATH` with a full CJK face makes it a block of different glyphs, which is the load a store sees on a real CJK page. The numbers of one machine are in [CHANGELOG.md](CHANGELOG.md), "7.83".
+
 ## Native WebView (optional)
 
 Host a native browser view *inside* an `SdlVulkanWindow`. The window system composites it
@@ -299,6 +336,20 @@ Backend notes:
   the SDL event-loop thread (they marshal across via `g_idle_add`). Events (`MessageReceived`,
   `TitleChanged`, …) are raised on the **GTK thread**, so handlers must be thread-safe or marshal back
   themselves.
+
+## Debug inspector: screenshot and resize
+
+The `#if DEBUG` `DebugInspector` (client: `SdlVulkan.Renderer.Inspector`, which also has a `selftest` mode) answers
+these window verbs:
+
+- `screenshot` un-minimises a minimised window itself, waits for the first presented frame and captures, and the
+  reply says it did so. `reminimize: true` puts the window back minimised afterwards. If no frame is presented
+  within a short budget it fails at once with "the window presented no frame: is the display off?".
+- `resize` takes `width` and `height` in window pixels, un-maximises if needed, sets the client size clamped to the
+  display work area, and answers once the next frame at that size has been laid out.
+- `screenshot` with optional `width` and `height` resizes, captures at that size and puts the window back as it was
+  (maximised, its floating size, or minimised), so a layout can be captured at real window sizes. The size is
+  clamped to the work area like `resize`, so the reply's width and height are what was actually captured.
 
 ## Debug twin package (`SdlVulkan.Renderer.Debug`)
 

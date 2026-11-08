@@ -117,6 +117,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // routes a batch here once its on-screen fontSize exceeds the small tier's raster, so display-size
     // glyphs stop magnifying a 64px field. null = single-tier (unchanged behaviour).
     private VkSdfFontAtlas? _sdfFontAtlasLarge;
+    private VkSlugGlyphStore? _slugGlyphStore;
     // The SDF atlas the CURRENT batch draws from (small or large tier); set in BeginSdfGlyphBatch and
     // used by every batched-glyph op + the flush for that batch.
     private VkSdfFontAtlas? _activeSdfAtlas;
@@ -147,6 +148,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     private int _glyphBatchVertexCount;
     private bool _glyphBatchActive;
     private bool _glyphBatchIsSdf;
+    // A Slug batch (BeginSlugGlyphBatch): glyph quads of the Slug store, one draw at EndGlyphBatch.
+    private bool _glyphBatchIsSlug;
+    // Its vertices (SlugFloatsPerVertex floats each), reused across frames.
+    private readonly List<float> _slugVertices = new(SlugFloatsPerVertex * 6 * 256);
     // SDF batches share a single fontSize (drives edge-softness push constant).
     private float _glyphBatchFontSize;
     // SDF glyphs are accumulated per atlas page (the atlas may span several page textures, each
@@ -322,9 +327,24 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         return refused;
     }
     internal VkFontAtlas? FontAtlas => _fontAtlas;
+
+    /// <summary>
+    /// The Slug glyph store (one storage buffer of encoded glyphs, see <see cref="VkSlugGlyphStore"/>), created on
+    /// first use so a renderer that never draws Slug text pays for no buffer and no threads. Render thread only.
+    /// It uploads inside each frame's <c>BeginFrame</c>, from the frame after it is created.
+    /// </summary>
+    internal VkSlugGlyphStore SlugGlyphStore =>
+        _slugGlyphStore ??= new VkSlugGlyphStore(Surface, _fontAtlas!.Rasterizer);
+
+    /// <summary>
+    /// True while the Slug store has a glyph asked for that is not in its buffer yet (still encoding, or waiting for
+    /// its upload frame), so the caller that skipped that glyph asks for another frame, like for
+    /// <see cref="FontAtlasDirty"/> (which includes this).
+    /// </summary>
+    internal bool SlugGlyphsPending => _slugGlyphStore?.HasPending == true;
     public ManagedFontRasterizer? GlyphRasterizer => _fontAtlas?.Rasterizer;
     public bool FontAtlasDirty => _fontAtlas?.IsDirty == true || _sdfFontAtlas?.IsDirty == true
-        || _sdfFontAtlasLarge?.IsDirty == true;
+        || _sdfFontAtlasLarge?.IsDirty == true || _slugGlyphStore?.HasPending == true;
 
     public VulkanContext Context => Surface;
 
@@ -514,6 +534,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _fontAtlas?.Flush(_currentCmd);
         _sdfFontAtlas?.Flush(_currentCmd);
         _sdfFontAtlasLarge?.Flush(_currentCmd);
+        _slugGlyphStore?.RecordUploads(_currentCmd);
 
         // Record pending texture uploads before the render pass (transfers can't happen inside)
         InvokePreRenderPass();
@@ -938,6 +959,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _fontAtlas?.Flush(_currentCmd);
         _sdfFontAtlas?.Flush(_currentCmd);
         _sdfFontAtlasLarge?.Flush(_currentCmd);
+        _slugGlyphStore?.RecordUploads(_currentCmd);
 
         InvokePreRenderPass();
 
@@ -1743,6 +1765,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         _glyphBatchActive = true;
         _glyphBatchIsSdf = false;
+        _glyphBatchIsSlug = false;
         _glyphBatchStartOffset = uint.MaxValue;
         _glyphBatchVertexCount = 0;
         SetColor(color);
@@ -1758,6 +1781,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         _glyphBatchActive = true;
         _glyphBatchIsSdf = true;
+        _glyphBatchIsSlug = false;
         _glyphBatchFontSize = fontSize;
         // Tier-select: route this batch to the large atlas once the on-screen fontSize (already device
         // px) exceeds the host's threshold (default: the small tier's raster — anything that would
@@ -2145,6 +2169,281 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         AddBatchedSdfGlyphAtBaselineCore(atlas, buckets, in glyph, baselineX, baselineY, rotation, xIsInkLeft, xScale);
     }
 
+    // ---- Slug text: the outline's own coverage, from the glyph store, beside the MTSDF batch above ----
+
+    /// <summary>Floats in one Slug vertex: vec2 position, vec2 em-space sample coordinate, and the glyph's blob word
+    /// offset in the last (a uint's bits; see slug.vert).</summary>
+    public const int SlugFloatsPerVertex = 5;
+
+    // The quad is the glyph's em box widened by this many screen pixels on every side, so an edge pixel the outline only
+    // touches is still drawn. The coverage a pixel further out is 0 (a crossing more than half a pixel away adds nothing).
+    private const float SlugQuadPadPx = 1f;
+
+    /// <summary>
+    /// Begins a Slug glyph batch: glyphs from the Slug store (<see cref="VkSlugGlyphStore"/>), drawn by
+    /// <see cref="VkPipelineSet.SlugPipeline"/>, whose coverage is analytic in the shader (no atlas, no field to
+    /// magnify, nothing that depends on MSAA, so it is as smooth on <c>SingleSampleMainPass</c>). The batch shares one
+    /// <paramref name="color"/> and one <paramref name="fontSize"/> (pixels per em, as for
+    /// <see cref="BeginSdfGlyphBatch"/>); <see cref="EndGlyphBatch"/> issues ONE draw for all of it, however many glyphs,
+    /// since every glyph is in the one storage buffer. A glyph the store has not encoded yet is skipped and the frame
+    /// reported dirty (<see cref="FontAtlasDirty"/>), so the host draws it a frame later; the rest of the batch draws.
+    /// </summary>
+    public void BeginSlugGlyphBatch(DIR.Lib.RGBAColor32 color, float fontSize)
+    {
+        _glyphBatchActive = true;
+        _glyphBatchIsSdf = false;
+        _glyphBatchIsSlug = true;
+        _glyphBatchFontSize = fontSize;
+        _glyphBatchStartOffset = uint.MaxValue;
+        _glyphBatchVertexCount = 0;
+        _slugVertices.Clear();
+        SetColor(color);
+    }
+
+    /// <summary>
+    /// Adds a Slug glyph to the current batch at the text baseline (no draw call issued): <paramref name="baselineX"/>,
+    /// <paramref name="baselineY"/> is the pen position, the glyph's origin on the baseline, in the space the projection
+    /// maps (y down); <paramref name="rotation"/> turns it about that point and <paramref name="xScale"/> stretches
+    /// it along the writing direction. With <paramref name="xIsInkLeft"/> the x is the glyph's ink-left instead, as for
+    /// <see cref="AddBatchedSdfGlyphAtBaseline"/>.
+    /// </summary>
+    public void AddBatchedSlugGlyphAtBaseline(string fontPath, System.Text.Rune character, int charCode,
+        float baselineX, float baselineY, float rotation = 0f,
+        DIR.Lib.GlyphMapHint hint = DIR.Lib.GlyphMapHint.Auto,
+        bool xIsInkLeft = false, float xScale = 1f)
+    {
+        if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSlug) return;
+        var identity = _fontAtlas.Rasterizer.ResolveGlyphIdentity(fontPath, character, charCode, hint);
+        AddBatchedSlugGlyph(fontPath, identity, baselineX, baselineY, rotation, xIsInkLeft, xScale);
+    }
+
+    /// <summary>
+    /// GID-direct <see cref="AddBatchedSlugGlyphAtBaseline"/>: the glyph by a pre-resolved identity (glyph id, or the
+    /// PostScript name of a Type 1 glyph), for a shaper's output or a PDF parser's CID to GID, as
+    /// <see cref="AddBatchedSdfGlyphAtBaselineByGid"/> does.
+    /// </summary>
+    public void AddBatchedSlugGlyphAtBaselineByGid(string fontPath, uint gid, string? type1Name,
+        float baselineX, float baselineY, float rotation = 0f,
+        bool xIsInkLeft = false, float xScale = 1f)
+    {
+        if (_pipelines is null || _fontAtlas is null || !_glyphBatchActive || !_glyphBatchIsSlug) return;
+        AddBatchedSlugGlyph(fontPath, new DIR.Lib.GlyphIdentity(gid, type1Name),
+            baselineX, baselineY, rotation, xIsInkLeft, xScale);
+    }
+
+    private void AddBatchedSlugGlyph(string fontPath, DIR.Lib.GlyphIdentity identity,
+        float baselineX, float baselineY, float rotation, bool xIsInkLeft, float xScale)
+    {
+        // A miss answers false at once and queues the encode: skip this glyph only. The store's HasPending keeps the
+        // frame dirty (FontAtlasDirty), which is what has the host draw again.
+        if (!SlugGlyphStore.TryGet(fontPath, identity, out var entry) || entry.IsEmpty) return;
+        WriteSlugQuad(in entry, _glyphBatchFontSize, baselineX, baselineY, rotation, xIsInkLeft, xScale, _slugVertices);
+        _glyphBatchVertexCount += 6;
+    }
+
+    // One glyph's six Slug vertices: the glyph's em box, padded, as two triangles. Em coordinates are y up; the screen's
+    // y is down, so the em y axis maps to the "down" vector negated.
+    private static void WriteSlugQuad(in VkSlugGlyphStore.Entry glyph, float fontSize, float baselineX, float baselineY,
+        float rotation, bool xIsInkLeft, float xScale, List<float> into)
+    {
+        float cosA = 1f, sinA = 0f;
+        if (MathF.Abs(rotation) >= 0.001f)
+        {
+            cosA = MathF.Cos(rotation);
+            sinA = MathF.Sin(rotation);
+        }
+        // Screen pixels per em along the writing direction and across it.
+        var sx = fontSize * xScale;
+        var sy = fontSize;
+        // The pen: the glyph's own origin. With an ink-left x it is that far left of it along the baseline.
+        var penX = baselineX;
+        var penY = baselineY;
+        if (xIsInkLeft)
+        {
+            var back = glyph.MinXEm * sx;
+            penX -= back * cosA;
+            penY -= back * sinA;
+        }
+
+        // Pad in em so it is SlugQuadPadPx on screen along each axis (a zero scale pads nothing rather than dividing).
+        var padX = sx > 0f ? SlugQuadPadPx / sx : 0f;
+        var padY = sy > 0f ? SlugQuadPadPx / sy : 0f;
+        var x0 = glyph.MinXEm - padX;
+        var x1 = glyph.MaxXEm + padX;
+        var y0 = glyph.MinYEm - padY;
+        var y1 = glyph.MaxYEm + padY;
+        var blob = BitConverter.UInt32BitsToSingle(glyph.WordOffset);
+
+        // Em (x, y) to screen: along the baseline direction (cos, sin) by x * sx, and up the glyph, which is
+        // (sin, -cos) on screen, by y * sy.
+        void Vertex(float ex, float ey)
+        {
+            into.Add(penX + ex * sx * cosA + ey * sy * sinA);
+            into.Add(penY + ex * sx * sinA - ey * sy * cosA);
+            into.Add(ex);
+            into.Add(ey);
+            into.Add(blob);
+        }
+        Vertex(x0, y1); Vertex(x1, y1); Vertex(x1, y0);
+        Vertex(x0, y1); Vertex(x1, y0); Vertex(x0, y0);
+    }
+
+    // The batch's one draw: SlugPipeline, the store's CURRENT descriptor set (a growth replaces it, so never a remembered
+    // one), the batch's colour in the shared push block (against the Slug layout, whose push range is the same).
+    private void FlushSlugBatch()
+    {
+        if (_glyphBatchVertexCount == 0 || _slugGlyphStore is not { } store) return;
+
+        var vertOffset = Surface.WriteVertices(CollectionsMarshal.AsSpan(_slugVertices));
+        if (vertOffset == uint.MaxValue) return; // ring full this frame; drop the batch
+
+        var api = Surface.DeviceApi;
+        var layout = Surface.GraphicsDevice.SlugPipelineLayout;
+        _pushConstants[20] = 0f; // unused by the Slug shaders
+        BindPipeline(_pipelines!.SlugPipeline);
+        fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, layout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+        var descriptorSet = store.DescriptorSet;
+        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics, layout, 0, 1, &descriptorSet, 0, null);
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)vertOffset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, (uint)(_slugVertices.Count / SlugFloatsPerVertex), 1, 0, 0);
+        SlugDrawCalls++;
+    }
+
+    /// <summary>vkCmdDraw calls issued for Slug text so far, the batch path's and <see cref="DrawPersistentSlugGlyphs"/>'s
+    /// together: a counter for tests, diagnostics and <c>tools/SlugProbe</c> to prove a page of glyphs is one draw a
+    /// colour. Public so a probe outside this assembly can read it.</summary>
+    public int SlugDrawCalls { get; private set; }
+
+    /// <summary>What the Slug glyph store holds, as <see cref="SlugStoreStats"/> reads it.</summary>
+    /// <param name="Glyphs">Glyphs with an answer (including empty ones).</param>
+    /// <param name="UsedWords">32-bit words of the buffer in use.</param>
+    /// <param name="CapacityWords">Words the buffer holds before it must grow.</param>
+    /// <param name="GrowCount">How many times the buffer has been replaced by a bigger one.</param>
+    /// <param name="FailedGlyphs">Glyphs the face could not draw or that did not fit.</param>
+    /// <param name="Pending">True while a glyph asked for is not yet in the buffer (a frame is wanted).</param>
+    public readonly record struct SlugStoreInfo(int Glyphs, int UsedWords, int CapacityWords, int GrowCount,
+        int FailedGlyphs, bool Pending);
+
+    /// <summary>The Slug glyph store's occupancy and growth so far; all zero before the first Slug glyph is asked for
+    /// (the store is created on first use, and this does not create it).</summary>
+    public SlugStoreInfo SlugStoreStats => _slugGlyphStore is { } s
+        ? new SlugStoreInfo(s.GlyphCount, s.UsedWords, s.CapacityWords, s.GrowCount, s.FailedGlyphs, s.HasPending)
+        : default;
+
+    /// <summary>Floats in one Slug glyph INSTANCE as <see cref="WriteSlugGlyphInstance"/> writes it and
+    /// <see cref="DrawPersistentSlugGlyphs"/> draws it (sluginst.vert): the quad's top-left corner and its two edge
+    /// vectors in the caller's space (2 + 2 + 2), the glyph's tight em box as left, top, right, bottom with y up (4), and
+    /// the word offset of its blob in the store (1, a uint's bits).</summary>
+    public const int SlugInstanceFloats = 11;
+
+    /// <summary>What <see cref="WriteSlugGlyphInstance"/> made of a glyph.</summary>
+    public enum SlugGlyphLayout
+    {
+        /// <summary>An instance was written.</summary>
+        Quad,
+        /// <summary>The glyph has no outline to draw (a space), and that is final. An empty instance was written.</summary>
+        Blank,
+        /// <summary>The glyph is not in the store yet and has been queued. An EMPTY instance (no area, no pixel) was
+        /// written in its place, so the rest of the buffer is whole, and the frame is reported dirty
+        /// (<see cref="FontAtlasDirty"/>); write the glyph again once the store has it.</summary>
+        Pending,
+    }
+
+    /// <summary>
+    /// Lays out one glyph for a caller that keeps it across frames, such as a page's text held in a persistent buffer:
+    /// one instance of <see cref="SlugInstanceFloats"/> floats into <paramref name="instance"/>, at
+    /// <paramref name="fontSize"/> in the caller's own coordinate space (a page's points, say), with the pen at
+    /// <paramref name="baselineX"/>, <paramref name="baselineY"/> (y down), turned by <paramref name="rotation"/> about
+    /// it and stretched by <paramref name="xScale"/> along the writing direction. <see cref="DrawPersistentSlugGlyphs"/>
+    /// then draws it at any origin and zoom where <see cref="AddBatchedSlugGlyphAtBaselineByGid"/> would have drawn it
+    /// at <paramref name="fontSize"/> times the zoom: the instance holds no pixel size, and the quad's padding is made
+    /// in the vertex shader from the zoom. A glyph the store does not have yet is queued and written as an empty
+    /// instance (see <see cref="SlugGlyphLayout.Pending"/>); the blob's offset in the store never changes once it has
+    /// one, across the store's growth, so a written instance stays valid.
+    /// </summary>
+    public SlugGlyphLayout WriteSlugGlyphInstance(string fontPath, uint gid, string? type1Name,
+        float baselineX, float baselineY, float fontSize, float rotation, float xScale, Span<float> instance)
+    {
+        instance[..SlugInstanceFloats].Clear();
+        if (_pipelines is null || _fontAtlas is null) return SlugGlyphLayout.Blank;
+        if (!SlugGlyphStore.TryGet(fontPath, new DIR.Lib.GlyphIdentity(gid, type1Name), out var glyph))
+            return SlugGlyphLayout.Pending;
+        if (glyph.IsEmpty) return SlugGlyphLayout.Blank;
+
+        float cosA = 1f, sinA = 0f;
+        if (MathF.Abs(rotation) >= 0.001f)
+        {
+            cosA = MathF.Cos(rotation);
+            sinA = MathF.Sin(rotation);
+        }
+        // Caller units per em along the writing direction and across it.
+        var sx = fontSize * xScale;
+        var sy = fontSize;
+        // The corner is the em box's top-left (em y up, so its max y): em (x, y) is at the pen plus x * sx along
+        // (cos, sin) and y * sy along (sin, -cos), as WriteSlugQuad has it.
+        var left = glyph.MinXEm;
+        var top = glyph.MaxYEm;
+        var width = glyph.MaxXEm - glyph.MinXEm;
+        var height = glyph.MaxYEm - glyph.MinYEm;
+        instance[0] = baselineX + left * sx * cosA + top * sy * sinA;
+        instance[1] = baselineY + left * sx * sinA - top * sy * cosA;
+        instance[2] = width * sx * cosA;  instance[3] = width * sx * sinA;     // along the writing direction
+        instance[4] = -height * sy * sinA; instance[5] = height * sy * cosA;   // down the glyph
+        instance[6] = glyph.MinXEm; instance[7] = glyph.MaxYEm;
+        instance[8] = glyph.MaxXEm; instance[9] = glyph.MinYEm;
+        instance[10] = BitConverter.UInt32BitsToSingle(glyph.WordOffset);
+        return SlugGlyphLayout.Quad;
+    }
+
+    /// <summary>
+    /// Draws glyphs written by <see cref="WriteSlugGlyphInstance"/> from a persistent buffer: the
+    /// <paramref name="glyphCount"/> instances at <paramref name="byteOffset"/>, in ONE draw call and one
+    /// <paramref name="color"/>, placed by <paramref name="originX"/>, <paramref name="originY"/> and
+    /// <paramref name="scale"/> as <see cref="DrawPersistentSdfGlyphs"/> places its glyphs. Glyphs of any mix of sizes
+    /// share the draw (each instance carries its own em box and axes; the coverage is the shader's own at whatever
+    /// pixel size results, and the padding follows the zoom). An empty instance (a glyph that was pending when it was
+    /// written) costs a vertex shader run and nothing else. Draws with the store's current buffer, so the buffer a
+    /// store has grown into is the one read.
+    /// </summary>
+    public void DrawPersistentSlugGlyphs(Vortice.Vulkan.VkBuffer buffer, uint byteOffset, uint glyphCount,
+        DIR.Lib.RGBAColor32 color, float originX, float originY, float scale)
+    {
+        if (_pipelines is null || glyphCount == 0 || _slugGlyphStore is not { } store) return;
+
+        var api = Surface.DeviceApi;
+        var layout = Surface.GraphicsDevice.SlugPipelineLayout;
+        Span<float> pc = stackalloc float[21];
+        var w = (float)_width;
+        var h = (float)_height;
+        pc[0]  = 2f * scale / w;
+        pc[5]  = 2f * scale / h;
+        pc[10] = -1f;
+        pc[12] = 2f * originX / w - 1f;
+        pc[13] = 2f * originY / h - 1f;
+        pc[15] = 1f;
+        pc[16] = color.Red / 255f;
+        pc[17] = color.Green / 255f;
+        pc[18] = color.Blue / 255f;
+        pc[19] = color.Alpha / 255f;
+        // The zoom, from which sluginst.vert derives the quad's padding.
+        pc[20] = scale;
+
+        BindPipeline(_pipelines.SlugInstancedPipeline);
+        fixed (float* pPC = pc)
+            api.vkCmdPushConstants(_currentCmd, layout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+        var descriptorSet = store.DescriptorSet;
+        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics, layout, 0, 1, &descriptorSet, 0, null);
+        var vkOffset = (ulong)byteOffset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, 6, glyphCount, 0, 0);
+        SlugDrawCalls++;
+    }
+
     /// <summary>What <see cref="LayoutSdfGlyph"/> made of a glyph.</summary>
     public enum SdfGlyphLayout
     {
@@ -2412,8 +2711,15 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         if (!_glyphBatchActive) return;
         var isSdf = _glyphBatchIsSdf;
+        var isSlug = _glyphBatchIsSlug;
         _glyphBatchActive = false;
         _glyphBatchIsSdf = false;
+        _glyphBatchIsSlug = false;
+        if (isSlug)
+        {
+            FlushSlugBatch();
+            return;
+        }
 
         var api = Surface.DeviceApi;
         // Slot 20 = sdfEdge: one screen pixel in distance-field units at this batch's fontSize, from which
@@ -3124,6 +3430,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             Surface.TryWaitAllFramesIdle("renderer dispose");
         }
 
+        _slugGlyphStore?.Dispose();
+        _slugGlyphStore = null;
         _sdfFontAtlas?.Dispose();
         _sdfFontAtlas = null;
         _sdfFontAtlasLarge?.Dispose();

@@ -48,9 +48,24 @@ public sealed class SdlVulkanApp : IDisposable
     /// Initializes SDL (video + events) and creates the shared Vulkan instance.
     /// <paramref name="msaaSamples"/> is baked into the shared device's render pass and pipelines, so
     /// every window on this app renders at the same sample count.
+    /// <paramref name="clickThroughOnFocus"/> (default <c>true</c>) delivers the mouse-down that activates an
+    /// unfocused window as an ordinary click (<c>SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH</c>), as native Windows and macOS
+    /// apps do; an app whose canvas does something costly or irreversible on a bare click can pass <c>false</c> to
+    /// keep SDL's behaviour, where the first click only focuses the window.
+    /// <para><paramref name="keepDisplayAwake"/> is <c>false</c> by default, so the app does NOT hold the display on:
+    /// SDL's own default suppresses the screensaver and display sleep while any window is open, which is wrong for a
+    /// dashboard open all day, and would undercut an app that manages power itself (tianwen keeps the system
+    /// awake during an imaging run but lets the display sleep). Pass <c>true</c>, or call
+    /// <see cref="SdlVulkanWindow.KeepDisplayAwake"/> later, for a view that needs the display on.</para>
+    /// <para><paramref name="appMetadata"/> tells the OS who the app is, before SDL starts: a reverse-DNS identifier
+    /// such as <c>com.sharpastro.tianwen</c> is what the taskbar groups every window of the app by, what becomes the
+    /// Wayland <c>app_id</c> and X11 <c>WM_CLASS</c>, and what the macOS menu and a power-inhibit reason show (see
+    /// <see cref="SdlAppMetadata"/>). Null: the entry assembly's name and version, so no app is anonymous.</para>
     /// </summary>
-    public static SdlVulkanApp Create(VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
-        => new(SdlVulkanWindow.InitSdlAndCreateInstance(), msaaSamples);
+    public static SdlVulkanApp Create(VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1,
+        bool clickThroughOnFocus = true, bool keepDisplayAwake = false,
+        SdlAppMetadata? appMetadata = null)
+        => new(SdlVulkanWindow.InitSdlAndCreateInstance(clickThroughOnFocus, keepDisplayAwake, appMetadata), msaaSamples);
 
     /// <summary>
     /// Opens a new OS window with its own Vulkan surface. The first call also creates the shared
