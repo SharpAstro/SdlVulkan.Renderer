@@ -285,6 +285,53 @@ public sealed unsafe class VkTexture : IDisposable
         return tex;
     }
 
+    /// <summary>
+    /// <see cref="CreateDeferred"/> for float RGBA: converts to <see cref="Half"/> and makes an
+    /// <see cref="VkFormat.R16G16B16A16Sfloat"/> texture, to be drawn with <see cref="VkRenderer.DrawHdrImage"/>.
+    /// Half precision keeps ~3 decimal digits and reaches 65504, which holds any HDR image in scene-linear light;
+    /// it is half the memory of 32-bit floats and what every GPU filters.
+    /// </summary>
+    /// <param name="rgba">Four floats a pixel, R, G, B, A, row 0 at the TOP (the order Vulkan uploads), no row
+    /// padding. RGB are linear light in whatever units the caller draws them in (for
+    /// <see cref="VkRenderer.DrawHdrImage"/>, 1.0 = 203 cd/m²); alpha is STRAIGHT (not premultiplied), 0 to 1.
+    /// Length must be <c>width * height * 4</c>.</param>
+    /// <param name="width">Width in pixels.</param>
+    /// <param name="height">Height in pixels.</param>
+    public static VkTexture CreateDeferredFromRgbaFloat(VulkanContext ctx, ReadOnlySpan<float> rgba, int width, int height)
+    {
+        var count = checked(width * height * 4);
+        if (rgba.Length != count)
+            throw new ArgumentException($"expected {count} floats for {width}x{height} RGBA, got {rgba.Length}", nameof(rgba));
+        var halves = new Half[count];
+        for (var i = 0; i < count; i++) halves[i] = (Half)rgba[i];
+        return CreateDeferred(ctx, System.Runtime.InteropServices.MemoryMarshal.AsBytes(halves.AsSpan()), width, height,
+            VkFormat.R16G16B16A16Sfloat);
+    }
+
+    /// <summary>
+    /// <see cref="CreateFromBgra"/> for float RGBA: uploads immediately via a one-shot command (blocks the GPU).
+    /// See <see cref="CreateDeferredFromRgbaFloat"/> for the layout of <paramref name="rgba"/> and the format.
+    /// </summary>
+    /// <param name="rgba">Four floats a pixel, R, G, B, A, top row first, straight alpha; length
+    /// <c>width * height * 4</c>.</param>
+    /// <param name="width">Width in pixels.</param>
+    /// <param name="height">Height in pixels.</param>
+    public static VkTexture CreateFromRgbaFloat(VulkanContext ctx, ReadOnlySpan<float> rgba, int width, int height)
+    {
+        var tex = CreateDeferredFromRgbaFloat(ctx, rgba, width, height);
+        try
+        {
+            ctx.ExecuteOneShot(cmd => tex.RecordUpload(cmd));
+        }
+        catch (VkException ex) when (ex.Result != VkResult.Timeout)
+        {
+            tex.Dispose();
+            throw;
+        }
+        tex.CleanupStaging();
+        return tex;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

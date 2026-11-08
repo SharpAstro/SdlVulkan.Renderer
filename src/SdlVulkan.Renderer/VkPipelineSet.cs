@@ -84,6 +84,78 @@ public sealed unsafe class VkPipelineSet : IDisposable
     /// it.</summary>
     public VkMeshPipeline? Mesh { get; }
 
+    // What the lazily built HDR image pipelines need to be created against the same pass this set was built for.
+    // Create sets them before returning the set.
+    private VulkanDevice? _device;
+    private VkRenderPass _renderPass;
+    private VkSampleCountFlags _samples;
+    private VkPipeline _hdrImageSdr;
+    private VkPipeline _hdrImageScRgb;
+    private readonly object _hdrImageLock = new();
+
+    /// <summary>
+    /// The HDR image pipeline (hdrimage.frag), built the first time it is asked for and never otherwise: a set
+    /// that never draws an HDR image holds no such pipeline, no shader module of it and no layout, so the SDR
+    /// path pays nothing for the feature. Same vertex layout and blending as <see cref="PagePipeline"/>; its own
+    /// layout and 128-byte push block (<see cref="VulkanDevice.HdrImagePipelineLayout"/>).
+    /// <para>Which output it makes is a specialisation constant fixed here, not a branch in the shader: with
+    /// <paramref name="scRgbOutput"/> false it tone-maps to SDR and sRGB-encodes (for today's 8-bit swapchain), with
+    /// true it writes scRGB clamped to the display peak. The two are separate pipelines, each built on its first draw.</para>
+    /// </summary>
+    /// <param name="scRgbOutput">False for an SDR target, true for an scRGB (half-float) one.</param>
+    public VkPipeline GetHdrImagePipeline(bool scRgbOutput)
+    {
+        lock (_hdrImageLock)
+        {
+            var existing = scRgbOutput ? _hdrImageScRgb : _hdrImageSdr;
+            if (existing != VkPipeline.Null) return existing;
+            var device = _device ?? throw new InvalidOperationException("pipeline set was not built through Create");
+            var created = CreateHdrImagePipeline(device, _renderPass, _samples, scRgbOutput);
+            if (scRgbOutput) _hdrImageScRgb = created; else _hdrImageSdr = created;
+            return created;
+        }
+    }
+
+    /// <summary>Whether any HDR image pipeline has been built on this set (for tests: it must stay false until an
+    /// HDR image is drawn).</summary>
+    internal bool HasHdrImagePipeline
+    {
+        get { lock (_hdrImageLock) return _hdrImageSdr != VkPipeline.Null || _hdrImageScRgb != VkPipeline.Null; }
+    }
+
+    private static VkPipeline CreateHdrImagePipeline(VulkanDevice device, VkRenderPass renderPass,
+        VkSampleCountFlags samples, bool scRgbOutput)
+    {
+        var deviceApi = device.DeviceApi;
+        var vert = LoadEmbeddedModule(deviceApi, "tex.vert");
+        var frag = LoadEmbeddedModule(deviceApi, "hdrimage.frag");
+        try
+        {
+            VkVertexInputBindingDescription binding = new(4 * sizeof(float));
+            var attrs = stackalloc VkVertexInputAttributeDescription[2];
+            attrs[0] = new(0, VkFormat.R32G32Sfloat, 0);
+            attrs[1] = new(1, VkFormat.R32G32Sfloat, 2 * sizeof(float));
+
+            // constant_id 0 of hdrimage.frag: OUTPUT_SCRGB.
+            int outputScRgb = scRgbOutput ? 1 : 0;
+            VkSpecializationMapEntry entry = new() { constantID = 0, offset = 0, size = sizeof(int) };
+            VkSpecializationInfo spec = new()
+            {
+                mapEntryCount = 1,
+                pMapEntries = &entry,
+                dataSize = sizeof(int),
+                pData = &outputScRgb
+            };
+            return CreatePipeline(deviceApi, renderPass, device.HdrImagePipelineLayout, vert, frag,
+                &binding, 1, attrs, 2, msaaSamples: samples, fragSpecialization: &spec);
+        }
+        finally
+        {
+            deviceApi.vkDestroyShaderModule(vert);
+            deviceApi.vkDestroyShaderModule(frag);
+        }
+    }
+
     private readonly VkDeviceApi _deviceApi;
 
     // GLSL 450 shader sources live in Shaders/*.vert / Shaders/*.frag (with their rationale comments)
@@ -298,7 +370,12 @@ public sealed unsafe class VkPipelineSet : IDisposable
 
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, sdfLarge, roundRect,
                 flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced, sdfInstanced, slug,
-                slugInstanced);
+                slugInstanced)
+            {
+                _device = ctx.GraphicsDevice,
+                _renderPass = renderPass,
+                _samples = samples
+            };
         }
         finally
         {
@@ -346,6 +423,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
         _deviceApi.vkDestroyPipeline(SdfInstancedPipeline);
         _deviceApi.vkDestroyPipeline(SlugPipeline);
         _deviceApi.vkDestroyPipeline(SlugInstancedPipeline);
+        if (_hdrImageSdr != VkPipeline.Null) _deviceApi.vkDestroyPipeline(_hdrImageSdr);
+        if (_hdrImageScRgb != VkPipeline.Null) _deviceApi.vkDestroyPipeline(_hdrImageScRgb);
         Mesh?.Dispose();
     }
 
@@ -357,7 +436,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
         VkBlendFactor srcColorFactor = VkBlendFactor.SrcAlpha,
         VkBlendFactor dstColorFactor = VkBlendFactor.OneMinusSrcAlpha,
         VkBlendOp blendOp = VkBlendOp.Add,
-        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1)
+        VkSampleCountFlags msaaSamples = VkSampleCountFlags.Count1,
+        VkSpecializationInfo* fragSpecialization = null)
     {
         VkUtf8ReadOnlyString entryPoint = "main"u8;
 
@@ -372,7 +452,8 @@ public sealed unsafe class VkPipelineSet : IDisposable
         {
             stage = VkShaderStageFlags.Fragment,
             module = fragModule,
-            pName = entryPoint
+            pName = entryPoint,
+            pSpecializationInfo = fragSpecialization
         };
 
         VkPipelineVertexInputStateCreateInfo vertexInput = new()
