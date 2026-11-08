@@ -117,7 +117,41 @@ public sealed class SdlEventLoop
         var view = new SdlWindowView(window, renderer);
         _views[window.WindowId] = view;
         _viewList.Add(view);
+        // The facts as they are now, so the first frame's composite is current. Read once here and then only when SDL
+        // says they changed (RefreshHdrDisplay): an SDR app's frame loop does no HDR work.
+        RefreshHdrDisplay(view);
         return view;
+    }
+
+    /// <summary>
+    /// Reads the window's HDR display facts (<see cref="SdlVulkanWindow.RefreshHdrDisplay"/>, which raises
+    /// <see cref="SdlVulkanWindow.HdrDisplayChanged"/> when they changed) and hands them to its context
+    /// (<see cref="VulkanContext.ApplyHdrDisplay"/>), which keeps SDR white and headroom of the composite current. When the
+    /// context asked for HDR and the surface now offers scRGB where the swapchain has none, or no longer does, the swapchain
+    /// is rebuilt through the same path as a resize: bounded drain, no extra <c>vkDeviceWaitIdle</c>, and the rebuild
+    /// re-asks the surface, so scRGB is adopted or dropped. A context that did not ask for HDR only records the facts.
+    /// Called on SDL's display-changed and HDR-state-changed events, never per frame.
+    /// </summary>
+    private void RefreshHdrDisplay(SdlWindowView v)
+    {
+        v.Window.RefreshHdrDisplay();
+        // Applied whether or not the window's facts changed: a move between two displays with the same white level can
+        // still change what the surface offers.
+        var decision = v.Renderer.Context.ApplyHdrDisplay(v.Window.HdrDisplay);
+        if (decision.UpdateComposite)
+            v.NeedsRedraw = true;
+        if (!decision.RecreateSwapchain || v.IsGpuWedged)
+            return;
+        v.NeedsRedraw = true;
+        // Backgrounded or awaiting a surface rebuild (Android): that rebuild builds a swapchain, which asks the surface
+        // again, so there is nothing to do here.
+        if (v.Paused || v.NeedsSurfaceRebuild)
+            return;
+        v.Window.GetSizeInPixels(out var w, out var h);
+        if (w <= 0 || h <= 0)
+            return;
+        v.Renderer.Resize((uint)w, (uint)h);
+        v.OnResize?.Invoke(v.Renderer.Width, v.Renderer.Height);
     }
 
     /// <summary>Unregisters a window's view (e.g. when its window is closed). Does not dispose the
@@ -821,6 +855,13 @@ public sealed class SdlEventLoop
                     }
                     vr.NeedsRedraw = true;
                 }
+                break;
+
+            case EventType.WindowDisplayChanged:
+            case EventType.WindowHDRStateChanged:
+                // The window moved to another display, or HDR was switched on or off (or SDR white moved) in the OS.
+                if (TryView(evt.Window.WindowID, out var vh))
+                    RefreshHdrDisplay(vh);
                 break;
 
             case EventType.WindowRestored:
