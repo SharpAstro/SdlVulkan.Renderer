@@ -251,6 +251,41 @@ dotnet run --project tools/SlugProbe -c Release
 
 Options `--frames`, `--size`, `--msaa`, `--burst` and `--cjk-font` (see `tools/SlugProbe/Program.cs`). The CJK block takes the distinct glyphs its face has and the report says how many; the committed Noto Sans JP subset has only three, so its block repeats them, and `--cjk-font PATH` with a full CJK face makes it a block of different glyphs, which is the load a store sees on a real CJK page. The numbers of one machine are in [CHANGELOG.md](CHANGELOG.md), "7.83".
 
+## HDR
+
+HDR output is an **opt-in per context**, and an app that does not opt in pays nothing for it: its swapchain, render passes, pipelines and frame code are the ones it always had, with no extra pass, target, conversion, shader branch or per-frame allocation (the SDR frame bench below measures that).
+
+```csharp
+using var window = SdlVulkanWindow.Create("Viewer", 1280, 800);
+window.GetSizeInPixels(out var w, out var h);
+var ctx = VulkanContext.Create(window.Instance, window.Surface, (uint)w, (uint)h, hdr: true);   // the opt-in
+var renderer = new VkRenderer(ctx, (uint)w, (uint)h);
+
+// A float texture: four floats a pixel (R, G, B, A), row 0 at the top, scene-linear light where 1.0 is 203 cd/m2.
+using var image = VkTexture.CreateFromRgbaFloat(ctx, rgba, imageWidth, imageHeight);
+
+// Every frame (an HDR frame is repainted in full, so draw every HDR image every frame):
+renderer.DrawHdrImage(image, x, y, width, height, HdrPrimaries.Bt2020, sourcePeakNits: 1000f);
+```
+
+`hdr` is accepted by `VulkanContext.Create`, `CreateForSharedDevice` and `CreateOffscreen`. `SdlVulkanWindow`/`SdlVulkanApp` enable `VK_EXT_swapchain_colorspace` on the instance when the loader offers it (without it a driver lists `SRGB_NONLINEAR` for every format, whatever the panel can do).
+
+**scRGB only.** The HDR swapchain is `R16G16B16A16_SFLOAT` in `EXTENDED_SRGB_LINEAR_EXT` (scRGB: linear light, 1.0 is 80 cd/m2, negative components carry colours outside BT.709), the Windows-native path. HDR10 (PQ) is not produced. `ctx.HdrRequested` says it was asked for, `ctx.HdrActive` says it was GOT.
+
+**What happens on SDR.** When the surface offers no scRGB (an SDR display, an SDR-only driver, HDR off in the OS), `HdrActive` is false and the context is exactly an SDR one: nothing HDR exists. `DrawHdrImage` then still works, tone-mapped for the SDR target (below), so one code path draws on both kinds of display. Transparent, layered and Dozen-device windows never take scRGB (their alpha is carried another way) and keep the SDR swapchain.
+
+**The composite, and why it costs the SDR path nothing.** On an HDR window the frame is rendered as it always was, into a swapchain-sized B8G8R8A8 SDR *layer* (so every pipeline, blend state, MSAA resolve, cached layer, thumbnail and readback is bit-identical to the SDR path, and the device's passes stay 8-bit, so one shared device serves HDR and SDR windows). `EndFrame` then records ONE composite pass on the float swapchain image: the queued HDR images first, then the SDR layer over them (premultiplied, sRGB-decoded to linear and scaled by the display's SDR white, so the UI keeps the brightness the user set for SDR content). Only an HDR window has the layer, the pass and the composite pipelines; an SDR context allocates none of it, and records no extra command. An HDR frame is painted in full every time (no damage repaint).
+
+**`DrawHdrImage` units and the tone curve.** The texture's RGB is scene-linear light in units of `referenceWhiteNits` (default 203 cd/m2, ITU-R BT.2408: where a diffuse white page sits), in the primaries you name (`HdrPrimaries.Bt709` or `Bt2020`); alpha is straight. On an HDR window the image is queued for the composite and drawn as scRGB: scaled by 203/80, converted to BT.709 primaries (a BT.2020 primary comes out with a negative component, which the panel's wider gamut can show), and clamped to the display's peak (`ctx.HdrPeakScRgb`). Its rectangle is punched out of the SDR layer, so UI drawn after it lies over it. In an 8-bit target (an SDR window, a cached layer, a thumbnail) the image is tone-mapped instead, per channel: identity up to 0.75 of reference white, then an extended Reinhard roll-off that reaches exactly white at `sourcePeakNits`, then the sRGB encode (`HdrColor.ToneMap`; the shader `hdrimage.frag` is a transcription of the tested CPU maths in `HdrColor`). The CPU maths, the units (`HdrColor.ReferenceWhiteNits`, `ScRgbUnitNits`) and the primaries matrices are public, so an app can convert its own data the same way.
+
+**Display facts.** `SdlVulkanWindow.HdrDisplay` is what SDL says about the display the window is on: HDR on (both the window's and the display's property, since on Windows the window's follow the HDR desktop), SDR white in scRGB units and the headroom above it. They are read once when the window is added to the `SdlEventLoop` and again on SDL's display-changed and HDR-state-changed events, never per frame, and handed to the context (`ctx.ApplyHdrDisplay`), which keeps `SdrWhiteScRgb` and `HdrHeadroom` current. When the display changes and the new surface offers scRGB where the swapchain has none (or no longer does), the swapchain is rebuilt through the resize path and adopts or drops scRGB. `HdrDisplayChanged` on the window is the event an app can listen to.
+
+**See it, and measure it.** `tools/HdrProbe` states whether this machine can present HDR (`dotnet run`), and `-- --show` puts it on the panel: scRGB patches drawn with raw Vulkan, then, when that window is closed, the library's own ramp and BT.2020 primaries through `DrawHdrImage`. Judge both on the panel, not in a screenshot (Windows captures to SDR). `tools/SdrFrameBench` is the headless proof that an SDR app is not slower: a fixed UI scene (rectangles, rounded rectangles, ellipses, strokes, text, images) on an offscreen context, printing CPU, GPU (`VulkanContext.GpuTiming`) and wall ms per frame, mean and 95th percentile; exit 2 with no Vulkan device. It references the library by the `RendererProject` build property, so the same bench builds against another source tree (`git archive` a base into a folder and pass that tree's `src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj`), which is how a before and after are taken in one sitting.
+
+```
+dotnet run --project tools/SdrFrameBench -c Release -- --frames 300
+```
+
 ## Native WebView (optional)
 
 Host a native browser view *inside* an `SdlVulkanWindow`. The window system composites it
@@ -530,9 +565,10 @@ swapchain on the first capable display with patches at 0.25 to 2.0 times SDR whi
 panel's peak, the primaries at both, and a ramp, drawn with clear rectangles so nothing but the
 colour space sits between the numbers and the screen. Judge it on the panel: a screenshot goes
 through Windows' SDR capture path and clips everything above 1.0 to 255 (measured 2026-09-15, the
-patches from 1.0 up all read 255 while the OLED showed each brighter than the last). The library
-itself still creates every swapchain as `SRGB_NONLINEAR`; the probe is the first step of changing
-that, not the change.
+patches from 1.0 up all read 255 while the OLED showed each brighter than the last). Closing that
+window (Escape) opens a second one drawn through the library, for the same eyes: a float ramp and
+the BT.2020 primaries through `DrawHdrImage` on a context created with `hdr: true`, see "HDR"
+above. The library creates SRGB_NONLINEAR swapchains unless a context opts in to scRGB.
 
 SDL3 Vulkan surface creation: `SDL.VulkanLoadLibrary()` auto-finds MoltenVK on macOS;
 `SDL.VulkanCreateSurface()` returns a `VkSurfaceKHR` that pairs directly with
