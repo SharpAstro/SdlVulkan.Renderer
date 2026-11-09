@@ -632,3 +632,26 @@ no scRGB, no HDR10 via OpenGL on any platform.
   at 3.4.10.5, so the thing to watch now is that a future bump does not reintroduce either. Run the
   two package checks in the Android section above before taking one, and still launch it: the
   version check fails at startup, not at build time.
+
+### Hidden views
+
+A host that hides its window for hours (a tray app started minimised) need not keep the browser's full memory
+meanwhile. Two calls on `INativeWebView`, both for a view you have hidden with `SetVisible(false)`:
+
+```csharp
+web.SetVisible(false);
+web.SetMemoryUsageTarget(low: true);        // trim memory; safe even while media plays
+if (await web.TrySuspendAsync())            // only for a paused page: stops its script and timers
+    Console.WriteLine("suspended");
+...
+web.SetMemoryUsageTarget(low: false);       // shown again
+web.SetVisible(true);                       // WebView2 resumes a suspended view when it is shown
+```
+
+- **Windows (WebView2):** `SetMemoryUsageTarget` is `CoreWebView2.MemoryUsageTargetLevel` (`Low` / `Normal`). It can be
+  called before `AttachToWindow`: the level is held and applied when the browser is up; a runtime too old to have it
+  is reported on `Trace`. `TrySuspendAsync` is `TrySuspend` and returns `false` for a visible view, one not attached
+  yet, or when the browser refuses (a page playing media, for one). `Resume` wakes it while it stays hidden; showing the
+  view or running script in it does that on its own.
+- **Linux (WebKitGTK):** no runtime equivalent (its memory-pressure settings are fixed when the web context is
+  created), so `SetMemoryUsageTarget` and `Resume` do nothing and `TrySuspendAsync` returns `false`.

@@ -7,6 +7,26 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.86
+
+**WebView: a memory target and suspend for hidden views (#168).**
+
+- `INativeWebView` gains `SetMemoryUsageTarget(bool low)`, `Task<bool> TrySuspendAsync()` and `Resume()`, for a
+  host that keeps its window hidden for hours with a page loaded (a hidden YouTube player held about 720 MB).
+- WebView2 (`Win32WebView`): `SetMemoryUsageTarget` is `CoreWebView2.MemoryUsageTargetLevel` through
+  `ICoreWebView2_19`; the requested level is held before the browser is up and applied when it is, and a runtime
+  without the interface or an error HRESULT goes to `Trace`, never a throw. `TrySuspendAsync` is `ICoreWebView2_3`'s
+  `TrySuspend`: `false` at once when the view is visible or not attached, `false` when the browser refuses or
+  errors (traced), `true` once suspended. `Resume` calls `Resume`; WebView2 also resumes on its own when the view
+  is shown or script runs in it.
+- WebKitGTK has no runtime equivalent (its memory-pressure settings are fixed at context creation): the target and
+  `Resume` do nothing, `TrySuspendAsync` returns `false`. `CocoaWebView` is still not implemented and follows its
+  other members.
+- `tools/WebViewSmoke` gains `assert-suspend` (WebView2 only, SKIPs elsewhere): Low target set, a visible view's
+  suspend is `false`, hidden it is `true`, then Resume, shown again, and a script still answers. The Windows CI job
+  runs it with the other WebView2 self-tests.
+
+
 ## 7.85
 
 **Packaging fix: the `SdlVulkan.Renderer` package depends on `DIR.Lib` again, not `DIR.Lib.Debug`.**
