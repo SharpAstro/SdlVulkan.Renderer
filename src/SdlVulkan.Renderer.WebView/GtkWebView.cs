@@ -262,6 +262,15 @@ internal sealed class GtkWebView(NativeWebViewOptions options) : INativeWebView
             Path.Combine(Path.GetFullPath(folder), "cookies.sqlite"), WebkitCookiePersistentStorageSqlite);
     }
 
+    // WebKitGTK has no runtime equivalent of WebView2's memory target or suspend: its memory-pressure
+    // settings are fixed when the web context is created, and a page cannot be suspended afterwards. So the
+    // target and Resume do nothing, and a suspend is never done (false).
+    public void SetMemoryUsageTarget(bool low) { }
+
+    public Task<bool> TrySuspendAsync() => Task.FromResult(false);
+
+    public void Resume() { }
+
     public Task AddScriptAtDocumentStartAsync(string javaScript)
     {
         ArgumentNullException.ThrowIfNull(javaScript);

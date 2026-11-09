@@ -36,6 +36,32 @@ public interface INativeWebView : IDisposable
     /// <summary>Shows or hides the webview child surface.</summary>
     void SetVisible(bool visible);
 
+    /// <summary>Hints that the browser may trim its memory while the view is not in use (<paramref name="low"/>
+    /// true), or asks for its normal use again (false, the default). Safe while media plays: it does not stop
+    /// the page, so set it Low whenever the view is hidden, even if a video or audio is running.
+    /// <list type="bullet">
+    /// <item>WebView2: <c>CoreWebView2.MemoryUsageTargetLevel</c> (<c>Low</c> / <c>Normal</c>). May be called
+    /// before <see cref="AttachToWindow"/>: the level is held and applied once the browser is up. A runtime
+    /// too old to have it is reported on <see cref="Trace"/>, never thrown.</item>
+    /// <item>WebKitGTK: a no-op. Its memory-pressure settings are fixed when the web context is created and
+    /// cannot be changed at runtime.</item>
+    /// </list></summary>
+    void SetMemoryUsageTarget(bool low);
+
+    /// <summary>Suspends the page's script and timers to save CPU and memory while the view is hidden.
+    /// Use it for a hidden view whose page is paused, never for one playing audio. Returns true once the
+    /// browser has suspended the page, and false, without suspending, when the view is visible (see
+    /// <see cref="SetVisible"/>; call it after hiding), not attached yet, or the browser refused (it may, for
+    /// example while the page is playing media). Pair it with <see cref="Resume"/>.
+    /// <para>WebView2 resumes a suspended view on its own when it is shown again or when script is run in it
+    /// (<see cref="ExecuteScriptAsync"/>), so <see cref="Resume"/> is only needed to wake it while it stays
+    /// hidden. WebKitGTK has no equivalent: it returns false.</para></summary>
+    Task<bool> TrySuspendAsync();
+
+    /// <summary>Wakes a view suspended by <see cref="TrySuspendAsync"/>. Harmless when it is not suspended or
+    /// not attached yet, and a no-op on WebKitGTK.</summary>
+    void Resume();
+
     /// <summary>Registers <paramref name="javaScript"/> to run at the start of every document this
     /// webview loads from now on (top-level page and frames), before any of the page's own scripts.
     /// Use it to restyle or patch a site you do not control: inject CSS, hook <c>history</c>, observe

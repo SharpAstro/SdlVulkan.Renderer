@@ -38,6 +38,11 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
     private string? _pendingNavigateHtml;
     private RectInt? _bounds;
     private bool _visible = true;
+    // The requested memory target, held until the browser is up and re-sent on a later change.
+    private bool _memoryLow;
+    // TrySuspend completion handlers in flight, kept alive until each has run (the COM side holds only a
+    // reference to the CCW, as with the event handlers below).
+    private readonly List<CoreWebView2TrySuspendCompletedHandler> _suspendHandlers = [];
     private readonly List<(string Script, TaskCompletionSource Done)> _pendingDocumentStartScripts = [];
     // Document-start scripts WebView2 has not confirmed yet. AddScriptToExecuteOnDocumentCreated
     // applies asynchronously, and a navigation sent before its completion handler runs may miss the
@@ -132,6 +137,7 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
                         WireTraceEvents(webView2);
                         EnableDiagnostics(webView2);
                         WireMessaging(webView2);
+                        ApplyMemoryUsageTarget();
                         // Before the first navigation, so the scripts reach its document: the
                         // navigation below is held until WebView2 confirms every one of them.
                         foreach (var (script, done) in _pendingDocumentStartScripts)
@@ -368,6 +374,79 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
         _controller?.Object.put_IsVisible(visible).ThrowOnError();
     }
 
+    public void SetMemoryUsageTarget(bool low)
+    {
+        _memoryLow = low;
+        ApplyMemoryUsageTarget();
+    }
+
+    // Sends the held level once the browser is up. Needs ICoreWebView2_19 (a recent runtime); a runtime without
+    // it, or an error from it, is traced and the view carries on at its default: a memory hint is not worth a throw.
+    private void ApplyMemoryUsageTarget()
+    {
+        if (_webView2 is null)
+            return;
+        if (_webView2 is not ICoreWebView2_19 webView19)
+        {
+            Trace?.Invoke("memory-usage-target: the WebView2 runtime has no ICoreWebView2_19, ignored");
+            return;
+        }
+        var level = _memoryLow
+            ? COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL.COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+            : COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL.COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL;
+        var hr = webView19.put_MemoryUsageTargetLevel(level);
+        if (hr.IsError)
+            Trace?.Invoke($"memory-usage-target failed: HRESULT 0x{hr.Value:X8}");
+    }
+
+    public Task<bool> TrySuspendAsync()
+    {
+        // WebView2 only suspends a view that is not visible, and there is nothing to suspend before attaching.
+        if (_webView2 is null || _visible)
+            return Task.FromResult(false);
+        if (_webView2 is not ICoreWebView2_3 webView3)
+        {
+            Trace?.Invoke("try-suspend: the WebView2 runtime has no ICoreWebView2_3, not suspended");
+            return Task.FromResult(false);
+        }
+
+        // Completed on the UI thread; RunContinuationsAsynchronously for the same reason as ExecuteScriptAsync.
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        CoreWebView2TrySuspendCompletedHandler? handler = null;
+        handler = new CoreWebView2TrySuspendCompletedHandler((errorCode, isSuccessful) =>
+        {
+            _suspendHandlers.Remove(handler!);
+            if (errorCode.IsError)
+            {
+                Trace?.Invoke($"try-suspend failed: HRESULT 0x{errorCode.Value:X8}");
+                tcs.TrySetResult(false);
+            }
+            else
+                tcs.TrySetResult(isSuccessful);
+        });
+        _suspendHandlers.Add(handler);
+        var hr = webView3.TrySuspend(handler);
+        // Refused outright, so the handler will not run.
+        if (hr.IsError)
+        {
+            _suspendHandlers.Remove(handler);
+            Trace?.Invoke($"try-suspend failed: HRESULT 0x{hr.Value:X8}");
+            tcs.TrySetResult(false);
+        }
+        return tcs.Task;
+    }
+
+    public void Resume()
+    {
+        if (_webView2 is null)
+            return;
+        if (_webView2 is not ICoreWebView2_3 webView3)
+            return;
+        var hr = webView3.Resume();
+        if (hr.IsError)
+            Trace?.Invoke($"resume failed: HRESULT 0x{hr.Value:X8}");
+    }
+
     public Task AddScriptAtDocumentStartAsync(string javaScript)
     {
         ArgumentNullException.ThrowIfNull(javaScript);
@@ -495,6 +574,7 @@ internal sealed class Win32WebView(NativeWebViewOptions options) : INativeWebVie
         _webMessageHandler = null;
         _cdpHandlers.Clear();
         _cdpReceivers.Clear();
+        _suspendHandlers.Clear();
         // Registered before an attach that never finished: they will never reach a browser.
         foreach (var (_, done) in _pendingDocumentStartScripts)
             done.TrySetCanceled();
