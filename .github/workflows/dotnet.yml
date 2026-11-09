@@ -279,10 +279,12 @@ jobs:
       run: dotnet build tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0-windows -c $env:BUILD_CONF
     - name: WebView2 self-tests
       # messaging, the content sizer and document-start scripts as on Linux, plus the two WebView2-only
-      # ones: a DevTools-protocol click arrives trusted, and the page's fullscreen is reported both ways.
+      # ones: a DevTools-protocol click arrives trusted, and the page's fullscreen is reported both ways;
+      # and the hidden-view one: a hidden view with the Low memory target suspends, a visible one does not,
+      # and a script still answers after Resume.
       run: |
         $failed = @()
-        foreach ($mode in 'assert', 'assert-autosize', 'assert-docstart', 'assert-cdp', 'assert-fullscreen') {
+        foreach ($mode in 'assert', 'assert-autosize', 'assert-docstart', 'assert-cdp', 'assert-fullscreen', 'assert-suspend') {
           Write-Host "::group::$mode"
           dotnet run --project tools/WebViewSmoke/WebViewSmoke.csproj -f net10.0-windows -c $env:BUILD_CONF --no-build $mode 2>&1 | Tee-Object -Variable lines | Out-Host
           $code = $LASTEXITCODE

@@ -37,6 +37,9 @@ internal sealed class CocoaWebView : INativeWebView
     public void SetBounds(RectInt bounds) => throw new NotImplementedException();
     public void Focus() => throw new NotImplementedException();
     public void SetVisible(bool visible) => throw new NotImplementedException();
+    public void SetMemoryUsageTarget(bool low) => throw new NotImplementedException();
+    public Task<bool> TrySuspendAsync() => throw new NotImplementedException();
+    public void Resume() => throw new NotImplementedException();
     public Task AddScriptAtDocumentStartAsync(string javaScript) => throw new NotImplementedException();
     public Task<string> ExecuteScriptAsync(string javaScript) => throw new NotImplementedException();
     public Task<string> CallDevToolsProtocolMethodAsync(string method, string parametersAsJson)

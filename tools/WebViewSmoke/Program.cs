@@ -174,7 +174,7 @@ internal static partial class Program
         </script>
         """;
 
-    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp, HotKey, FileDialog, Caption, Fullscreen }
+    private enum Scenario { Navigate, Messaging, AutoSize, DocStart, Cdp, HotKey, FileDialog, Caption, Fullscreen, Suspend }
 
     private static void Log(string line)
     {
@@ -210,7 +210,10 @@ internal static partial class Program
         // `assert-caption` = a double-click on the title bar reaches the loop, exit 0/1 (Windows; SKIPs elsewhere).
         // `assert-fullscreen` = the page's fullscreen is reported, survives the host resizing the view in the handler,
         // and its end is reported too, exit 0/1 (WebView2; SKIPs elsewhere).
-        // `messaging`/`autosize`/`docstart`/`cdp`/`hotkey`/`filedialog`/`caption` = the same self-tests but interactive.
+        // `assert-suspend` = a hidden view with the Low memory target suspends (and a visible one does not), then
+        // resumes and still runs script, exit 0/1 (WebView2; SKIPs elsewhere).
+        // `messaging`/`autosize`/`docstart`/`cdp`/`hotkey`/`filedialog`/`caption`/`fullscreen`/`suspend` = the same
+        // self-tests but interactive.
         // Anything else = navigate to that URL.
         var (scenario, assertMode) = arg0.ToLowerInvariant() switch
         {
@@ -222,6 +225,7 @@ internal static partial class Program
             "assert-filedialog" => (Scenario.FileDialog, true),
             "assert-caption" => (Scenario.Caption, true),
             "assert-fullscreen" => (Scenario.Fullscreen, true),
+            "assert-suspend" => (Scenario.Suspend, true),
             "messaging" => (Scenario.Messaging, false),
             "autosize" => (Scenario.AutoSize, false),
             "docstart" => (Scenario.DocStart, false),
@@ -230,6 +234,7 @@ internal static partial class Program
             "filedialog" => (Scenario.FileDialog, false),
             "caption" => (Scenario.Caption, false),
             "fullscreen" => (Scenario.Fullscreen, false),
+            "suspend" => (Scenario.Suspend, false),
             _ => (Scenario.Navigate, false),
         };
         Log($"[smoke] process arch = {RuntimeInformation.ProcessArchitecture}, scenario = {scenario}");
@@ -289,6 +294,7 @@ internal static partial class Program
         var hiddenForPress = false; // hotkey: the window was hidden before the press, as it must be
         long captionClickAt = 0; // caption: when to double-click (once the window is up), 0 once done
         FullscreenCheck? fullscreenCheck = null;
+        SuspendCheck? suspendCheck = null;
 
         switch (scenario)
         {
@@ -324,6 +330,16 @@ internal static partial class Program
             case Scenario.Fullscreen:
                 fullscreenCheck = new FullscreenCheck(webView, window, assertMode, Pass);
                 failReason = fullscreenCheck.FailReason;
+                break;
+            case Scenario.Suspend:
+                // Only WebView2 has a memory target and a suspend; the other backends answer false by design.
+                if (webView.GetType().Name != "Win32WebView")
+                {
+                    Log($"SMOKE: SKIP (memory target and suspend are WebView2 only, this is {webView.GetType().Name})");
+                    FastExit(0);
+                }
+                suspendCheck = new SuspendCheck(webView, assertMode, Pass);
+                failReason = suspendCheck.FailReason;
                 break;
             case Scenario.Navigate:
                 WireNavigateProbe(webView);
@@ -382,6 +398,12 @@ internal static partial class Program
                     : "[smoke] page fullscreen self-test: the box goes fullscreen, then leaves — close the window to exit.");
                 webView.NavigateToString(FullscreenTestHtml);
                 break;
+            case Scenario.Suspend:
+                Log(assertMode
+                    ? "[smoke] assert mode: hidden view self-test (expecting no suspend while visible, a suspend once hidden with the Low target, and a script after Resume)."
+                    : "[smoke] hidden view self-test (NavigateToString), close the window to exit.");
+                webView.NavigateToString("<!doctype html><title>suspend-test</title><p>Suspend self-test</p>");
+                break;
             case Scenario.Navigate:
                 webView.Navigate(navigateUrl);
                 Log($"[smoke] navigating to {navigateUrl} — close the window to exit.");
@@ -417,6 +439,7 @@ internal static partial class Program
 
             dialogCheck?.Tick(assertMode);
             fullscreenCheck?.Tick();
+            suspendCheck?.Tick();
 
             if (captionClickAt != 0 && Environment.TickCount64 >= captionClickAt)
             {
@@ -715,6 +738,98 @@ internal static partial class Program
                     Log($"[smoke] {expression[..Math.Min(40, expression.Length)]}…: {t.Result}");
             }, TaskScheduler.Default);
         }
+    }
+
+    // Hidden views (WebView2 only: the other backends have no memory target or suspend, SKIP there). Once the page
+    // has loaded, in steps the loop's Tick advances on the UI thread, as WebView2 requires:
+    // 1. Low memory target set, and a suspend asked of the still visible view: it must answer false.
+    // 2. The view hidden, and a suspend asked again: it must answer true.
+    // 3. Resume, the view shown again, the target back to Normal, and a script run: it must still answer.
+    // Each step waits on its task and the loop, which the run's deadline bounds; nothing polls in a tight loop.
+    private sealed class SuspendCheck
+    {
+        private readonly INativeWebView _webView;
+        private readonly bool _assertMode;
+        private readonly Action _pass;
+        private int _step;
+        private Task<bool>? _visibleSuspend, _hiddenSuspend;
+        private Task<string>? _script;
+        private string _state = "the page never finished loading";
+
+        public SuspendCheck(INativeWebView webView, bool assertMode, Action pass)
+        {
+            _webView = webView;
+            _assertMode = assertMode;
+            _pass = pass;
+            webView.NavigationCompleted += _ =>
+            {
+                if (_step != 0)
+                    return;
+                webView.SetMemoryUsageTarget(true);
+                _visibleSuspend = webView.TrySuspendAsync();
+                _state = "TrySuspendAsync on a visible view never answered";
+                _step = 1;
+            };
+        }
+
+        public string FailReason() => _state;
+
+        public void Tick()
+        {
+            switch (_step)
+            {
+                case 1 when _visibleSuspend!.IsCompleted:
+                    if (!_visibleSuspend.IsCompletedSuccessfully || _visibleSuspend.Result)
+                    {
+                        Fail($"TrySuspendAsync on a visible view answered {Describe(_visibleSuspend)}, not false");
+                        break;
+                    }
+                    Log("[smoke] TrySuspendAsync while visible: false, as it must");
+                    _webView.SetVisible(false);
+                    _hiddenSuspend = _webView.TrySuspendAsync();
+                    _state = "TrySuspendAsync on the hidden view never answered";
+                    _step = 2;
+                    break;
+
+                case 2 when _hiddenSuspend!.IsCompleted:
+                    if (!_hiddenSuspend.IsCompletedSuccessfully || !_hiddenSuspend.Result)
+                    {
+                        Fail($"TrySuspendAsync on the hidden view answered {Describe(_hiddenSuspend)}, not true");
+                        break;
+                    }
+                    Log("[smoke] TrySuspendAsync while hidden: true, as it must");
+                    _webView.Resume();
+                    _webView.SetVisible(true);
+                    _webView.SetMemoryUsageTarget(false);
+                    _script = _webView.ExecuteScriptAsync("1 + 1");
+                    _state = "no script answered after Resume";
+                    _step = 3;
+                    break;
+
+                case 3 when _script!.IsCompleted:
+                    if (!_script.IsCompletedSuccessfully || _script.Result != "2")
+                    {
+                        Fail($"a script after Resume answered {(_script.IsCompletedSuccessfully ? _script.Result : _script.Status.ToString())}, not 2");
+                        break;
+                    }
+                    Log("[smoke] a script answers after Resume");
+                    _step = 4;
+                    if (_assertMode)
+                        _pass();
+                    else
+                        Log("[smoke] suspend self-test done, close the window to exit.");
+                    break;
+            }
+        }
+
+        private void Fail(string reason)
+        {
+            _state = reason;
+            _step = -1;
+        }
+
+        private static string Describe(Task<bool> task)
+            => task.IsCompletedSuccessfully ? task.Result.ToString() : task.Status.ToString();
     }
 
     // Caption double-click: asked for (it can only fail off Windows: SKIP there). The window may not maximize, so a
