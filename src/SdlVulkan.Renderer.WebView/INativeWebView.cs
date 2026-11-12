@@ -11,7 +11,7 @@ namespace SdlVulkan.Renderer.WebView;
 /// <remarks>
 /// Backends: <c>Win32WebView</c> (WebView2 via WebView2Aot, Windows), <c>GtkWebView</c>
 /// (WebKitGTK, Linux), <c>CocoaWebView</c> (WKWebView, macOS). Create one via
-/// <see cref="NativeWebView.Create"/>.
+/// <see cref="NativeWebView.Create()"/>.
 /// </remarks>
 public interface INativeWebView : IDisposable
 {

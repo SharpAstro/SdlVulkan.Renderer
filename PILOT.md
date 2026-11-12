@@ -10,7 +10,7 @@ needs to plan, build, check and land.
   push, open a PR or merge; the controller lands the flight. Leave nothing uncommitted, and put scratch output
   outside the plane.
 - Sibling clones are not yours. `DIR.Lib` source sits beside this repo, not inside a plane, so a plane restores the
-  `DIR.Lib` package (a floating pin, `11.48.*`, in `src/Directory.Packages.props`), as CI does. A change that needs `DIR.Lib` to change is its own flight in that repo: name it
+  `DIR.Lib` package (a floating pin, `11.57.*`, in `src/Directory.Packages.props`), as CI does. A change that needs `DIR.Lib` to change is its own flight in that repo: name it
   and leave it.
 - No display or window is reachable from a plane. The tests render through a headless offscreen Vulkan context and
   `Assert.Skip` when no Vulkan ICD is present, so a skipped test proves nothing about rendering. The tools under
