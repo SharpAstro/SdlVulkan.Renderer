@@ -7,6 +7,14 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.87
+
+**The `DIR.Lib` pin moves from `11.48.*` to `11.57.*`.** No source change here: the package now asks for DIR.Lib 11.57 at
+the least, so a consumer gets the releases since 11.48 with it, the last of them 11.57's table rule (a divider follows the
+pointer: a fixed column and a capped star trade width) and 11.56's I-beam over selectable text. A consumer that pins
+DIR.Lib itself below 11.57 gets a downgrade error (NU1605) until it moves its pin.
+
+
 ## 7.86
 
 **WebView: a memory target and suspend for hidden views (#168).**
