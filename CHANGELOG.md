@@ -15,6 +15,10 @@ resize, a restore, an earlier request whose frame was paced or held back. Read f
 that narrows a frame's damage for one cause (a status bar's clock) repaint in full whenever anything else also asked,
 which it could not tell before: the flag was internal.
 
+**...and whether it is owed to pointer moves alone.** `RedrawPendingForPointerMoveAlone` is true when nothing but pointer
+moves a handler took armed the frame. An app whose move handler knows exactly what the move changed (a chart's crosshair,
+a readout) may then repaint that alone. Every other way of arming a frame clears it, so a new one is safe by default.
+
 
 ## 7.88
 

@@ -241,6 +241,8 @@ public sealed class SdlEventLoop
     public Func<bool>? CheckNeedsRedraw { get => Primary.CheckNeedsRedraw; set => Primary.CheckNeedsRedraw = value; }
     /// <inheritdoc cref="SdlWindowView.RedrawPending"/>
     public bool RedrawPending => Primary.RedrawPending;
+    /// <inheritdoc cref="SdlWindowView.RedrawPendingForPointerMoveAlone"/>
+    public bool RedrawPendingForPointerMoveAlone => Primary.RedrawPendingForPointerMoveAlone;
 
     /// <summary>Primary window's render-degraded (load-shed) callback. See <see cref="SdlWindowView.OnRenderDegraded"/>.</summary>
     public Action? OnRenderDegraded { get => Primary.OnRenderDegraded; set => Primary.OnRenderDegraded = value; }
@@ -992,7 +994,7 @@ public sealed class SdlEventLoop
                             if (now - vmm.LastMouseRedrawCounter >= MouseRedrawInterval)
                             {
                                 vmm.LastMouseRedrawCounter = now;
-                                vmm.NeedsRedraw = true;
+                                vmm.ArmForPointerMove();
                             }
                         }
                     }

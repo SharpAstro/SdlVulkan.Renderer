@@ -28,4 +28,55 @@ public class RedrawPendingTests
         view.RequestRedraw();
         view.RedrawPending.ShouldBeTrue();
     }
+
+    [Fact]
+    public void AFrameOwedToAMoveAloneIsKnownAsSuch()
+    {
+        var view = NewView();
+        view.NeedsRedraw = false;
+
+        view.ArmForPointerMove();
+        view.RedrawPending.ShouldBeTrue();
+        view.RedrawPendingForPointerMoveAlone.ShouldBeTrue();
+
+        // More moves change nothing.
+        view.ArmForPointerMove();
+        view.RedrawPendingForPointerMoveAlone.ShouldBeTrue();
+    }
+
+    // Either order: the frame is owed to more than a move, so it is not one an app may narrow to what the move changed.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AnyOtherCauseTakesTheMoveAloneAway(bool moveFirst)
+    {
+        var view = NewView();
+        view.NeedsRedraw = false;
+
+        if (moveFirst)
+        {
+            view.ArmForPointerMove();
+            view.RequestRedraw();
+        }
+        else
+        {
+            view.RequestRedraw();
+            view.ArmForPointerMove();
+        }
+
+        view.RedrawPending.ShouldBeTrue();
+        view.RedrawPendingForPointerMoveAlone.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void ADrawnFrameStartsOver()
+    {
+        var view = NewView();
+        view.NeedsRedraw = false;
+        view.ArmForPointerMove();
+
+        view.NeedsRedraw = false;
+        view.RedrawPendingForPointerMoveAlone.ShouldBeFalse();
+        view.RedrawPending.ShouldBeFalse();
+    }
 }
