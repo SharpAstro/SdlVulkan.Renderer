@@ -8,6 +8,7 @@ layout(push_constant) uniform PC {
     mat4 mvp;
     vec4 color;
     vec4 lightDir;  // xyz = direction TO the light, world space, expected normalised; w unused
+    vec4 specular;  // rgb = highlight colour, a = Blinn-Phong exponent; a <= 0 draws no highlight
 } pc;
 layout(location = 0) out vec3 vNormal;
 void main() {

@@ -20,8 +20,11 @@ namespace SdlVulkan.Renderer;
 /// </remarks>
 public sealed unsafe class VkMeshPipeline : IDisposable
 {
-    /// <summary>Push-constant floats: <c>mat4 mvp</c> (16), <c>vec4 color</c> (4), <c>vec4 lightDir</c> (4).</summary>
-    public const int PushConstantFloats = 24;
+    /// <summary>
+    /// Push-constant floats: <c>mat4 mvp</c> (16), <c>vec4 color</c> (4), <c>vec4 lightDir</c> (4),
+    /// <c>vec4 specular</c> (4: highlight rgb, then the exponent). 112 bytes, inside the 128 every device offers.
+    /// </summary>
+    public const int PushConstantFloats = 28;
 
     /// <summary>Bytes per vertex: <c>vec3 position</c> + <c>vec3 normal</c>.</summary>
     public const uint VertexStride = 6 * sizeof(float);
@@ -169,7 +172,7 @@ public sealed unsafe class VkMeshPipeline : IDisposable
     /// <summary>
     /// Push the constants and draw one mesh. <paramref name="pushConstants"/> is
     /// <see cref="PushConstantFloats"/> floats: a column-major mvp, then rgba, then the model-space
-    /// direction TO the light. The caller binds <see cref="Pipeline"/> first — <c>VkRenderer</c> does
+    /// direction TO the light, then the highlight's rgb and exponent. The caller binds <see cref="Pipeline"/> first — <c>VkRenderer</c> does
     /// so through its bind cache, which is what lets a model of many parts bind once.
     /// </summary>
     public void Draw(VkCommandBuffer cmd, ReadOnlySpan<float> pushConstants,

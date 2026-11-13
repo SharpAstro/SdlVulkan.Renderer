@@ -713,7 +713,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <summary>
     /// Opens a region of the current pass in which visibility is decided by depth rather than draw
     /// order: clears the depth attachment over the rect, clips to it, and maps the clip space of the
-    /// <see cref="DrawMesh"/> calls that follow onto it. The rect is in the same coordinates as every
+    /// <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3)"/> calls that follow onto it. The rect is in the same coordinates as every
     /// 2D draw (content space, through <see cref="ContentTransform"/>). Pair with
     /// <see cref="EndMeshRegion"/>. Returns false and opens nothing when no pass is being recorded, a
     /// region is already open, or the rect misses the area this pass may paint — the caller then draws
@@ -727,7 +727,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// to draw from the start.</para>
     /// </summary>
     /// <remarks>
-    /// The clear is why this is a bracket rather than a flag on <see cref="DrawMesh"/>. Depth is
+    /// The clear is why this is a bracket rather than a flag on <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3)"/>. Depth is
     /// cleared once at pass start, so a single model needs nothing more; a second model on the same
     /// frame would otherwise be tested against the first's depth and lose wherever the first was
     /// nearer, even where their rects only meet on screen. Clearing per region makes each model's
@@ -798,7 +798,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// position(3) + normal(3) per vertex, in triangle-list order; <paramref name="mvp"/> is 16 floats,
     /// column-major, taking the mesh to clip space, where [-1,1]² is the region's rect and depth runs
     /// [0,1] near to far. <paramref name="lightDirection"/> is in the mesh's own space, the direction TO
-    /// the light.
+    /// the light. No highlight: <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3, System.Numerics.Vector3, float)"/>
+    /// adds one.
     /// </summary>
     /// <remarks>
     /// Draw order among the meshes of one region is irrelevant — that is the point of the depth test —
@@ -807,6 +808,18 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </remarks>
     public void DrawMesh(ReadOnlySpan<float> vertices, ReadOnlySpan<float> mvp,
         DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection)
+        => DrawMesh(vertices, mvp, color, lightDirection, System.Numerics.Vector3.Zero, 0f);
+
+    /// <summary>
+    /// <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3)"/>
+    /// with a Blinn-Phong highlight added on top of the diffuse shade: <paramref name="specular"/> is its
+    /// colour (linear 0-1 per channel, so it doubles as its strength) and <paramref name="shininess"/> the
+    /// exponent; zero or less draws none. The highlight assumes the light travels with the eye (a
+    /// headlamp), where the half vector is the light direction itself.
+    /// </summary>
+    public void DrawMesh(ReadOnlySpan<float> vertices, ReadOnlySpan<float> mvp,
+        DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection,
+        System.Numerics.Vector3 specular, float shininess)
     {
         if (!_inMeshRegion || _pipelines?.Mesh is null) return;
         if (mvp.Length < 16) return;
@@ -815,6 +828,32 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
+        DrawMeshFrom(Surface.VertexBuffer, offset, (uint)(vertices.Length / floatsPerVertex), mvp, color,
+            lightDirection, specular, shininess);
+    }
+
+    /// <summary>
+    /// <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3, System.Numerics.Vector3, float)"/>
+    /// from a buffer the caller keeps (<see cref="CreatePersistentVertexBuffer"/>), so a model drawn
+    /// frame after frame is uploaded once rather than copied through the frame's vertex ring each
+    /// time: only the camera, colour and light change between frames, and those are push constants.
+    /// <paramref name="byteOffset"/> is where the first vertex starts in the buffer and
+    /// <paramref name="vertexCount"/> how many follow (a multiple of three; the layout is the span
+    /// overload's). The buffer must outlive every frame in flight that draws from it.
+    /// </summary>
+    public void DrawMesh(Vortice.Vulkan.VkBuffer buffer, ulong byteOffset, uint vertexCount, ReadOnlySpan<float> mvp,
+        DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection,
+        System.Numerics.Vector3 specular, float shininess)
+    {
+        if (!_inMeshRegion || _pipelines?.Mesh is null) return;
+        if (mvp.Length < 16 || buffer.IsNull || vertexCount < 3) return;
+        DrawMeshFrom(buffer, byteOffset, vertexCount, mvp, color, lightDirection, specular, shininess);
+    }
+
+    private void DrawMeshFrom(Vortice.Vulkan.VkBuffer buffer, ulong byteOffset, uint vertexCount, ReadOnlySpan<float> mvp,
+        DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection,
+        System.Numerics.Vector3 specular, float shininess)
+    {
 
         // Clip space → the region's rect → device → NDC, folded into the matrix AFTER the caller's mvp.
         // Into the matrix rather than a viewport so the viewport never changes: Vulkan 1.0 requires it
@@ -847,12 +886,16 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         pc[21] = lightDirection.Y;
         pc[22] = lightDirection.Z;
         pc[23] = 0f;
+        pc[24] = specular.X;
+        pc[25] = specular.Y;
+        pc[26] = specular.Z;
+        pc[27] = shininess;
 
         // Through the bind cache, so a model of many parts binds the pipeline once; the 2D draw that
         // follows the region rebinds its own through the same cache.
-        var mesh = _pipelines.Mesh!;
+        var mesh = _pipelines!.Mesh!;
         BindPipeline(mesh.Pipeline);
-        mesh.Draw(_currentCmd, pc, Surface.VertexBuffer, offset, (uint)(vertices.Length / floatsPerVertex));
+        mesh.Draw(_currentCmd, pc, buffer, byteOffset, vertexCount);
     }
 
     private bool _inMeshRegion;

@@ -1630,7 +1630,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// is <b>colour (0), resolve (1, MSAA only)</b> with one clear value, and the same helpers follow
     /// the shape.</para>
     /// <para><b>The depth attachment is on a pass whose target may draw a mesh, and 2D drawing never
-    /// reads it.</b> It exists for depth-tested meshes (<see cref="VkRenderer.DrawMesh"/>), which are
+    /// reads it.</b> It exists for depth-tested meshes (<see cref="VkRenderer.DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3)"/>), which are
     /// drawn inline in the same pass as everything else — antialiased by the same MSAA, clipped by the
     /// same scissor, with no intermediate target. Since compatibility is per attachment, a pass
     /// without it cannot host pipelines built against one that has it, so each shape has a pipeline
@@ -1657,7 +1657,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// depth attachment, so the subpass names none and the attachments are colour (0) and, under MSAA,
     /// resolve (1). Pipelines are render-pass compatible only within a shape (see
     /// <see cref="VkPipelineSet.Create(VulkanContext, VkRenderPass, VkSampleCountFlags, bool)"/>), and a
-    /// target on this shape cannot host <see cref="VkRenderer.DrawMesh"/>.</param>
+    /// target on this shape cannot host <see cref="VkRenderer.DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3)"/>.</param>
     internal static VkRenderPass CreateCompatibleRenderPass(VkDeviceApi deviceApi, VkFormat colorFormat,
         VkFormat depthFormat, VkSampleCountFlags msaaSamples,
         VkAttachmentLoadOp colorLoadOp, VkImageLayout colorInitialLayout, VkImageLayout colorFinalLayout,
