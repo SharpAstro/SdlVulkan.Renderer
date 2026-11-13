@@ -713,7 +713,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <summary>
     /// Opens a region of the current pass in which visibility is decided by depth rather than draw
     /// order: clears the depth attachment over the rect, clips to it, and maps the clip space of the
-    /// <see cref="DrawMesh"/> calls that follow onto it. The rect is in the same coordinates as every
+    /// <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3)"/> calls that follow onto it. The rect is in the same coordinates as every
     /// 2D draw (content space, through <see cref="ContentTransform"/>). Pair with
     /// <see cref="EndMeshRegion"/>. Returns false and opens nothing when no pass is being recorded, a
     /// region is already open, or the rect misses the area this pass may paint — the caller then draws
@@ -727,7 +727,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// to draw from the start.</para>
     /// </summary>
     /// <remarks>
-    /// The clear is why this is a bracket rather than a flag on <see cref="DrawMesh"/>. Depth is
+    /// The clear is why this is a bracket rather than a flag on <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3)"/>. Depth is
     /// cleared once at pass start, so a single model needs nothing more; a second model on the same
     /// frame would otherwise be tested against the first's depth and lose wherever the first was
     /// nearer, even where their rects only meet on screen. Clearing per region makes each model's
@@ -893,7 +893,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         // Through the bind cache, so a model of many parts binds the pipeline once; the 2D draw that
         // follows the region rebinds its own through the same cache.
-        var mesh = _pipelines.Mesh!;
+        var mesh = _pipelines!.Mesh!;
         BindPipeline(mesh.Pipeline);
         mesh.Draw(_currentCmd, pc, buffer, byteOffset, vertexCount);
     }
