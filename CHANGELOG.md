@@ -7,6 +7,15 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.89
+
+**An app can ask whether a frame is already owed.** `SdlWindowView.RedrawPending` (and `SdlEventLoop.RedrawPending` for the
+primary window) is true when the loop has armed a frame for a cause of its own: an event a handler took, an expose, a
+resize, a restore, an earlier request whose frame was paced or held back. Read from `CheckNeedsRedraw`, it lets an app
+that narrows a frame's damage for one cause (a status bar's clock) repaint in full whenever anything else also asked,
+which it could not tell before: the flag was internal.
+
+
 ## 7.88
 
 **Meshes can carry a specular highlight.** `VkRenderer.DrawMesh` gains an overload taking a highlight colour and a

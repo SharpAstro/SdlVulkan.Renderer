@@ -335,4 +335,18 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
 
     /// <summary>Requests a redraw of this window on the next loop iteration.</summary>
     public void RequestRedraw() => NeedsRedraw = true;
+
+    /// <summary>
+    /// Whether a frame is already owed to this window: armed by an event the loop dispatched (input a handler took, an
+    /// expose, a resize, a restore), by <see cref="RequestRedraw"/>, by an earlier <see cref="CheckNeedsRedraw"/> whose
+    /// frame has not been drawn yet (paced, minimised, in a recovery backoff), or by the loop itself (a frame that ran
+    /// out of vertex ring).
+    /// </summary>
+    /// <remarks>
+    /// Read it from <see cref="CheckNeedsRedraw"/>, which the loop asks AFTER dispatching the iteration's events, to learn
+    /// whether the frame about to be drawn has a cause the app did not raise itself. An app that narrows a frame's damage
+    /// (<see cref="VkRenderer.AddFrameDamage"/>) for a cause of its own, a clock's tick say, must repaint in full when
+    /// this is true: it cannot say what an expose or a restored window needs, and the loop does not tell it otherwise.
+    /// </remarks>
+    public bool RedrawPending => NeedsRedraw;
 }

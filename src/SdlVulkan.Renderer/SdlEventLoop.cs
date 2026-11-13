@@ -239,6 +239,8 @@ public sealed class SdlEventLoop
     public Action<string, int, int>? OnTextEditing { get => Primary.OnTextEditing; set => Primary.OnTextEditing = value; }
     public Action<string>? OnDropFile { get => Primary.OnDropFile; set => Primary.OnDropFile = value; }
     public Func<bool>? CheckNeedsRedraw { get => Primary.CheckNeedsRedraw; set => Primary.CheckNeedsRedraw = value; }
+    /// <inheritdoc cref="SdlWindowView.RedrawPending"/>
+    public bool RedrawPending => Primary.RedrawPending;
 
     /// <summary>Primary window's render-degraded (load-shed) callback. See <see cref="SdlWindowView.OnRenderDegraded"/>.</summary>
     public Action? OnRenderDegraded { get => Primary.OnRenderDegraded; set => Primary.OnRenderDegraded = value; }
