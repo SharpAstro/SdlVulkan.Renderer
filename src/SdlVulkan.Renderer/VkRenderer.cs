@@ -798,7 +798,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// position(3) + normal(3) per vertex, in triangle-list order; <paramref name="mvp"/> is 16 floats,
     /// column-major, taking the mesh to clip space, where [-1,1]² is the region's rect and depth runs
     /// [0,1] near to far. <paramref name="lightDirection"/> is in the mesh's own space, the direction TO
-    /// the light.
+    /// the light. No highlight: <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3, System.Numerics.Vector3, float)"/>
+    /// adds one.
     /// </summary>
     /// <remarks>
     /// Draw order among the meshes of one region is irrelevant — that is the point of the depth test —
@@ -807,6 +808,18 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </remarks>
     public void DrawMesh(ReadOnlySpan<float> vertices, ReadOnlySpan<float> mvp,
         DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection)
+        => DrawMesh(vertices, mvp, color, lightDirection, System.Numerics.Vector3.Zero, 0f);
+
+    /// <summary>
+    /// <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3)"/>
+    /// with a Blinn-Phong highlight added on top of the diffuse shade: <paramref name="specular"/> is its
+    /// colour (linear 0-1 per channel, so it doubles as its strength) and <paramref name="shininess"/> the
+    /// exponent; zero or less draws none. The highlight assumes the light travels with the eye (a
+    /// headlamp), where the half vector is the light direction itself.
+    /// </summary>
+    public void DrawMesh(ReadOnlySpan<float> vertices, ReadOnlySpan<float> mvp,
+        DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection,
+        System.Numerics.Vector3 specular, float shininess)
     {
         if (!_inMeshRegion || _pipelines?.Mesh is null) return;
         if (mvp.Length < 16) return;
@@ -847,6 +860,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         pc[21] = lightDirection.Y;
         pc[22] = lightDirection.Z;
         pc[23] = 0f;
+        pc[24] = specular.X;
+        pc[25] = specular.Y;
+        pc[26] = specular.Z;
+        pc[27] = shininess;
 
         // Through the bind cache, so a model of many parts binds the pipeline once; the 2D draw that
         // follows the region rebinds its own through the same cache.

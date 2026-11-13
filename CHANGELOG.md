@@ -7,6 +7,15 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.88
+
+**Meshes can carry a specular highlight.** `VkRenderer.DrawMesh` gains an overload taking a highlight colour and a
+Blinn-Phong exponent, added on top of the two-sided diffuse shade, so a dark part facing the light still catches it.
+The highlight assumes a light that travels with the eye (a headlamp), where the half vector is the light direction and
+n.h is the lambert term. The mesh pipeline's push constants grow from 96 to 112 bytes (`vec4 specular` after
+`lightDir`); the existing overload pushes no highlight and draws exactly as before.
+
+
 ## 7.87
 
 **The `DIR.Lib` pin moves from `11.48.*` to `11.57.*`.** No source change here: the package now asks for DIR.Lib 11.57 at
