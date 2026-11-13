@@ -15,6 +15,8 @@ The highlight assumes a light that travels with the eye (a headlamp), where the 
 n.h is the lambert term. The mesh pipeline's push constants grow from 96 to 112 bytes (`vec4 specular` after
 `lightDir`); the existing overload pushes no highlight and draws exactly as before.
 
+**A mesh can be drawn from a buffer the caller keeps.** `DrawMesh(VkBuffer, byteOffset, vertexCount, ...)` draws a range of a buffer made with `CreatePersistentVertexBuffer`, so a model drawn on every frame of an orbit is uploaded once rather than copied through the frame's vertex ring each time (a 630,000-triangle CAD model was 45 MB a frame). The span overloads are unchanged.
+
 
 ## 7.87
 

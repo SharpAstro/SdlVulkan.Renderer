@@ -421,6 +421,50 @@ public sealed class MeshRegionDepthTests(OffscreenGpuFixture gpu)
         b.ShouldBe(0);
     }
 
+    /// <summary>
+    /// A model kept in a buffer of its own draws exactly as the same vertices passed through the
+    /// frame's ring, part by part as a range of it, which is how a viewer draws a model it uploaded
+    /// once. Two parts, so the second range starts mid-buffer and the offset is exercised.
+    /// </summary>
+    [Fact]
+    public void AModelDrawnFromAKeptBufferMatchesTheRing()
+    {
+        if (gpu.Context is not { } ctx)
+        {
+            Assert.Skip("Vulkan runtime not available on this host");
+            return;
+        }
+
+        float[] model = [.. Far, .. Near];
+        var vertexBytes = (ulong)VkMeshPipeline.VertexStride;
+        byte[] kept;
+        ctx.ResizeOffscreen(Size, Size);
+        ctx.RequireMeshDepth();
+        using (var renderer = new VkRenderer(ctx, Size, Size))
+        {
+            var (buffer, memory) = renderer.CreatePersistentVertexBuffer(model);
+            renderer.BeginOffscreenFrame(Black).ShouldBeTrue();
+            renderer.BeginMeshRegion(0f, 0f, Size, Size).ShouldBeTrue();
+            renderer.DrawMesh(buffer, 0, 6, Identity, Blue, Light, new Vector3(0.25f), 8f);
+            renderer.DrawMesh(buffer, 6 * vertexBytes, 6, Identity, Red, Light, new Vector3(0.25f), 8f);
+            renderer.EndMeshRegion();
+            renderer.EndOffscreenFrame();
+            ctx.WaitOffscreenFrameComplete();
+            kept = ctx.ReadbackOffscreenRgba();
+            renderer.DestroyBuffer(buffer, memory);
+        }
+
+        var ring = RenderFrame(ctx, renderer =>
+        {
+            renderer.BeginMeshRegion(0f, 0f, Size, Size).ShouldBeTrue();
+            renderer.DrawMesh(Far, Identity, Blue, Light, new Vector3(0.25f), 8f);
+            renderer.DrawMesh(Near, Identity, Red, Light, new Vector3(0.25f), 8f);
+            renderer.EndMeshRegion();
+        });
+        ChannelsAt(kept, Centre, Centre).ShouldBe(ChannelsAt(ring, Centre, Centre));
+        ChannelsAt(kept, Centre, Centre).R.ShouldBeGreaterThan(200, "the near red part, not the far blue one");
+    }
+
     /// <summary>One offscreen frame of <see cref="Size"/>², cleared to black, with <paramref name="draw"/>
     /// recorded into its main pass; returns the readback.</summary>
     private static byte[] RenderFrame(VulkanContext ctx, Action<VkRenderer> draw)

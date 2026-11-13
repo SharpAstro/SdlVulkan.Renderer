@@ -828,6 +828,32 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         var offset = Surface.WriteVertices(vertices);
         if (offset == uint.MaxValue) return;
+        DrawMeshFrom(Surface.VertexBuffer, offset, (uint)(vertices.Length / floatsPerVertex), mvp, color,
+            lightDirection, specular, shininess);
+    }
+
+    /// <summary>
+    /// <see cref="DrawMesh(ReadOnlySpan{float}, ReadOnlySpan{float}, DIR.Lib.RGBAColor32, System.Numerics.Vector3, System.Numerics.Vector3, float)"/>
+    /// from a buffer the caller keeps (<see cref="CreatePersistentVertexBuffer"/>), so a model drawn
+    /// frame after frame is uploaded once rather than copied through the frame's vertex ring each
+    /// time: only the camera, colour and light change between frames, and those are push constants.
+    /// <paramref name="byteOffset"/> is where the first vertex starts in the buffer and
+    /// <paramref name="vertexCount"/> how many follow (a multiple of three; the layout is the span
+    /// overload's). The buffer must outlive every frame in flight that draws from it.
+    /// </summary>
+    public void DrawMesh(Vortice.Vulkan.VkBuffer buffer, ulong byteOffset, uint vertexCount, ReadOnlySpan<float> mvp,
+        DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection,
+        System.Numerics.Vector3 specular, float shininess)
+    {
+        if (!_inMeshRegion || _pipelines?.Mesh is null) return;
+        if (mvp.Length < 16 || buffer.IsNull || vertexCount < 3) return;
+        DrawMeshFrom(buffer, byteOffset, vertexCount, mvp, color, lightDirection, specular, shininess);
+    }
+
+    private void DrawMeshFrom(Vortice.Vulkan.VkBuffer buffer, ulong byteOffset, uint vertexCount, ReadOnlySpan<float> mvp,
+        DIR.Lib.RGBAColor32 color, System.Numerics.Vector3 lightDirection,
+        System.Numerics.Vector3 specular, float shininess)
+    {
 
         // Clip space → the region's rect → device → NDC, folded into the matrix AFTER the caller's mvp.
         // Into the matrix rather than a viewport so the viewport never changes: Vulkan 1.0 requires it
@@ -869,7 +895,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // follows the region rebinds its own through the same cache.
         var mesh = _pipelines.Mesh!;
         BindPipeline(mesh.Pipeline);
-        mesh.Draw(_currentCmd, pc, Surface.VertexBuffer, offset, (uint)(vertices.Length / floatsPerVertex));
+        mesh.Draw(_currentCmd, pc, buffer, byteOffset, vertexCount);
     }
 
     private bool _inMeshRegion;
