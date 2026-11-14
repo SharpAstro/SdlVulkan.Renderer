@@ -1,6 +1,7 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using DIR.Lib;
-using static SDL3.SDL;
 
 namespace SdlVulkan.Renderer;
 
@@ -22,9 +23,6 @@ namespace SdlVulkan.Renderer;
 [SupportedOSPlatform("ios")]
 public abstract class SdlVulkanIosApp
 {
-    // SDL calls back through a native function pointer, so the delegate must outlive the call (a static field) and,
-    // under Mono's ahead-of-time compilation on iOS, its target must carry [MonoPInvokeCallback].
-    private static readonly MainFunc SdlMainCallback = SdlMain;
     private static SdlVulkanIosApp? _running;
 
     /// <summary>The window title (unused visually on iOS, where the app is fullscreen, but SDL wants one).</summary>
@@ -53,18 +51,31 @@ public abstract class SdlVulkanIosApp
     /// Hands the process to SDL and does not return while the app runs (<c>UIApplicationMain</c> never returns on
     /// iOS). Call it from the head's <c>Main</c>, once.
     /// </summary>
-    public int Run()
+    public unsafe int Run()
     {
         if (Interlocked.CompareExchange(ref _running, this, null) is not null)
             throw new InvalidOperationException("An SdlVulkanIosApp is already running; Run is called once per process.");
 
         // Before any SDL call: SDL3-CS imports "SDL3", which on iOS is a framework inside the bundle.
         AppleVulkan.ResolveBundledSdl();
-        return RunApp(0, [], SdlMainCallback, nint.Zero);
+
+        // NOT SDL3-CS's RunApp. Its MainFunc callback declares `string[] argv` with no [MarshalAs] size, and Mono (the
+        // iOS runtime) cannot build a native-to-managed wrapper for an unsized array: the first iPad run of chess ended
+        // 0.17 s after launch with "MarshalDirectiveException: [MarshalAs] attribute required to marshal arrays to
+        // managed code" at SDL.RunApp, before a line of the bring-up ran (7.92). So SDL_RunApp is called through a
+        // function pointer, back into an [UnmanagedCallersOnly] SdlMain whose argv is a raw pointer: nothing to marshal.
+        // The library is loaded through SDL3-CS's assembly, so the resolver above (or an app's own) finds it.
+        var sdl = NativeLibrary.Load("SDL3", typeof(SDL3.SDL).Assembly, null);
+        var runApp = (delegate* unmanaged[Cdecl]<int, nint, delegate* unmanaged[Cdecl]<int, nint, int>, nint, int>)
+            NativeLibrary.GetExport(sdl, "SDL_RunApp");
+        return runApp(0, nint.Zero, &SdlMain, nint.Zero);
     }
 
-    [MonoPInvokeCallback(typeof(MainFunc))]
-    private static int SdlMain(int argc, string[]? argv)
+    // argv is SDL's char** (unused: an iOS app is not started with arguments), kept a raw pointer so that the callback
+    // needs no marshalling at all. [UnmanagedCallersOnly] also gives Mono's ahead-of-time compiler the native entry
+    // point it needs, which [MonoPInvokeCallback] used to.
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    internal static int SdlMain(int argc, nint argv)
     {
         // An exception must not cross back into SDL's native frame: it would end the process with no trace.
         try
@@ -93,16 +104,4 @@ public abstract class SdlVulkanIosApp
     /// Returns once wired; the base then runs the loop until the app ends.
     /// </summary>
     protected abstract void OnRendererReady(VkRenderer renderer, SdlEventLoop loop);
-}
-
-/// <summary>
-/// Marks a static method that native code calls through a delegate. Mono's ahead-of-time compiler (iOS) recognises
-/// the attribute by NAME and generates the native-to-managed wrapper the call needs; without it the callback fails at
-/// run time on a device. Declared here because the iOS assembly that carries Microsoft's copy is not referenced by a
-/// <c>net10.0</c> library.
-/// </summary>
-[AttributeUsage(AttributeTargets.Method)]
-internal sealed class MonoPInvokeCallbackAttribute(Type delegateType) : Attribute
-{
-    public Type DelegateType { get; } = delegateType;
 }

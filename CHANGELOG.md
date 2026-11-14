@@ -7,6 +7,17 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.92
+
+**`SdlVulkanIosApp` actually starts on a device.** The first iPad run (chess, iPadOS 26.0.1) aborted 0.17 s after
+launch with `MarshalDirectiveException: [MarshalAs] attribute required to marshal arrays to managed code` at
+`SDL.RunApp`: SDL3-CS's `MainFunc` callback declares `string[] argv` with no size, and Mono, the iOS runtime, cannot
+build a native-to-managed wrapper for an unsized array. The exception surfaced before a line of the bring-up ran, past
+`SdlMain`'s own `try`. `Run()` now looks `SDL_RunApp` up on the library SDL3-CS resolves (through its resolver, so the
+bundled `SDL3.framework`, or an app's own resolver) and calls it through a function pointer, back into an
+`[UnmanagedCallersOnly]` `SdlMain(int argc, nint argv)`: no array, nothing to marshal. The local
+`MonoPInvokeCallbackAttribute` is gone with the delegate it served. No API change. Follows 7.91 (#174).
+
 ## 7.91
 
 **A frame owed to a pointer move stays one until it is drawn.** `RedrawPendingForPointerMoveAlone` (7.89) lets a host
