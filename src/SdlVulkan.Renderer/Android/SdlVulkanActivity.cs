@@ -1,7 +1,5 @@
 using DIR.Lib;
 using Org.Libsdl.App;
-using Vortice.Vulkan;
-using static SDL3.SDL;
 
 namespace SdlVulkan.Renderer;
 
@@ -58,68 +56,17 @@ public abstract class SdlVulkanActivity : SDLActivity
     protected override void Main()
     {
         // Default the diagnostic sink to logcat before bring-up: a failure in
-        // CreateRendererWhenSurfaceReady happens BEFORE OnRendererReady — where a consumer would
+        // MobileHost's surface bring-up happens BEFORE OnRendererReady — where a consumer would
         // normally install its own sink — and would otherwise leave no trace. ??= so a sink the
         // consumer set earlier wins (and one set in OnRendererReady simply replaces this).
         SdlEventLoop.DiagnosticLog ??= static m => global::Android.Util.Log.Info("SdlVulkan", m);
 
-        var (dw, dh) = DesignSize;
         // Fullscreen (immersive) by default: the system bars would otherwise draw over the edge-to-edge
         // SDL surface, cropping the top of the scene and covering bottom chrome. Override Fullscreen to
-        // keep the bars visible (then apply safe-area insets).
-        using var window = SdlVulkanWindow.Create(WindowTitle, dw, dh, fullscreen: Fullscreen);
-        SdlWindow = window;
-
-        var (ctx, renderer) = CreateRendererWhenSurfaceReady(window);
-        try
-        {
-            var loop = new SdlEventLoop(window, renderer) { BackgroundColor = BackgroundColor };
-            OnRendererReady(renderer, loop);
-            loop.Run();
-        }
-        finally
-        {
-            renderer.Dispose();
-            ctx.Dispose();
-        }
-    }
-
-    // Android recreates the window's native surface during the splash->app handoff, so the surface SDL
-    // created at window construction is already stale by the time the swapchain is built — vkCreate*
-    // returns VK_ERROR_SURFACE_LOST_KHR (VulkanContext.CreateSwapchain). Pump events to let the window
-    // settle, recreate the surface against the current native window, and retry until it holds. On
-    // desktop the first attempt succeeds immediately.
-    private static (VulkanContext, VkRenderer) CreateRendererWhenSurfaceReady(SdlVulkanWindow window)
-    {
-        Exception? last = null;
-        for (var attempt = 0; attempt < 40; attempt++)
-        {
-            PumpFor(100);
-            window.GetSizeInPixels(out var w, out var h);
-            if (w <= 0 || h <= 0) continue; // surface not sized yet — keep settling
-            try
-            {
-                window.RecreateSurface();
-                var ctx = VulkanContext.Create(window.Instance, window.Surface, (uint)w, (uint)h);
-                var renderer = new VkRenderer(ctx, (uint)w, (uint)h);
-                return (ctx, renderer);
-            }
-            catch (VkException ex)
-            {
-                last = ex; // transient surface during startup — settle and retry
-                SdlEventLoop.DiagnosticLog?.Invoke($"[startup] attempt {attempt + 1}: {ex.Message}; retrying");
-            }
-        }
-        SdlEventLoop.DiagnosticLog?.Invoke(
-            $"[startup] giving up: Vulkan surface never became ready ({last?.Message ?? "surface never sized"})");
-        throw last ?? new InvalidOperationException("Vulkan surface never became ready.");
-    }
-
-    // Pumps SDL events for roughly the given duration so Android surface/lifecycle events are drained.
-    private static void PumpFor(uint ms)
-    {
-        var deadline = GetTicks() + ms;
-        do { PumpEvents(); Delay(16); } while (GetTicks() < deadline);
+        // keep the bars visible (then apply safe-area insets). The bring-up itself is MobileHost's, shared
+        // with the iOS host.
+        MobileHost.Run(WindowTitle, DesignSize, Fullscreen, BackgroundColor,
+            window => SdlWindow = window, OnRendererReady);
     }
 
     /// <summary>

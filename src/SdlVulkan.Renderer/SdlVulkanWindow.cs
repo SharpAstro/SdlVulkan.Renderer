@@ -121,6 +121,9 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
             // callbacks that null the native window, so building the swapchain hits VK_ERROR_SURFACE_LOST_KHR
             // (libsdl-org/SDL#12957). Fullscreen keeps the native surface attached.
             flags |= WindowFlags.Fullscreen;
+            // iOS sizes a window in POINTS and gives it a drawable of the same size unless asked for the screen's
+            // pixel density, so without this an iPad draws at half its resolution and is scaled up blurred.
+            if (OperatingSystem.IsIOS()) flags |= WindowFlags.HighPixelDensity;
         }
         else
         {
@@ -175,8 +178,11 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         if (!Init(InitFlags.Video | InitFlags.Events))
             throw new InvalidOperationException($"SDL_Init failed: {GetError()}");
 
-        VulkanLoadLibrary(null);
-        vkInitialize().CheckResult();
+        // One Vulkan library for SDL and for Vortice: null (each finds the system loader) everywhere but iOS, where
+        // there is no system loader and both are pointed at the MoltenVK the app bundles (AppleVulkan).
+        var vulkanLibrary = AppleVulkan.BundledLibraryPath();
+        VulkanLoadLibrary(vulkanLibrary);
+        vkInitialize(vulkanLibrary).CheckResult();
 
         return CreateVulkanInstance();
     }
@@ -867,6 +873,15 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         var hdrColorSpace = InstanceExtensionAvailable(SwapchainColorSpaceExtension);
         string[] baseExtensions = hdrColorSpace ? [.. sdlExtensionNames, SwapchainColorSpaceExtension] : sdlExtensionNames;
 
+        // VK_KHR_portability_enumeration, on Apple platforms only: there the device is MoltenVK, a portability
+        // implementation, and a Vulkan loader in front of it (the LunarG SDK on macOS) lists it only to an
+        // instance that asks for portability devices. Asked nowhere else on purpose: the Khronos loader offers the
+        // extension on every platform, and asking for it on Windows or Linux would let a non-conformant ICD into
+        // the device pick that today never sees one. The device side (VK_KHR_portability_subset) is VulkanDevice's.
+        var portability = AppleVulkan.IsApple && InstanceExtensionAvailable(PortabilityEnumerationExtension);
+        if (portability)
+            baseExtensions = [.. baseExtensions, PortabilityEnumerationExtension];
+
         using var extensionArray = useValidation
             ? new VkStringArray(WithValidationExtensions(baseExtensions))
             : new VkStringArray(baseExtensions);
@@ -883,6 +898,7 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
         VkInstanceCreateInfo instanceCI = new()
         {
             pApplicationInfo = &appInfo,
+            flags = portability ? VkInstanceCreateFlags.EnumeratePortabilityKHR : VkInstanceCreateFlags.None,
             enabledExtensionCount = extensionArray.Length,
             ppEnabledExtensionNames = extensionArray
         };
@@ -923,6 +939,7 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
 
     // Vortice's name constants are UTF-8 spans (see WithValidationExtensions), so the literal is spelled out here.
     internal const string SwapchainColorSpaceExtension = "VK_EXT_swapchain_colorspace";
+    internal const string PortabilityEnumerationExtension = "VK_KHR_portability_enumeration";
 
     /// <summary>Whether the Vulkan loader offers an instance extension (<c>vkEnumerateInstanceExtensionProperties</c>).</summary>
     internal static unsafe bool InstanceExtensionAvailable(string name)

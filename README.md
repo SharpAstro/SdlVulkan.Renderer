@@ -95,7 +95,7 @@ At runtime you need the Vulkan loader plus an ICD (driver). Nothing else: no X11
   - **GPU driver** (Mesa `radv` / `intel_anv` / NVIDIA proprietary) — fastest.
   - **Mesa `lavapipe` / `llvmpipe`** — software rasterizer. 5–20× slower but fully headless. Apt: `mesa-vulkan-drivers`.
   - **Google SwiftShader** — alternative software ICD.
-- **macOS / iOS**: MoltenVK (Vulkan on Metal). Untested for offscreen here but no reason it shouldn't work.
+- **macOS / iOS**: MoltenVK (Vulkan on Metal). Untested for offscreen here but no reason it shouldn't work. The instance and device enable the portability extensions MoltenVK needs (see "iOS" below).
 
 SDL3-CS remains a package reference because the on-screen path uses it. Its P/Invokes are lazy — `libSDL3.so` / `SDL3.dll` is never loaded if `SdlVulkanWindow` is not instantiated, so the offscreen path has no SDL runtime dependency.
 
@@ -138,6 +138,27 @@ Consumers also need `dotnet workload install android`; the workload supplies the
 the Android SDK, which `dotnet build -t:InstallAndroidDependencies -p:AcceptAndroidSDKLicenses=true`
 will provision. The tooling needs a JDK it can parse — **JDK 17**; JDK 25 is too new and throws inside
 `GetJdkRevision`.
+
+### iOS (untested on a device)
+
+The iOS host is `SdlVulkanIosApp`, the counterpart of `SdlVulkanActivity` with the same members
+(`WindowTitle`, `DesignSize`, `BackgroundColor`, `Fullscreen`, `SdlWindow`, `OnRendererReady`); both run one
+shared bring-up (`MobileHost`), so a consumer's subclass body is the same on both. It lives in the plain
+`net10.0` assembly, not an iOS target: it needs only SDL's P/Invokes, so the package carries no `net10.0-ios`
+asset (whose workload the Linux packing runner does not have), and a `net10.0-ios` head consumes the
+`net10.0` one.
+
+The head calls `new MyApp().Run()` from `Main` **instead of** `UIApplication.Main`: SDL owns the UIKit
+application (`SDL_RunApp`) and calls the bring-up back once it has launched. iOS has no Vulkan loader and
+SDL3-CS ships no iOS natives, so the head bundles both as **dynamic** xcframeworks (`NativeReference`):
+
+- `SDL3.xcframework`, from the SDL release matching the SDL3-CS version the head pins (the `.dmg` carries it);
+- `MoltenVK.xcframework`, the dynamic one from a KhronosGroup/MoltenVK release.
+
+The library finds them by absolute path inside the bundle (`Frameworks/SDL3.framework/SDL3`,
+`Frameworks/MoltenVK.framework/MoltenVK`) and hands SDL and Vortice the SAME MoltenVK. On every Apple platform
+the instance asks for `VK_KHR_portability_enumeration`, and a device that advertises `VK_KHR_portability_subset`
+(MoltenVK does) gets it enabled, as the spec requires; neither changes anything on Windows, Linux or Android.
 
 ### CI setup
 

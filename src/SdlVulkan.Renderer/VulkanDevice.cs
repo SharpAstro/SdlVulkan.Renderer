@@ -342,12 +342,9 @@ public sealed unsafe partial class VulkanDevice : IDisposable
             pQueuePriorities = &queuePriority
         };
 
-        var wantsBudget = SupportsMemoryBudget(instanceApi, physicalDevice);
         // Spelled out rather than built from VK_KHR_SWAPCHAIN_EXTENSION_NAME: that constant is a
         // UTF-8 span, and a mixed array of it and a string has no common element type.
-        using var extensionNames = new VkStringArray(wantsBudget
-            ? new[] { SwapchainExtensionName, MemoryBudgetExtensionName }
-            : new[] { SwapchainExtensionName });
+        using var extensionNames = new VkStringArray(DeviceExtensions(instanceApi, physicalDevice, presents: true, out var wantsBudget));
         VkDeviceCreateInfo deviceCI = new()
         {
             queueCreateInfoCount = 1,
@@ -406,14 +403,14 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         // device. Important for headless environments (Linux CI with Mesa lavapipe / llvmpipe
         // software rasterizer, containers without a display server) where the instance has no
         // surface extensions enabled.
-        var wantsBudget = SupportsMemoryBudget(instanceApi, physicalDevice);
-        using var extensionNames = new VkStringArray(new[] { MemoryBudgetExtensionName });
+        var offscreenExtensions = DeviceExtensions(instanceApi, physicalDevice, presents: false, out var wantsBudget);
+        using var extensionNames = new VkStringArray(offscreenExtensions);
         VkDeviceCreateInfo deviceCI = new()
         {
             queueCreateInfoCount = 1,
             pQueueCreateInfos = &queueCI,
-            enabledExtensionCount = wantsBudget ? extensionNames.Length : 0,
-            ppEnabledExtensionNames = wantsBudget ? extensionNames : null,
+            enabledExtensionCount = offscreenExtensions.Length > 0 ? extensionNames.Length : 0,
+            ppEnabledExtensionNames = offscreenExtensions.Length > 0 ? extensionNames : null,
         };
         instanceApi.vkCreateDevice(physicalDevice, &deviceCI, null, out var device).CheckResult();
         var deviceApi = GetApi(instance, device);
@@ -931,6 +928,35 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// creation, because chaining the budget struct onto a device that did not enable the extension
     /// is undefined rather than merely unanswered.</summary>
     private static bool SupportsMemoryBudget(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice)
+        => DeviceExtensionAvailable(instanceApi, physicalDevice, MemoryBudgetExtensionName);
+
+    /// <summary>
+    /// <c>VK_KHR_portability_subset</c>: a device that advertises it (MoltenVK, on macOS and iOS) implements
+    /// Vulkan only in part, and the spec REQUIRES it to be enabled at device creation; leaving it out is a
+    /// validation error and, on a strict loader, a refused device. No desktop or Android driver advertises it.
+    /// </summary>
+    private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
+
+    /// <summary>
+    /// The device extensions to enable: the swapchain when the device presents, the memory budget when
+    /// offered, and the portability subset when the device is a portability implementation (see
+    /// <see cref="PortabilitySubsetExtensionName"/>). One list for the on-screen and the offscreen device, so
+    /// neither can forget one.
+    /// </summary>
+    private static string[] DeviceExtensions(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice,
+        bool presents, out bool wantsBudget)
+    {
+        wantsBudget = SupportsMemoryBudget(instanceApi, physicalDevice);
+        var names = new List<string>(3);
+        if (presents) names.Add(SwapchainExtensionName);
+        if (wantsBudget) names.Add(MemoryBudgetExtensionName);
+        if (DeviceExtensionAvailable(instanceApi, physicalDevice, PortabilitySubsetExtensionName))
+            names.Add(PortabilitySubsetExtensionName);
+        return [.. names];
+    }
+
+    /// <summary>Whether the physical device offers a device extension (<c>vkEnumerateDeviceExtensionProperties</c>).</summary>
+    private static bool DeviceExtensionAvailable(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice, string name)
     {
         uint count = 0;
         if (instanceApi.vkEnumerateDeviceExtensionProperties(physicalDevice, (byte*)null, &count, null)
@@ -943,7 +969,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
             return false;
 
         for (var i = 0; i < count; i++)
-            if (new string((sbyte*)props[i].extensionName) == MemoryBudgetExtensionName)
+            if (new string((sbyte*)props[i].extensionName) == name)
                 return true;
         return false;
     }

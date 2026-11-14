@@ -7,6 +7,22 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.90
+
+**Groundwork for iOS, and Vulkan through MoltenVK on every Apple platform.** `SdlVulkanIosApp` is the iOS host, the
+counterpart of `SdlVulkanActivity` with the same members: a `net10.0-ios` head calls `Run()` from `Main` instead of
+`UIApplication.Main`, SDL owns the UIKit application (`SDL_RunApp`), and the bring-up both mobile hosts now share
+(`MobileHost`: a fullscreen window, a renderer built once the surface settles, the loop) runs inside it. It is in the
+plain `net10.0` assembly, so the package gains no target and its CI no workload. iOS has no Vulkan loader, so the head
+bundles `SDL3.xcframework` and `MoltenVK.xcframework` as dynamic frameworks, and the library loads SDL and Vulkan from
+the bundle by absolute path, SDL and Vortice from the same MoltenVK. A fullscreen window on iOS asks for the screen's
+pixel density. NOT yet run on a device: the first iOS head (chess) is what proves it.
+
+On macOS and iOS the instance asks for `VK_KHR_portability_enumeration` (a loader in front of MoltenVK lists it only
+then), and on any platform a device advertising `VK_KHR_portability_subset` gets it enabled, as the spec requires; no
+Windows, Linux or Android driver advertises it, so nothing changes there. The device extensions for the on-screen and
+offscreen devices are now one list (`VulkanDevice.DeviceExtensions`).
+
 ## 7.89
 
 **An app can ask whether a frame is already owed.** `SdlWindowView.RedrawPending` (and `SdlEventLoop.RedrawPending` for the
