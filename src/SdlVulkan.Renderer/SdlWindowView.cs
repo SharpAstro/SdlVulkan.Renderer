@@ -262,7 +262,30 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// <summary>Frames this window has submitted and presented; a clean-frame counter the debug
     /// inspector's screenshot reads to know a restored window is drawing again.</summary>
     internal long FramesPresented;
-    internal bool NeedsRedraw = true;
+    // A property, so that ANY arming of a frame but ArmForPointerMove marks the frame as owed to more than a move:
+    // the safe answer is the default, and a new arming site written as "NeedsRedraw = true" gets it without knowing.
+    private bool _needsRedraw = true;
+    private bool _pendingForPointerMoveAlone;
+    internal bool NeedsRedraw
+    {
+        get => _needsRedraw;
+        set
+        {
+            _needsRedraw = value;
+            _pendingForPointerMoveAlone = false;
+        }
+    }
+
+    /// <summary>Arms a frame for a pointer move a handler took. Its only effect beyond <see cref="NeedsRedraw"/> is that a
+    /// frame nothing else is owed for is known as such (<see cref="RedrawPendingForPointerMoveAlone"/>).</summary>
+    internal void ArmForPointerMove()
+    {
+        if (!_needsRedraw)
+        {
+            _needsRedraw = true;
+            _pendingForPointerMoveAlone = true;
+        }
+    }
 
     // Android app lifecycle (see SdlEventLoop.Dispatch/RenderView): the native surface is destroyed
     // when the app is backgrounded and handed back fresh on foreground. Paused skips all rendering
@@ -335,4 +358,26 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
 
     /// <summary>Requests a redraw of this window on the next loop iteration.</summary>
     public void RequestRedraw() => NeedsRedraw = true;
+
+    /// <summary>
+    /// Whether a frame is already owed to this window: armed by an event the loop dispatched (input a handler took, an
+    /// expose, a resize, a restore), by <see cref="RequestRedraw"/>, by an earlier <see cref="CheckNeedsRedraw"/> whose
+    /// frame has not been drawn yet (paced, minimised, in a recovery backoff), or by the loop itself (a frame that ran
+    /// out of vertex ring).
+    /// </summary>
+    /// <remarks>
+    /// Read it from <see cref="CheckNeedsRedraw"/>, which the loop asks AFTER dispatching the iteration's events, to learn
+    /// whether the frame about to be drawn has a cause the app did not raise itself. An app that narrows a frame's damage
+    /// (<see cref="VkRenderer.AddFrameDamage"/>) for a cause of its own, a clock's tick say, must repaint in full when
+    /// this is true: it cannot say what an expose or a restored window needs, and the loop does not tell it otherwise.
+    /// </remarks>
+    public bool RedrawPending => NeedsRedraw;
+
+    /// <summary>
+    /// Whether the frame owed (<see cref="RedrawPending"/>) is owed to nothing but pointer moves a handler took since
+    /// the last frame. An app whose move handler says exactly what the move changed (a hover's crosshair, a readout) may
+    /// then repaint that alone; a frame owed to anything else as well, a key, a press, an expose, a resize, an earlier
+    /// request, is not one it can narrow, and this is false for it.
+    /// </summary>
+    public bool RedrawPendingForPointerMoveAlone => _needsRedraw && _pendingForPointerMoveAlone;
 }
