@@ -7,11 +7,31 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.94
+
+**On iOS, a tap lands where it was made, and the app turns with the iPad.** The first iPad run that drew (chess, 7.93)
+had two faults, both iOS-only.
+
+- **Pointer coordinates are pixels everywhere.** SDL's mouse events are in window coordinates, which `SdlEventLoop`
+  passed through as they were; everything a consumer hit-tests against is in pixels. The two only differ where the
+  window has `HighPixelDensity`, which this library sets on iOS alone, where window coordinates are points, half the
+  pixels on a Retina iPad: every tap landed at half its position (the app's log showed 17 taps arrive and hit nothing).
+  Mouse down, up and motion (and so the wheel's position) are now multiplied by the window's `PixelDensity`, which is
+  1 everywhere else, so nothing changes off iOS. Finger events were already pixels, and the inspector's synthesized
+  input does not pass through the loop's SDL path.
+- **The iOS window is `Resizable`.** Without it, or `SDL_HINT_ORIENTATIONS`, SDL allows only the orientations matching
+  the window's initial shape, so the portrait default design size pinned the app to portrait and a landscape iPad
+  drew it sideways. iOS now applies the orientations the app's Info.plist lists.
+
+Also corrects 7.93's account of 7.92: it threw `DllNotFoundException: SDL3`, not an ahead-of-time compilation abort.
+
 ## 7.93
 
-**`SdlVulkanIosApp` reaches SDL's callback the way that works on a device.** 7.92's function pointer into an
-`[UnmanagedCallersOnly]` `SdlMain` did not survive Mono's ahead-of-time compilation: the iPad build aborted inside the
-runtime before `Main` ran, with no managed exception (so no crash log). 7.93 goes back to the mechanism 7.90 used, which
+**`SdlVulkanIosApp` reaches SDL's callback the way that works on a device.** 7.92 never reached SDL on the iPad: it
+loaded SDL with `NativeLibrary.Load("SDL3", typeof(SDL3.SDL).Assembly, null)`, which on iOS does NOT consult the
+assembly's `DllImportResolver` (only a real `[DllImport]` does), so it threw `DllNotFoundException: SDL3`. (This entry
+first blamed Mono's ahead-of-time compiler; the app's crash log, read later, showed the exception, corrected in 7.94.)
+7.93 goes back to the mechanism 7.90 used, which
 DID reach the callback on the iPad (an ordinary `[DllImport]` of `SDL_RunApp` taking a delegate, kept alive in a static
 field, its target marked `[MonoPInvokeCallback]`), and changes only what 7.90 got wrong: the delegate is the renderer's
 own `RawMainFunc(int argc, nint argv)`, not SDL3-CS's `MainFunc` with its unmarshallable `string[] argv`. The import is

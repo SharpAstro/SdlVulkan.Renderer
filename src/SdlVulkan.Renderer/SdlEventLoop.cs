@@ -813,6 +813,15 @@ public sealed class SdlEventLoop
 
     private bool TryView(uint windowId, out SdlWindowView view) => _views.TryGetValue(windowId, out view!);
 
+    // SDL's mouse events are in WINDOW coordinates; everything a consumer hit-tests against (the renderer, the layout,
+    // the content transform) is in PIXELS. The two are the same wherever the pixel density is 1 (Windows, X11, Android,
+    // a desktop window without HighPixelDensity), so this changes nothing there. On iOS the window is HighPixelDensity
+    // and its coordinates are POINTS, half the pixels on a Retina iPad: every tap landed at half its position, so the
+    // first iPad run took 17 taps and hit nothing (7.94). Finger events need no scale: they are normalised and the loop
+    // multiplies them by the renderer's pixel size. Synthesized input (DebugInspector) is already in pixels and does not
+    // come through here.
+    private static float PointerScale(SdlWindowView view) => view.Window.PixelDensity;
+
     private void Dispatch(ref Event evt)
     {
         switch ((EventType)evt.Type)
@@ -960,7 +969,8 @@ public sealed class SdlEventLoop
             case EventType.MouseButtonDown:
                 if (TryView(evt.Button.WindowID, out var vmd))
                 {
-                    vmd.DispatchPointerDown(evt.Button.Button, evt.Button.X, evt.Button.Y, evt.Button.Clicks, GetModState().ToInputModifier);
+                    var dScale = PointerScale(vmd);
+                    vmd.DispatchPointerDown(evt.Button.Button, evt.Button.X * dScale, evt.Button.Y * dScale, evt.Button.Clicks, GetModState().ToInputModifier);
                     vmd.NeedsRedraw = true;
                 }
                 break;
@@ -971,7 +981,8 @@ public sealed class SdlEventLoop
                     // SDL's button-up event DOES carry the release coordinates — only the legacy
                     // Action<byte> signature drops them. The synthesized event keeps them, so
                     // position-dependent release logic (tap-vs-drag slop, tap-to-select) just works.
-                    if (vmu.DispatchPointerUp(evt.Button.Button, evt.Button.X, evt.Button.Y))
+                    var uScale = PointerScale(vmu);
+                    if (vmu.DispatchPointerUp(evt.Button.Button, evt.Button.X * uScale, evt.Button.Y * uScale))
                     {
                         vmu.NeedsRedraw = true;
                     }
@@ -981,8 +992,9 @@ public sealed class SdlEventLoop
             case EventType.MouseMotion:
                 if (TryView(evt.Motion.WindowID, out var vmm))
                 {
-                    var newMx = evt.Motion.X;
-                    var newMy = evt.Motion.Y;
+                    var mScale = PointerScale(vmm);
+                    var newMx = evt.Motion.X * mScale;
+                    var newMy = evt.Motion.Y * mScale;
                     if (newMx != vmm.MouseX || newMy != vmm.MouseY)
                     {
                         vmm.MouseX = newMx;

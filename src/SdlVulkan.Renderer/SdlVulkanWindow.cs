@@ -121,9 +121,15 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
             // callbacks that null the native window, so building the swapchain hits VK_ERROR_SURFACE_LOST_KHR
             // (libsdl-org/SDL#12957). Fullscreen keeps the native surface attached.
             flags |= WindowFlags.Fullscreen;
-            // iOS sizes a window in POINTS and gives it a drawable of the same size unless asked for the screen's
-            // pixel density, so without this an iPad draws at half its resolution and is scaled up blurred.
-            if (OperatingSystem.IsIOS()) flags |= WindowFlags.HighPixelDensity;
+            // iOS, two flags:
+            // - HighPixelDensity: iOS sizes a window in POINTS and gives it a drawable of the same size unless asked
+            //   for the screen's pixel density, so without it an iPad draws at half its resolution, scaled up blurred.
+            //   (Its mouse events stay in points; SdlEventLoop scales them to pixels, 7.94.)
+            // - Resizable: without it (and without SDL_HINT_ORIENTATIONS) SDL allows only the orientations matching
+            //   the window's initial shape (UIKit_GetSupportedOrientations), so a portrait design size pinned the app
+            //   to portrait and a landscape iPad drew it sideways (7.94). With it SDL allows every orientation and iOS
+            //   applies the ones the app's Info.plist lists. The window still fills the screen.
+            if (OperatingSystem.IsIOS()) flags |= WindowFlags.HighPixelDensity | WindowFlags.Resizable;
         }
         else
         {
