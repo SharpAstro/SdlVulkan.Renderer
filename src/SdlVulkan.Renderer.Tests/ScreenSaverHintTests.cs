@@ -9,7 +9,7 @@ namespace SdlVulkan.Renderer.Tests;
 /// SDL holds the display on by default while a window is open; the library chooses on purpose instead
 /// (issue #156). SDL hints and the screensaver flag are process-global, so these run alone.
 /// </summary>
-[Collection("SdlHints")]
+[Collection(SdlProcessStateCollection.Name)]
 public class ScreenSaverHintTests
 {
     // SDL falls back to this environment variable over a normal-priority SetHint, so clear it, as ClickThroughHintTests does.

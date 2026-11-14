@@ -11,7 +11,7 @@ namespace SdlVulkan.Renderer.Tests;
 /// is checked by reading SDL's own answer back, without <c>SDL_Init</c>: SDL allows setting metadata before it,
 /// which is the point.
 /// </summary>
-[Collection("SdlAppMetadata")] // SDL's metadata is process-wide: tests that set and read it must not interleave
+[Collection(SdlProcessStateCollection.Name)] // SDL's metadata is process-wide, and SDL_Quit elsewhere erases it
 public class AppMetadataTests
 {
     // SDL3-CS binds SDL_GetAppMetadataProperty as returning bool, which drops the string, so the test reads SDL's

@@ -23,6 +23,10 @@ then), and on any platform a device advertising `VK_KHR_portability_subset` gets
 Windows, Linux or Android driver advertises it, so nothing changes there. The device extensions for the on-screen and
 offscreen devices are now one list (`VulkanDevice.DeviceExtensions`).
 
+Tests: the hint and app-metadata tests share one collection (`SdlProcessStateCollection`). `SDL_Quit` erases SDL's
+global properties, so the screensaver test's init and quit, running in parallel, made
+`AppMetadataTests.ApplyingTheFallbackNamesTheEntryAssembly` read the version back as null about once in a few runs.
+
 ## 7.89
 
 **An app can ask whether a frame is already owed.** `SdlWindowView.RedrawPending` (and `SdlEventLoop.RedrawPending` for the
