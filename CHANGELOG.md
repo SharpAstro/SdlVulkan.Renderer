@@ -7,6 +7,17 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.93
+
+**`SdlVulkanIosApp` reaches SDL's callback the way that works on a device.** 7.92's function pointer into an
+`[UnmanagedCallersOnly]` `SdlMain` did not survive Mono's ahead-of-time compilation: the iPad build aborted inside the
+runtime before `Main` ran, with no managed exception (so no crash log). 7.93 goes back to the mechanism 7.90 used, which
+DID reach the callback on the iPad (an ordinary `[DllImport]` of `SDL_RunApp` taking a delegate, kept alive in a static
+field, its target marked `[MonoPInvokeCallback]`), and changes only what 7.90 got wrong: the delegate is the renderer's
+own `RawMainFunc(int argc, nint argv)`, not SDL3-CS's `MainFunc` with its unmarshallable `string[] argv`. The import is
+this assembly's, so `AppleVulkan.ResolveBundledSdl` now registers its "SDL3" resolver on this assembly too (it has no
+other `[DllImport]`). No API change.
+
 ## 7.92
 
 **`SdlVulkanIosApp` actually starts on a device.** The first iPad run (chess, iPadOS 26.0.1) aborted 0.17 s after
