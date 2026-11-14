@@ -7,6 +7,20 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.91
+
+**A frame owed to a pointer move stays one until it is drawn.** `RedrawPendingForPointerMoveAlone` (7.89) lets a host
+repaint only what a move changed. The loop lost that mark whenever the host's `CheckNeedsRedraw` answered yes: it
+re-armed the frame through the setter that clears it, and since a frame is usually held a few milliseconds for pacing, a
+1000 Hz mouse had the check asked again before the frame was drawn. The second check found a frame owed to "more than a
+move" by nothing but its own earlier yes, and the host drew the whole window. The check's yes now leaves the mark of a
+frame that was already owed to a move alone; a frame the check alone asked for is owed to more than a move, as before.
+
+**The inspector's `move` arms a frame the way a real pointer does**: for a pointer move when a handler took it, a plain
+redraw otherwise. It used to ask for a plain redraw either way, so an injected hover could never produce the narrowed
+frame a real one does and a host's partial repaint could not be measured unattended.
+
+
 ## 7.90
 
 **Groundwork for iOS, and Vulkan through MoltenVK on every Apple platform.** `SdlVulkanIosApp` is the iOS host, the
