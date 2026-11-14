@@ -287,6 +287,12 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
         }
     }
 
+    /// <summary>Arms a frame the host's redraw check asked for. A frame already owed to a pointer move alone stays known
+    /// as one: the check that agreed to it saw that, and a frame is often held for pacing past the next check, which
+    /// would otherwise find it owed to "more than a move" by nothing but the check's own yes. A frame the check alone
+    /// asked for is owed to more than a move, as before.</summary>
+    internal void ArmForCheck() => _needsRedraw = true;
+
     // Android app lifecycle (see SdlEventLoop.Dispatch/RenderView): the native surface is destroyed
     // when the app is backgrounded and handed back fresh on foreground. Paused skips all rendering
     // while backgrounded (never present to a dead surface); NeedsSurfaceRebuild makes the first frame

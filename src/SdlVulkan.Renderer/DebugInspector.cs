@@ -986,13 +986,24 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     {
         // The modifiers ride on every motion event, as a held key does on real ones, so a hover that
         // answers to a key (the atlas previewing a Ctrl+click) can be driven without a keyboard.
-        _view.DispatchPointerMove(x1, y1, mods);
+        var consumed = _view.DispatchPointerMove(x1, y1, mods);
         for (var i = 1; i <= steps; i++)
         {
             var t = (float)i / steps;
-            _view.DispatchPointerMove(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, mods);
+            consumed |= _view.DispatchPointerMove(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, mods);
         }
-        _view.RequestRedraw();
+
+        // A move the app took owes the frame a real move owes: one armed FOR A POINTER MOVE, so an app that narrows such
+        // a frame to what the move changed (RedrawPendingForPointerMoveAlone) can be driven and measured from here. It
+        // used to be a plain redraw request, which such an app reads as a cause it cannot name and draws in full.
+        if (consumed)
+        {
+            _view.ArmForPointerMove();
+        }
+        else
+        {
+            _view.RequestRedraw();
+        }
         return "\"ok\"";
     }
 

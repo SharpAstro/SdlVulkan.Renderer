@@ -356,7 +356,7 @@ public sealed class SdlEventLoop
             // once-per-iteration hook, as a shutdown drain does to stop the loop when its work completes.
             foreach (var v in _viewList)
                 if (v.CheckNeedsRedraw?.Invoke() == true)
-                    v.NeedsRedraw = true;
+                    v.ArmForCheck();
 
             if (!_running)
                 break;
