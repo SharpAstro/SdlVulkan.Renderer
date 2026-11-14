@@ -47,14 +47,25 @@ internal static class AppleVulkan
     {
         if (!(OperatingSystem.IsIOS() || OperatingSystem.IsTvOS()) || InBundle(BundledSdl3) is not { } sdlPath)
             return;
+        DllImportResolver resolver = (name, _, _) =>
+            name == "SDL3" && NativeLibrary.TryLoad(sdlPath, out var handle) ? handle : nint.Zero;
         try
         {
-            NativeLibrary.SetDllImportResolver(typeof(SDL3.SDL).Assembly, (name, _, _) =>
-                name == "SDL3" && NativeLibrary.TryLoad(sdlPath, out var handle) ? handle : nint.Zero);
+            NativeLibrary.SetDllImportResolver(typeof(SDL3.SDL).Assembly, resolver);
         }
         catch (InvalidOperationException)
         {
             // The app set a resolver on SDL3-CS first; it knows where its SDL is.
+        }
+        // This assembly imports SDL_RunApp itself (SdlVulkanIosApp, 7.93), under the same "SDL3" name. It has no other
+        // [DllImport], so the resolver answers for SDL3 alone and nothing else is redirected.
+        try
+        {
+            NativeLibrary.SetDllImportResolver(typeof(AppleVulkan).Assembly, resolver);
+        }
+        catch (InvalidOperationException)
+        {
+            // Already set (Run is once per process, but a host may have called this first).
         }
     }
 
