@@ -25,6 +25,9 @@ had two faults, both iOS-only.
 
 Also corrects 7.93's account of 7.92: it threw `DllNotFoundException: SDL3`, not an ahead-of-time compilation abort.
 
+Built against DIR.Lib 11.60 (was 11.57; 11.58 to 11.60 are additive, and this library uses none of `FloatingPalette`,
+whose `IsFading` changed meaning in 11.59), so chess, already on 11.59, no longer lifts the renderer past what its CI ran.
+
 ## 7.93
 
 **`SdlVulkanIosApp` reaches SDL's callback the way that works on a device.** 7.92 never reached SDL on the iPad: it
