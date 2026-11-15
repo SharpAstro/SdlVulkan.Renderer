@@ -10,7 +10,7 @@ namespace SdlVulkan.Renderer.Tests;
 /// The callback SDL_RunApp makes into <see cref="SdlVulkanIosApp"/> must need no marshalling, through the mechanism
 /// that is known to work under Mono's ahead-of-time compilation on a device. SDL3-CS's <c>MainFunc</c> has a
 /// <c>string[] argv</c>, which Mono cannot marshal into managed code (MarshalDirectiveException at launch, the first iPad
-/// run); 7.92's function pointer into an [UnmanagedCallersOnly] method aborted inside the runtime before Main. 7.93 is
+/// run); 7.92 loaded SDL with NativeLibrary.Load, which on iOS ignores the DllImportResolver (DllNotFoundException). 7.93 is
 /// the delegate + [MonoPInvokeCallback] that reached the callback on the device, with argv a raw pointer. No test here
 /// runs on iOS, so this checks the shape instead, which any platform can see.
 /// </summary>

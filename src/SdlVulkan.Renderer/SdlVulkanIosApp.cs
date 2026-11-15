@@ -63,8 +63,9 @@ public abstract class SdlVulkanIosApp
     // SDL_RunApp is imported here, NOT taken from SDL3-CS. SDL3-CS's MainFunc callback declares `string[] argv` with no
     // [MarshalAs] size, and Mono (the iOS runtime) cannot build a native-to-managed wrapper for an unsized array: the
     // first iPad run of chess ended at launch with "MarshalDirectiveException: [MarshalAs] attribute required to marshal
-    // arrays to managed code". 7.92 tried a function pointer into an [UnmanagedCallersOnly] method instead, and that
-    // build aborted inside the runtime before Main ran, with no managed exception at all. So 7.93 keeps exactly the
+    // arrays to managed code". 7.92 tried a function pointer into an [UnmanagedCallersOnly] method instead, looked up
+    // with NativeLibrary.Load("SDL3", <SDL3-CS assembly>, null), and never got that far: on iOS that overload does not
+    // consult the assembly's DllImportResolver, so it threw DllNotFoundException: SDL3. So 7.93 keeps exactly the
     // mechanism that DID reach the callback on a device (an ordinary P/Invoke taking a delegate, its target marked
     // [MonoPInvokeCallback]) and changes only the argument: argv is SDL's char**, kept a raw pointer (an iOS app is not
     // started with arguments), so there is nothing to marshal.
