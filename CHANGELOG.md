@@ -7,6 +7,17 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.95
+
+**Glyph atlases start transparent.** A Vulkan image's contents are undefined until written, and both glyph atlases
+(`VkFontAtlas`, and every `VkSdfFontAtlas` page) uploaded only the rectangles they had drawn, so each texel no glyph had
+covered yet held whatever the driver handed over. A glyph is sampled with linear filtering, which blends its edge texels
+with the ones just outside it. NVIDIA and Android drivers return zeroed memory, so it never showed; Metal (MoltenVK, on
+the iPad) does not, and small glyphs (chess's captured-piece icons, a menu's chess-piece title) grew a one-pixel
+lavender line along their bottom and right edges. The first upload into a fresh atlas image now clears it to
+transparent black (`VulkanHelpers.ClearToTransparent`, with the transfer barrier that orders the clear before the upload), once per image: an atlas's creation and each new SDF page. A
+grown bitmap atlas was already re-uploaded whole. Every later flush is unchanged.
+
 ## 7.94
 
 **On iOS, a tap lands where it was made, and the app turns with the iPad.** The first iPad run that drew (chess, 7.93)

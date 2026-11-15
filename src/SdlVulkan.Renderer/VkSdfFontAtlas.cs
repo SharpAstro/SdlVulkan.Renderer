@@ -228,6 +228,10 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
         // Subsequent flushes transition from ShaderReadOnly.
         var srcLayout = page.NeedsInitialTransition ? VkImageLayout.Undefined : VkImageLayout.ShaderReadOnlyOptimal;
         VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, page.Image, srcLayout, VkImageLayout.TransferDstOptimal);
+        // A fresh page's contents are undefined and only the dirty region is uploaded below: clear it once (see
+        // VulkanHelpers.ClearToTransparent), or the texels filtering reaches beyond a glyph are the driver's leftovers.
+        if (srcLayout == VkImageLayout.Undefined)
+            VulkanHelpers.ClearToTransparent(_ctx.DeviceApi, cmd, page.Image);
         page.NeedsInitialTransition = false;
 
         VkBufferImageCopy region = new()

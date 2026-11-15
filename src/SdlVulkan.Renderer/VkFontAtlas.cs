@@ -239,6 +239,10 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         // ShaderReadOnly. This replaces the side-submit that CreateImage used to do.
         var srcLayout = _needsInitialTransition ? VkImageLayout.Undefined : VkImageLayout.ShaderReadOnlyOptimal;
         VulkanHelpers.TransitionImageLayout(_ctx.DeviceApi, cmd, _image, srcLayout, VkImageLayout.TransferDstOptimal);
+        // ...and a fresh image's contents are undefined, while only the dirty region is uploaded below: clear it once,
+        // so the texels around a glyph that linear filtering reaches are transparent, not the driver's leftovers.
+        if (srcLayout == VkImageLayout.Undefined)
+            VulkanHelpers.ClearToTransparent(_ctx.DeviceApi, cmd, _image);
         _needsInitialTransition = false;
 
         VkBufferImageCopy region = new()
