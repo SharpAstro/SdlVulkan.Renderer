@@ -158,4 +158,9 @@ internal static partial class LogEvents
     // size, that a swapchain does not have.
     [LoggerMessage(504, LogLevel.Information, "[VulkanContext] {Device} offers no premultiplied alpha on a transparent window's surface: the window is drawn offscreen on it and handed to Windows as a layered window, one readback per frame.")]
     public static partial void TransparentWindowLayered(this ILogger logger, string device);
+
+    // Said once per swapchain, since it changes what a frame costs and where its pixels are: a full repaint is drawn
+    // once where it would be drawn once per swapchain image, at the price of a copy per frame.
+    [LoggerMessage(505, LogLevel.Information, "[VulkanContext] the frame is kept in one image on {Device} and copied to the swapchain's {ImageCount} (a software rasteriser, or SDLVK_RETAINED_FRAME=1): a full repaint is drawn once.")]
+    public static partial void FrameRetained(this ILogger logger, string device, uint imageCount);
 }

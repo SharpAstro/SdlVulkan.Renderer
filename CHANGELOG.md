@@ -7,6 +7,36 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.98
+
+**A software rasteriser's cost is bounded, and a full repaint is drawn once (#181).** Two changes for a device that
+rasterises on the processor (`VulkanDevice.IsSoftwareRasterizer`: llvmpipe in a VM, a board with no GPU driver). A GPU
+takes neither: its frames stay paced by the display, on the swapchain path it had.
+
+- **Frames are paced by what they cost** (`FrameCostPacing`). After a frame the window rests until the process has used no
+  more than `SdlEventLoop.FrameProcessorShare` of the machine's processors since that frame began (half by default; zero
+  for no limit), and never longer than `SdlEventLoop.MaxFrameHold` (100 ms) after it ended. The second bound keeps the
+  limit from becoming a stall, since processor time is the whole process's.
+- **The frame is kept in one image** (`VulkanContext.RetainsFrame`). Damage is per swapchain image, so one full frame left
+  every other image owing a full repaint on its turn. The frame is now drawn into one image of the context's own and each
+  swapchain image is brought up to date from it with a copy: a rectangle, or all of it the first time and after a full
+  frame. For an opaque SDR swapchain whose images may be a copy's destination. `SDLVK_RETAINED_FRAME=1` asks for it on any
+  device and `=0` refuses it.
+
+Measured with TianWen's GUI on llvmpipe (WSL 2, Mesa 25.2, 4 processors, 1200x800), share of one core:
+
+| | Before | After |
+| --- | --- | --- |
+| Panning the sky atlas | 271 % at 25 fps, longest gap 118 ms | 197 % at 22 fps, longest gap 52 ms |
+| Full frames in 20 idle seconds, any tab | 5 | 2 |
+| Hover over the atlas | 35 % | 17 % |
+| The atlas idle (a full frame each 10 s) | 12.5 % | 4.6 % |
+
+Run under the Khronos validation layer with synchronisation validation on llvmpipe, and on Mesa's dzn with the retained
+frame forced: no message. dzn is what found that the copy must obey the queue's transfer granularity, as the atlases'
+uploads do.
+
+
 ## 7.97
 
 **A published app has no debug inspector unless it is published with `-p:DirInspectorSupport=true` (#182).**

@@ -44,21 +44,34 @@ public sealed unsafe partial class VulkanContext
     /// repaints in full. Call whenever the swapchain is created or recreated: the images are new (or
     /// resized), so nothing can be preserved.
     /// </summary>
-    private void ResetDamageState(int imageCount) => _damage.Reset(imageCount);
+    private void ResetDamageState(int imageCount)
+    {
+        _damage.Reset(imageCount);
+        // A retained frame is one image whatever the swapchain holds (VulkanContext.Retained.cs); what each swapchain
+        // image is missing of it is kept beside, and starts as all of it.
+        if (_retainedActive) _presentDamage.Reset(imageCount);
+    }
 
     /// <summary>
     /// Adds a damaged rect for THIS frame, in swapchain pixels. Accumulates into every image, because
     /// each one will need it whenever its turn comes round.
     /// </summary>
     public void AddFrameDamage(float x, float y, float width, float height)
-        => _damage.Add(x, y, width, height);
+    {
+        _damage.Add(x, y, width, height);
+        if (_retainedActive) _presentDamage.Add(x, y, width, height);
+    }
 
     /// <summary>
     /// Declares that this frame changes an unknown region, so every image must be fully repainted. The
     /// safe answer, and the right one for a resize, a theme change, or any surface whose damage a caller
     /// cannot enumerate.
     /// </summary>
-    public void MarkFullFrameDamage() => _damage.MarkFull();
+    public void MarkFullFrameDamage()
+    {
+        _damage.MarkFull();
+        if (_retainedActive) _presentDamage.MarkFull();
+    }
 
     // The image whose damage this frame took, and the rollback that re-marks it if the frame is dropped.
     private int _damageTakenImage;
@@ -85,15 +98,23 @@ public sealed unsafe partial class VulkanContext
         // TryTake CLEARS as it reads, so it must be asked exactly once per frame whichever path is
         // taken -- the image is about to be painted either way.
         // An HDR frame is composited whole (VulkanContext.Hdr.cs), so it is repainted whole, damage or not.
-        var partial = _damage.TryTake(idx, out var dx, out var dy, out var dw, out var dh)
+        // A retained frame is the same image whichever swapchain image was acquired, so its damage is kept at index 0
+        // and is this frame's alone (VulkanContext.Retained.cs).
+        var damageIdx = _retainedActive ? 0 : idx;
+        var partial = _damage.TryTake(damageIdx, out var dx, out var dy, out var dw, out var dh)
             && loadPass != VkRenderPass.Null && !_hdrActive;
         // ...unless the frame never reaches the GPU, in which case nothing was painted and what the image
         // owed is gone with the take: repaint it in full on its next turn (OnFrameDropped). A cached
         // delegate over a field, because this runs every frame and a closure per frame is garbage per
         // frame; the field still names this frame's image when the rollback runs, which is before the
         // next frame takes one.
-        _damageTakenImage = idx;
-        OnFrameDropped(cmd, _markTakenImageFull ??= () => _damage.MarkImageFull(_damageTakenImage));
+        _damageTakenImage = damageIdx;
+        OnFrameDropped(cmd, _markTakenImageFull ??= () =>
+        {
+            _damage.MarkImageFull(_damageTakenImage);
+            // The retained image never got this frame, and neither did any swapchain image.
+            if (_retainedActive) _presentDamage.MarkFull();
+        });
 
         if (!partial)
         {

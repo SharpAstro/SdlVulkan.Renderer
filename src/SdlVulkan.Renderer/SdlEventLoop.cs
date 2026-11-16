@@ -303,6 +303,27 @@ public sealed class SdlEventLoop
     }
 
     /// <summary>
+    /// The share of the machine's processors a window's drawing may take on a software rasteriser
+    /// (<see cref="FrameCostPacing"/>); zero for no limit. A GPU's frames are paced by the display alone.
+    /// </summary>
+    public double FrameProcessorShare { get; set; } = FrameCostPacing.DefaultShare;
+
+    /// <summary>The longest a window rests after a frame for cost alone, so the limit can never stall it.</summary>
+    public TimeSpan MaxFrameHold { get; set; } = FrameCostPacing.DefaultMaxHold;
+
+    // Moves a window's next frame out to where its cost allows it, on a software rasteriser. Asked on every pass,
+    // since the processor time of a frame goes on growing while the rasteriser's threads finish it.
+    private void PaceForCost(SdlWindowView v)
+    {
+        if (v.LastFrameStartTimestamp == 0 || !(FrameProcessorShare > 0.0) || !v.Renderer.Context.GraphicsDevice.IsSoftwareRasterizer)
+            return;
+        var costDue = FrameCostPacing.DueTimestamp(v.LastFrameStartTimestamp, v.LastFrameEndTimestamp,
+            Environment.CpuUsage.TotalTime - v.ProcessorAtLastFrameStart, Environment.ProcessorCount, FrameProcessorShare,
+            (long)(MaxFrameHold.TotalSeconds * Stopwatch.Frequency), Stopwatch.Frequency);
+        v.NextFrameDueTimestamp = Math.Max(v.DisplayFrameDueTimestamp, costDue);
+    }
+
+    /// <summary>
     /// Runs the event loop until <see cref="Stop"/> is called or the cancellation token is triggered.
     /// Blocks the calling thread. It may be called again after it returned, including after it stopped
     /// because a window's GPU was declared wedged: such a window stays inert
@@ -332,6 +353,7 @@ public sealed class SdlEventLoop
             foreach (var v in _viewList)
             {
                 if (v.IsGpuWedged || !v.NeedsRedraw || nowTick < v.NextRenderAttemptTick || v.Window.IsMinimizedOrHidden) continue;
+                PaceForCost(v);
                 if (nowStamp >= v.NextFrameDueTimestamp) { anyNeedsRedraw = true; break; }
                 var dueMs = (int)Math.Ceiling((v.NextFrameDueTimestamp - nowStamp) * 1000.0 / Stopwatch.Frequency);
                 waitMs = Math.Clamp(Math.Min(waitMs, dueMs), 1, 16);
@@ -380,7 +402,9 @@ public sealed class SdlEventLoop
                 // for vblank, so a pointer moving over a redraw-on-move surface drew at the mouse's
                 // report rate, hundreds of frames a second, on the GPU the 2 s OS timeout watches.
                 var frameStart = Stopwatch.GetTimestamp();
+                PaceForCost(v);
                 if (frameStart < v.NextFrameDueTimestamp) continue;
+                var processorAtStart = Environment.CpuUsage.TotalTime;
                 v.NeedsRedraw = false;
                 // Committed to a frame: let the app configure it before the pass opens.
                 v.OnBeforeFrame?.Invoke();
@@ -391,6 +415,11 @@ public sealed class SdlEventLoop
                     // less the time a frame takes; 95 percent of the interval, so a frame that is due
                     // on the vblank is not pushed to the next one by a tick of scheduling jitter.
                     v.NextFrameDueTimestamp = frameStart + FrameIntervalTicks(v) * 95 / 100;
+                    // And no sooner than its cost allows, on a software rasteriser (PaceForCost, asked each pass).
+                    v.DisplayFrameDueTimestamp = v.NextFrameDueTimestamp;
+                    v.LastFrameStartTimestamp = frameStart;
+                    v.LastFrameEndTimestamp = Stopwatch.GetTimestamp();
+                    v.ProcessorAtLastFrameStart = processorAtStart;
                     // A frame that ran out of vertex ring dropped some of its draws. The ring grows at
                     // the next BeginFrame, so one more frame paints what this one could not; without
                     // this the hole stays until something else happens to ask for a redraw.

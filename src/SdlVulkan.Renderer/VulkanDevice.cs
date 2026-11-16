@@ -190,6 +190,27 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// device renders at the same sample count.</summary>
     public VkSampleCountFlags MsaaSamples { get; }
 
+    private bool? _isSoftwareRasterizer;
+
+    /// <summary>
+    /// Whether this device rasterises on the processor (<c>VK_PHYSICAL_DEVICE_TYPE_CPU</c>: llvmpipe, SwiftShader): a
+    /// frame's work is then processor time on every core, and what a frame costs is worth pacing by
+    /// (<see cref="FrameCostPacing"/>).
+    /// </summary>
+    public bool IsSoftwareRasterizer
+    {
+        get
+        {
+            if (_isSoftwareRasterizer is not { } known)
+            {
+                InstanceApi.vkGetPhysicalDeviceProperties(PhysicalDevice, out var props);
+                _isSoftwareRasterizer = known = props.deviceType == VkPhysicalDeviceType.Cpu;
+            }
+
+            return known;
+        }
+    }
+
     /// <summary>
     /// The depth format every render pass on this device carries as its depth attachment, chosen once
     /// from what the physical device supports (see <see cref="ChooseDepthFormat"/>). Uniform for the
