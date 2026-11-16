@@ -1,4 +1,3 @@
-#if DEBUG
 using System;
 using DIR.Lib;
 using Shouldly;
@@ -75,4 +74,3 @@ public class InspectorModifierTests
         Should.Throw<ArgumentException>(() => DebugInspector.ResolveInputKey("nope"));
     }
 }
-#endif

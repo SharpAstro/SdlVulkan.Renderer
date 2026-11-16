@@ -1,5 +1,4 @@
-﻿#if DEBUG
-using System.Buffers;
+﻿using System.Buffers;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
@@ -13,7 +12,7 @@ using Layout = DIR.Lib.Layout;
 namespace SdlVulkan.Renderer;
 
 /// <summary>
-/// DEBUG-only live UI debug inspector. Hosts a TCP command server (ephemeral port) plus a UDP
+/// Live UI debug inspector, compiled into every build and INERT unless the process opts in. Hosts a TCP command server (ephemeral port) plus a UDP
 /// multicast discovery responder so a sidecar (the published SdlVulkan.Renderer.Inspector MCP
 /// server) can discover this running app and drive it: read the clickable region tree, capture a
 /// screenshot, inject input, and post named signals.
@@ -26,7 +25,15 @@ namespace SdlVulkan.Renderer;
 /// Enqueueing still calls <see cref="SdlWindowView.RequestRedraw"/> to wake the loop promptly
 /// (latency bounded by the loop's ~16ms wait).
 /// </para>
-/// The entire type is compiled only in DEBUG builds, so no release artifact carries it.
+/// <para>
+/// Opt-in: in a Release build <see cref="Attach(SdlEventLoop, SdlWindowView, DebugInspectorOptions)"/> starts
+/// nothing unless the environment sets <c>DIR_INSPECTOR=1</c> and <c>DIR_INSPECTOR_TOKEN</c> (DIR.Lib's
+/// <see cref="DebugInspectorCore.StartIfOptedIn(IDebugInspectorHost, DebugInspectorDiscovery)"/>); every
+/// client request must then carry the token. With it unset the returned inspector is inert: no socket, no
+/// registry file and no <see cref="SdlEventLoop.OnLoopIteration"/> hook, so frame pacing is untouched.
+/// A Debug build keeps its always-on behaviour unless <c>DIR_INSPECTOR</c> is set, which then applies the
+/// same rules.
+/// </para>
 /// </summary>
 public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugInspectorSteppedHost
 {
@@ -48,6 +55,9 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// <summary>The ephemeral loopback port the command server bound to; 0 before
     /// <see cref="Attach(SdlEventLoop, DebugInspectorOptions)"/>.</summary>
     public int Port => _core?.Port ?? 0;
+
+    /// <summary>True when the command server is running; false for an inert inspector (the process did not opt in).</summary>
+    public bool IsActive => _core is not null;
 
     // ---------------- IDebugInspectorHost: the parts that are actually SDL ----------------
 
@@ -77,16 +87,26 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         $"\"startedAt\":{DebugInspectorCore.Quote(_startedAtUtc)}";
 
     /// <summary>
-    /// Attaches the inspector to the given loop + window view and starts the command server. Chains the
-    /// core's pump onto the loop's <see cref="SdlEventLoop.OnLoopIteration"/>. Call once, under
-    /// <c>#if DEBUG</c>, after the loop's callbacks are wired but before <see cref="SdlEventLoop.Run"/>.
-    /// The returned <see cref="IDisposable"/> stops the server when disposed.
+    /// Attaches the inspector to the given loop + window view and, when the process opted in, starts the
+    /// command server and chains the core's pump onto the loop's <see cref="SdlEventLoop.OnLoopIteration"/>.
+    /// Call once, unconditionally, after the loop's callbacks are wired but before <see cref="SdlEventLoop.Run"/>:
+    /// when the opt-in is absent (or has no token) the result is inert (<see cref="IsActive"/> false) and
+    /// nothing is started or chained. The returned <see cref="IDisposable"/> stops the server when disposed.
     /// </summary>
     public static DebugInspector Attach(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
     {
         var inspector = new DebugInspector(loop, view, opts);
 
-        inspector._core = DebugInspectorCore.Start(inspector, opts.EnableDiscovery);
+        var discovery = opts.EnableDiscovery ? DebugInspectorDiscovery.Registry : DebugInspectorDiscovery.None;
+#if DEBUG
+        // Debug builds stay always-on, as before, unless the run-time opt-in is present (then its rules, token included, apply).
+        inspector._core = Environment.GetEnvironmentVariable(DebugInspectorCore.OptInVariable) is null
+            ? DebugInspectorCore.Start(inspector, discovery)
+            : DebugInspectorCore.StartIfOptedIn(inspector, discovery);
+#else
+        inspector._core = DebugInspectorCore.StartIfOptedIn(inspector, discovery);
+#endif
+        if (inspector._core is null) return inspector; // inert: no hook, frame pacing untouched
 
         // The pump goes on the loop's per-iteration hook (OnLoopIteration), NOT OnPostFrame: it must run
         // every iteration -- including when nothing rendered because the window is minimized -- so commands
@@ -97,7 +117,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         loop.OnLoopIteration = () =>
         {
             prev?.Invoke();
-            inspector._core!.Pump();
+            inspector._core.Pump();
         };
         return inspector;
     }
@@ -217,7 +237,9 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         "restore" => ExecuteWindowState(static w => w.Restore()),
         "validationReport" => ExecuteValidationReport(),
         "frameStats" => ExecuteFrameStats(),
+#if DEBUG
         "gpuFault" => ExecuteGpuFault(p),
+#endif
         "click" => ExecuteClickAt(Coord(p, "x"), Coord(p, "y"), Mods(p), Clicks(p)),
         "clickLabel" => ExecuteClickLabel(RequiredString(p, "label"), Clicks(p)),
         "key" => ExecuteKey(ResolveInputKey(RequiredString(p, "key")), Mods(p)),
@@ -1067,6 +1089,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// <c>lost</c>, <c>clear</c>, or <c>status</c>, the default. Answers with the state after the change,
     /// plus the context's own view of it, so one call both acts and shows what the renderer made of it.
     /// </summary>
+#if DEBUG
     private string ExecuteGpuFault(JsonElement p)
     {
         var context = _view.Renderer.Context;
@@ -1119,6 +1142,8 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
             w.WriteEndObject();
         });
     }
+
+#endif
 
     private static string ExecuteValidationReport() => ToJson(w =>
     {
@@ -1180,4 +1205,3 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         return Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 }
-#endif
