@@ -9,7 +9,7 @@ using SdlVulkan.Renderer.Inspector.Client;
 namespace SdlVulkan.Renderer.Inspector;
 
 /// <summary>
-/// MCP tools that bridge an AI agent to a running Debug-build SDL3+Vulkan app. Discovery resolves
+/// MCP tools that bridge an AI agent to a running SDL3+Vulkan app. Discovery resolves
 /// which instance to talk to; action tools take an optional <c>instance</c> pid (defaulting to the
 /// sole running instance, erroring if ambiguous).
 /// </summary>
@@ -19,7 +19,7 @@ public sealed class InspectorTools
     [McpServerTool, Description("Discover running Debug-build SDL/Vulkan app instances on the local machine and LAN. Returns one line per instance: pid, app, title, address:port.")]
     public static async Task<string> list_instances(InspectorDiscoveryClient discovery, CancellationToken ct = default)
     {
-        const string none = "No debuggable instances found. Is a Debug-build app running with DebugInspector.Attach?";
+        const string none = "No debuggable instances found. Is an app running with DebugInspector.Attach, DIR_INSPECTOR=1 and DIR_INSPECTOR_TOKEN set? A trimmed or NativeAOT publish has no inspector unless it was published with -p:DirInspectorSupport=true.";
         var (all, notes) = await discovery.DiscoverWithNotesAsync(ct);
         if (all.Count == 0 && notes.Count == 0) return none;
         var sb = new StringBuilder();

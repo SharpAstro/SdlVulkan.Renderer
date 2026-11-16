@@ -35,9 +35,10 @@ builder.Services
     .AddMcpServer(options =>
     {
         options.ServerInstructions = """
-            SdlVulkan live UI inspector -- discover and drive running Debug-build SDL3+Vulkan apps
-            built on SdlVulkan.Renderer (e.g. TianWen GUI). The target app must be running in Debug
-            with DebugInspector.Attach (the inspector is compiled out of Release builds entirely).
+            SdlVulkan live UI inspector -- discover and drive running SDL3+Vulkan apps
+            built on SdlVulkan.Renderer (e.g. TianWen GUI). The target app must call DebugInspector.Attach
+            and run with DIR_INSPECTOR=1 and DIR_INSPECTOR_TOKEN set; a trimmed or NativeAOT publish has
+            no inspector unless it was published with -p:DirInspectorSupport=true.
             Tools:
               - list_instances   Discover running instances (local + LAN). Start here.
               - ping             Confirm an instance is alive.
