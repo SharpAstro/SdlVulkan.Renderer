@@ -395,6 +395,12 @@ Backend notes:
 
 ## Debug inspector: screenshot and resize
 
+**A trimmed or NativeAOT publish has no inspector unless it is published with `-p:DirInspectorSupport=true`.**
+`DebugInspector.Attach` follows DIR.Lib's `DIR.Lib.Inspector.IsSupported` feature switch (no second property): a
+`dotnet publish` with `PublishTrimmed` or `PublishAot` turns it off, so `Attach` returns the inert inspector, DIR.Lib prints
+one stderr line when `DIR_INSPECTOR=1` is set, and the verbs are trimmed away. Build, run and test keep the inspector.
+`tools/InspectorAotProbe` measures it (CHANGELOG 7.97).
+
 `DebugInspector` is compiled into Release builds too and is inert unless the process opts in: set `DIR_INSPECTOR=1` and
 `DIR_INSPECTOR_TOKEN=<secret>` (DIR.Lib's contract) and call `DebugInspector.Attach(loop, opts)` unconditionally. With
 the variable unset (or no token) `Attach` returns an inactive inspector: no socket, no registry file, no loop hook.

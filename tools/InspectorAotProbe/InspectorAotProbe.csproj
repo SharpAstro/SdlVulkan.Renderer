@@ -13,7 +13,8 @@
       dotnet publish tools/InspectorAotProbe/InspectorAotProbe.csproj -c Release -r win-x64 -p:DirInspectorSupport=true -p:IlcGenerateMapFile=true -o OUT3
     OUT1 has no Attach call (the baseline), OUT2 has the call with the switch at its publish default (off), OUT3
     keeps the inspector. Compare the .exe sizes and grep the map files (obj/.../native/*.map.xml) for DebugInspector,
-    then run OUT2 and OUT3 with DIR_INSPECTOR=1 DIR_INSPECTOR_TOKEN=x. Measured sizes are in CHANGELOG 7.97.
+    then run OUT2 and OUT3 with DIR_INSPECTOR=1 DIR_INSPECTOR_TOKEN=x. Measured (win-x64, 7.97): OUT1 1,166,336 bytes,
+    OUT2 1,509,888, OUT3 2,867,200; see CHANGELOG 7.97.
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>

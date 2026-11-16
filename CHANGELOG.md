@@ -7,6 +7,30 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.97
+
+**A published app has no debug inspector unless it is published with `-p:DirInspectorSupport=true` (#182).**
+`DebugInspector.Attach` follows DIR.Lib's inspector feature switch (`DebugInspectorCore.IsSupported`, DIR.Lib 11.73, now the
+pin); there is no second property in this repo. With the switch off (the default for a trimmed or NativeAOT publish)
+`Attach` returns the inert inspector, DIR.Lib prints its one stderr line when `DIR_INSPECTOR=1`, and nothing that roots the
+verbs is reachable, so ILC drops them. Build, run and test are unchanged. The inspector client and the MCP sidecar now name
+the publish property as a likely cause when they find no instances.
+
+Measured with `tools/InspectorAotProbe` (win-x64 NativeAOT, no SDL or window, `IlcGenerateMapFile`), no IL2xxx/IL3xxx warning:
+
+| Publish | exe bytes |
+| --- | --- |
+| no `Attach` call (baseline) | 1,166,336 |
+| `Attach`, default (switch off) | 1,509,888 |
+| `Attach`, `-p:DirInspectorSupport=true` | 2,867,200 |
+
+The ilc rsp carries `DIR.Lib.Inspector.IsSupported=false` by default and `=true` with the property. The default map file
+mentions `DebugInspector` 23 times against 589 with the property, and has no verb methods (no `Screenshot`); what remains is
+the `Attach` wrapper, `DebugInspector`, `DebugInspectorOptions` and a closure type, plus DIR.Lib's `StartIfOptedIn` and
+`WarnTrimmed`. Run with `DIR_INSPECTOR=1 DIR_INSPECTOR_TOKEN=x`, the default exe prints `[inspector] DIR_INSPECTOR=1 but the
+inspector was trimmed out of this build: publish with -p:DirInspectorSupport=true` and reports `IsActive=False Port=0`; the
+`=true` exe reports `IsActive=True` on a port.
+
 ## 7.96
 
 **The debug inspector is in Release, behind a run-time opt-in (#179).** `DebugInspector` and `DebugInspectorOptions` are no
