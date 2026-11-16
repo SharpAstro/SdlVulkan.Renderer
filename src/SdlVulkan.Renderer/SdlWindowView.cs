@@ -340,6 +340,13 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     internal long NextFrameDueTimestamp;
     // One display refresh in Stopwatch ticks, read from the window's display; 0 until first measured.
     internal long FrameIntervalTicks;
+    // Pacing by cost (FrameCostPacing), on a software rasteriser: the timestamp the display's interval alone allows
+    // the next frame at, when the last frame began and ended, and the process's processor time as it began. Zero
+    // until a frame was drawn.
+    internal long DisplayFrameDueTimestamp;
+    internal long LastFrameStartTimestamp;
+    internal long LastFrameEndTimestamp;
+    internal TimeSpan ProcessorAtLastFrameStart;
     // When FrameIntervalTicks was last read, so a window dragged to another display is re-read.
     internal long FrameIntervalReadTimestamp;
 
