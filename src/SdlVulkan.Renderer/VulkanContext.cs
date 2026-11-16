@@ -1037,6 +1037,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
             // HDR only: the composite on the scRGB image, from the SDR layer the main pass just finished (and the
             // capture above just read). Nothing on an SDR context runs this.
             if (_hdrActive) RecordHdrComposite(cmd);
+            // A retained frame: what the acquired swapchain image is missing of it, copied across.
+            if (_retainedActive) RecordRetainedCopy(cmd);
             // A layered context's frame reaches its window through a readback, recorded here for the same reason:
             // after all the rendering, in the frame's own command buffer. A frame that died before its render pass
             // has nothing to show, and the window keeps what it had.
@@ -1502,10 +1504,14 @@ public sealed unsafe partial class VulkanContext : IDisposable
             // built, because the formats are per surface (a window on another display). Not asked at all otherwise.
             SurfaceFormatChoice? scRgb = null;
             if (_wantsHdr && ChooseHdrSurfaceFormat() is { IsScRgb: true } choice) scRgb = choice;
+            // A software rasteriser keeps the frame in one image of its own (VulkanContext.Retained.cs), which needs the
+            // swapchain's images to be a copy's destination.
+            var retain = WantsRetainedFrame(caps, hdr: scRgb is not null);
             imgCount = scRgb is { } hdrChoice
                 ? CreateSwapchainImages(caps, extent, hdrChoice.Format, imageCount, hdrChoice.ColorSpace)
-                : CreateSwapchainImages(caps, extent, format, imageCount);
+                : CreateSwapchainImages(caps, extent, format, imageCount, copyDestination: retain);
             if (scRgb is not null) AdoptHdrSwapchain(extent, imgCount);
+            else if (retain) AdoptRetainedFrame(extent, imgCount);
         }
         SwapchainFormat = format;
         SwapchainWidth = extent.width;
@@ -1622,7 +1628,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
     // The swapchain itself and its images, for CreateSwapchain: everything about presenting through the surface.
     // Returns how many images the surface handed out.
     private uint CreateSwapchainImages(in VkSurfaceCapabilitiesKHR caps, VkExtent2D extent, VkFormat format,
-        uint imageCount, VkColorSpaceKHR colorSpace = VkColorSpaceKHR.SrgbNonLinear)
+        uint imageCount, VkColorSpaceKHR colorSpace = VkColorSpaceKHR.SrgbNonLinear, bool copyDestination = false)
     {
         // Prefer Mailbox over Fifo when the driver offers it: Fifo (vsync) can block
         // vkAcquireNextImageKHR for up to a full vblank interval, adding up to ~16 ms of
@@ -1649,6 +1655,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
         }
 
         var imageUsage = VkImageUsageFlags.ColorAttachment;
+        // A retained frame reaches the swapchain's images by a copy; asked only where the surface offers it
+        // (WantsRetainedFrame).
+        if (copyDestination) imageUsage |= VkImageUsageFlags.TransferDst;
         // TransferSrc lets the inspector copy the presented frame out for screenshots
         // (see VulkanContext.SwapchainReadback.cs). Desktop drivers always support it as a swapchain
         // usage, but Android/Mali swapchains often expose ColorAttachment ONLY — and requesting an
@@ -1711,6 +1720,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
             DeviceApi.vkDestroyImageView(iv);
         // HDR only: the SDR layers behind those views, the float views, the composite's framebuffers and descriptors.
         if (_hdrLayerImages.Length != 0) CleanupHdrSwapchain();
+        // A retained frame's image, behind those views too.
+        CleanupRetainedFrame();
         // A layered context's image is its own, where a swapchain's belong to the swapchain, so it goes here.
         CleanupLayeredImage();
 
