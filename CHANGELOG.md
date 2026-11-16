@@ -22,6 +22,11 @@ once unless a capture was requested, so there is no readback or allocation with 
 - DIR.Lib pin: 11.70.* (the minor that carries SharpAstro/DIR.Lib#242), for both `DIR.Lib` and `DIR.Lib.Debug`.
 - The `Inspector*Tests` classes are no longer `#if DEBUG`, so CI's Release run covers them, with new tests for the unset,
   no-token and opted-in cases.
+- New package `SdlVulkan.Renderer.Inspector.Client`: a typed async `InspectorClient` (connect by pid and token, verbs for
+  describe_ui, describe_layout, screenshot, click, drag, move, press_key, type_text, resize, restore, frame_stats,
+  validation_report, render_liveness and signals) and `InspectorException` carrying the server's message. The registry
+  reader, discovery and socket client moved into it from the MCP sidecar, which is now built on it; every request carries
+  the token.
 - The Debug twin package stays, for `GpuFaultInjection` and the diagnostics; it is no longer the only way to get the inspector.
 
 ## 7.95
