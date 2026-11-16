@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
-using SdlVulkan.Renderer.Inspector;
+using SdlVulkan.Renderer.Inspector.Client;
 using Shouldly;
 using Xunit;
 
