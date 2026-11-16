@@ -411,6 +411,26 @@ It answers these window verbs:
   (maximised, its floating size, or minimised), so a layout can be captured at real window sizes. The size is
   clamped to the work area like `resize`, so the reply's width and height are what was actually captured.
 
+### Typed client (`SdlVulkan.Renderer.Inspector.Client`)
+
+The MCP sidecar is built on a library you can use from a test or a tool. It references neither the framework nor
+DIR.Lib. `InspectorClient.ConnectAsync(pid, token)` finds the app in DIR.Lib's per-user registry (pid 0 is the one
+running instance) and sends the token on every request; the token defaults to `DIR_INSPECTOR_TOKEN`. Each verb is a
+typed async method, and a failure the app reports throws `InspectorException` with the verb and the server's own text.
+
+```csharp
+var client = await InspectorClient.ConnectAsync(pid, token);
+await client.ResizeAsync(900, 700);
+await client.ClickAsync(120, 40);
+await client.PressKeyAsync("Enter", "Ctrl");
+var shot = await client.ScreenshotAsync();          // shot.Rgba, shot.Width, shot.Height, shot.Png
+var stats = await client.FrameStatsAsync();         // stats.AvgFrameMs
+var tree = await client.DescribeUiAsync();          // a JsonElement
+```
+
+Also `DescribeLayoutAsync`, `DragAsync`, `MoveAsync`, `TypeTextAsync`, `RestoreAsync`, `ValidationReportAsync`,
+`RenderLivenessAsync` and `SignalsAsync`.
+
 ## Debug twin package (`SdlVulkan.Renderer.Debug`)
 
 The inspector is now in the Release package (see above), so the twin is no longer the only way to get it. What
