@@ -1,9 +1,8 @@
-#if DEBUG
 using Vortice.Vulkan;
 
 namespace SdlVulkan.Renderer;
 
-// DEBUG-only swapchain capture for the live UI debug inspector (see DebugInspector.cs).
+// Swapchain capture for the live UI debug inspector (see DebugInspector.cs).
 //
 // The capture is recorded INTO THE FRAME'S OWN command buffer, after vkCmdEndRenderPass (the image
 // is in PresentSrcKHR, the render pass's finalLayout) and before vkEndCommandBuffer -- while this
@@ -212,4 +211,3 @@ public sealed unsafe partial class VulkanContext
         _presentCaptureCapacity = size;
     }
 }
-#endif

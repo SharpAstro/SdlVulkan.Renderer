@@ -80,14 +80,16 @@ public sealed class SdlEventLoop
             ctx.LastGpuFrameOrdinal, double.IsFinite(gpuMs) ? gpuMs : 0, ctx.DescribeLastGpuSections());
     }
 
-#if DEBUG
-    // Slow-frame diagnostics: a rolling average of real frame time (BeginFrame->EndFrame) plus a
-    // threshold, so ANY stall (atlas evict/grow drain, heavy tessellation, a present hitch) logs one
-    // [rdiag] frame.slow line. Shared across windows — it's only diagnostics.
+    // A rolling average of real frame time (BeginFrame->EndFrame), kept in every build for the inspector's
+    // frameStats (two doubles of arithmetic a frame, no allocation). In DEBUG it also drives the [rdiag]
+    // frame.slow line: a threshold on top of it, so ANY stall (atlas evict/grow drain, heavy tessellation, a
+    // present hitch) logs. Shared across windows.
     private double _frameAvgMs;
-    private const double SlowFrameFloorMs = 40;  // stay quiet below this — normal frames don't log
+    private const double SlowFrameFloorMs = 40;  // stay quiet below this: normal frames don't log
+#if DEBUG
     private const double SlowFrameFactor = 3;    // flag a spike that's >3x the rolling average...
     private const double HardStallMs = 150;      // ...or any outright freeze, regardless of average
+#endif
 
     /// <summary>Rolling average real frame time (ms) — the EWMA that drives the frame.slow log.
     /// Exposed for the DebugInspector's frameStats command so jank can be measured numerically.</summary>
@@ -95,7 +97,6 @@ public sealed class SdlEventLoop
 
     /// <summary>The floor below which frames are considered normal (no slow-frame log).</summary>
     internal static double DebugSlowFrameFloorMs => SlowFrameFloorMs;
-#endif
 
     /// <summary>Multi-window constructor. Add windows with <see cref="AddWindow"/>.</summary>
     public SdlEventLoop() { }
@@ -165,11 +166,9 @@ public sealed class SdlEventLoop
     /// <summary>Number of windows currently registered.</summary>
     public int WindowCount => _viewList.Count;
 
-#if DEBUG
-    /// <summary>DEBUG-only: the single-window primary view, for the debug inspector's input
+    /// <summary>The single-window primary view, for the debug inspector's input
     /// injection + frame capture. Null when built with the multi-window constructor.</summary>
     internal SdlWindowView? DebugPrimaryView => _primary;
-#endif
 
     // --- Loop-level callbacks (process-wide, not per-window) ---
 
@@ -567,12 +566,12 @@ public sealed class SdlEventLoop
                     hooksMs, Stopwatch.GetElapsedTime(beginDone, renderDone).TotalMilliseconds,
                     Stopwatch.GetElapsedTime(renderDone, frameDone).TotalMilliseconds);
 
+            var prevAvg = _frameAvgMs;
+            _frameAvgMs = prevAvg <= 0 ? frameMs : prevAvg * 0.9 + frameMs * 0.1;
 #if DEBUG
             // Flag a frame that's over the floor AND a big spike over the rolling average, or any hard
             // freeze. A steady slow frame never spikes, so it never shows here: SDLVK_FRAME_LOG is
             // what measures one.
-            var prevAvg = _frameAvgMs;
-            _frameAvgMs = prevAvg <= 0 ? frameMs : prevAvg * 0.9 + frameMs * 0.1;
             if (frameMs > SlowFrameFloorMs && (prevAvg <= 0 || frameMs > prevAvg * SlowFrameFactor || frameMs > HardStallMs))
             {
                 var beginMs = Stopwatch.GetElapsedTime(frameStart, beginDone).TotalMilliseconds - hooksMs;

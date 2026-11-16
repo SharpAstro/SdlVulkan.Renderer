@@ -346,14 +346,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
     /// </summary>
     public int CurrentFrame => _currentFrame;
 
-#if DEBUG
     /// <summary>
-    /// DEBUG-only: index into <c>_swapchainImages</c> of the most recently presented frame.
+    /// Index into <c>_swapchainImages</c> of the most recently presented frame.
     /// Stays valid after <see cref="EndFrame"/> (only <see cref="CurrentFrame"/> advances there),
     /// so the inspector's render-thread readback can copy the just-presented image.
     /// </summary>
     internal uint CurrentSwapchainImageIndex => _currentImageIndex;
-#endif
 
     // Per-frame vertex staging buffers (avoids race between in-flight frames)
     private readonly VkBuffer[] _vertexBuffers = new VkBuffer[MaxFramesInFlight];
@@ -928,8 +926,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         // capture's copy rode this fence index, its GPU work is complete — snapshot it now without
         // any extra GPU wait. Done before the reset below so the fence is still in its signaled state.
         ConsumeThumbnailReadback();
-        // Same contract for the DEBUG-only inspector screenshot capture (a partial method, so the
-        // call compiles away in Release along with its implementation file).
+        // Same contract for the inspector screenshot capture (a no-op unless one was requested).
         ConsumePresentCaptureReadback();
 
         // NOTE: the fence is deliberately NOT reset here — see EndFrame, which resets it immediately
@@ -1226,9 +1223,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
         SubmitFrame(_commandBuffers[_currentFrame], endRenderPass: _renderPassBegun);
     }
 
-    // DEBUG-only inspector screenshot capture, implemented in VulkanContext.SwapchainReadback.cs
-    // (a file wrapped in #if DEBUG). Partial methods with no implementation have their calls removed
-    // by the compiler, so a Release build carries neither the code nor the call sites.
+    // Inspector screenshot capture, implemented in VulkanContext.SwapchainReadback.cs. Every hook returns at
+    // once unless a capture was requested, so with the inspector off there is no readback and no allocation.
     partial void RecordPresentCapture(VkCommandBuffer cmd);
     partial void CancelPresentCaptureOnDroppedFrame();
     partial void ConsumePresentCaptureReadback();
@@ -1653,15 +1649,13 @@ public sealed unsafe partial class VulkanContext : IDisposable
         }
 
         var imageUsage = VkImageUsageFlags.ColorAttachment;
-#if DEBUG
-        // TransferSrc lets the DEBUG-only inspector copy the presented frame out for screenshots
+        // TransferSrc lets the inspector copy the presented frame out for screenshots
         // (see VulkanContext.SwapchainReadback.cs). Desktop drivers always support it as a swapchain
         // usage, but Android/Mali swapchains often expose ColorAttachment ONLY — and requesting an
         // unsupported usage fails vkCreateSwapchainKHR (reported as VK_ERROR_SURFACE_LOST_KHR on
         // Android). Only add it when the surface actually advertises it.
         if ((caps.supportedUsageFlags & VkImageUsageFlags.TransferSrc) != 0)
             imageUsage |= VkImageUsageFlags.TransferSrc;
-#endif
 
         var compositeAlpha = ChooseCompositeAlpha(caps.supportedCompositeAlpha, _wantsAlpha);
         AlphaPresentation = _wantsAlpha && compositeAlpha == VkCompositeAlphaFlagsKHR.PreMultiplied

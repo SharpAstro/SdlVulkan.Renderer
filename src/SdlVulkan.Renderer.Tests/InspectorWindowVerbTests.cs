@@ -1,4 +1,3 @@
-#if DEBUG
 using System;
 using Shouldly;
 using Xunit;
@@ -253,4 +252,3 @@ public class InspectorWindowVerbTests
         w.IsMinimized.ShouldBeTrue();
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if DEBUG
 using System;
 using System.Linq;
 using DIR.Lib.Diagnostics;
@@ -74,4 +73,3 @@ public class InspectorHostContractTests
     private static object FormatterServicesStandIn()
         => System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(DebugInspector));
 }
-#endif

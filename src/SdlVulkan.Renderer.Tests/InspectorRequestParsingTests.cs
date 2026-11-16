@@ -1,4 +1,3 @@
-#if DEBUG
 using System;
 using System.Text.Json;
 using Shouldly;
@@ -92,4 +91,3 @@ public class InspectorRequestParsingTests
     public void SignalArgs_AbsentOrBlank_YieldsUndefined_SoTheSignalUsesItsOwnDefaults(string json)
         => DebugInspector.SignalArgs(Json(json)).ValueKind.ShouldBe(JsonValueKind.Undefined);
 }
-#endif

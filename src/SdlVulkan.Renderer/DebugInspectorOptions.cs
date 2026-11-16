@@ -1,4 +1,3 @@
-#if DEBUG
 using System.Text.Json;
 using DIR.Lib;
 using Layout = DIR.Lib.Layout;
@@ -6,7 +5,7 @@ using Layout = DIR.Lib.Layout;
 namespace SdlVulkan.Renderer;
 
 /// <summary>
-/// DEBUG-only configuration for <see cref="DebugInspector"/>. All members are optional; a null
+/// Configuration for <see cref="DebugInspector"/>. All members are optional; a null
 /// delegate means that capability is unavailable to the inspector. The consuming app supplies the
 /// app-specific glue (which regions to surface, an optional state JSON, and the named-signal map)
 /// while the framework owns the transport, threading, and frame capture.
@@ -130,4 +129,3 @@ public static class DebugSignalArgs
                && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
     }
 }
-#endif
