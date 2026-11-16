@@ -18,7 +18,7 @@ The test project (`SdlVulkan.Renderer.Tests`, xunit.v3 + Shouldly) renders throu
 The solution is centered on `SdlVulkan.Renderer`, a .NET 10 library providing a 2D rendering API on top of SDL3 + Vulkan. It targets AOT compatibility and uses `unsafe` code extensively for raw Vulkan interop via Vortice.Vulkan bindings. Alongside it:
 
 - `SdlVulkan.Renderer.WebView` / `SdlVulkan.Renderer.WebView.Native` — optional native-webview-in-window packages (WebView2 on Windows, WebKitGTK on Linux). Shipped separately so core consumers pull no webview dependency. See README "Native WebView".
-- `SdlVulkan.Renderer.Inspector` — a debug-inspector tool/client (pairs with `DebugInspector` in the core lib).
+- `SdlVulkan.Renderer.Inspector` — a debug-inspector tool/client (pairs with `DebugInspector` in the core lib, which is in Release too and inert unless `DIR_INSPECTOR=1` and `DIR_INSPECTOR_TOKEN` are set).
 - `tools/WebViewSmoke` — headless self-test exercised by CI.
 - `tools/HdrProbe`: run by hand, it says, per display, whether this machine can present HDR through SDL3 + Vulkan (exit 0 yes, 2 no); `-- --show` puts scRGB patches on the capable panel (raw Vulkan, clear rectangles: the present path alone), then, when that window closes, a second window drawn through the library (`HdrLibraryPanel.cs`: a float ramp and the BT.2020 primaries through `DrawHdrImage` on an `hdr: true` context; a second phase, not a second window, because the library owns its own SDL lifetime, instance and device), and only the panel can judge them (a screenshot clips at 1.0) (README, "Why Vulkan" and "HDR").
 - `tools/SdrFrameBench`: run by hand or in a before/after, headless (no window, no SDL): a fixed SDR UI scene (rects, round rects, ellipses, strokes, text, images) timed offscreen, printing CPU, `VulkanContext.GpuTiming` and wall ms a frame, mean and p95; exit 2 with no Vulkan device. It references the library through the `RendererProject` build property, so it builds against another source tree (`git archive` the base, pass that tree's `src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj`): that is how issue #165's "no SDR regression" is shown, base and head alternating in one sitting. The numbers of one machine are in CHANGELOG "7.84". The scene uses only API that predates HDR, so it builds on either side.
@@ -52,7 +52,7 @@ workflow's `env:`; nothing ever read them there, and they had grown to 329 of th
 
 `-p:DebugTwin=true` on `dotnet pack src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj -c Debug` packs the Debug build as
 `SdlVulkan.Renderer.Debug`, depending on `DIR.Lib.Debug`, so a plane (which never finds the sibling sources) gets the
-`#if DEBUG` inspector types. CI packs it into `artifacts/debug-twin` and proves it with `tools/debug-twin-check`
+`#if DEBUG` types (`GpuFaultInjection`, the diagnostics; the inspector itself is in Release behind the `DIR_INSPECTOR` opt-in since 7.96, so the twin is no longer the only way to get it). CI packs it into `artifacts/debug-twin` and proves it with `tools/debug-twin-check`
 (a Debug consumer with no ProjectReference, outside `src/`, not in the solution):
 `dotnet build tools/debug-twin-check/DebugTwinCheck.csproj -c Debug` after packing. The upload excludes `obj/`.
 

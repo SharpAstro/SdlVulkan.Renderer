@@ -86,15 +86,15 @@ public class InspectorOptInTests
         loop.OnLoopIteration.ShouldNotBeNull("the pump rides the loop's per-iteration hook");
 
         using var client = new TcpClient();
-        await client.ConnectAsync(IPAddress.Loopback, inspector.Port);
+        await client.ConnectAsync(IPAddress.Loopback, inspector.Port, TestContext.Current.CancellationToken);
         using var stream = client.GetStream();
         using var reader = new StreamReader(stream, Encoding.UTF8);
         using var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
 
         await writer.WriteLineAsync("""{"id":1,"method":"describe"}""");
-        (await reader.ReadLineAsync()).ShouldBe("""{"id":1,"error":"unauthorized"}""");
+        (await reader.ReadLineAsync(TestContext.Current.CancellationToken)).ShouldBe("""{"id":1,"error":"unauthorized"}""");
 
         await writer.WriteLineAsync("""{"id":2,"method":"describe","token":"wrong"}""");
-        (await reader.ReadLineAsync()).ShouldBe("""{"id":2,"error":"unauthorized"}""");
+        (await reader.ReadLineAsync(TestContext.Current.CancellationToken)).ShouldBe("""{"id":2,"error":"unauthorized"}""");
     }
 }

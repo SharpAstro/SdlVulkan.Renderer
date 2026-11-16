@@ -1084,7 +1084,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     });
 
     /// <summary>
-    /// Arms, clears or reads the window's device fault (<see cref="GpuFaultInjection"/>): <c>mode</c> is
+    /// Arms, clears or reads the window's device fault (GpuFaultInjection, DEBUG only): <c>mode</c> is
     /// <c>reject</c> (with an optional positive <c>count</c>; without one, every submit until cleared),
     /// <c>lost</c>, <c>clear</c>, or <c>status</c>, the default. Answers with the state after the change,
     /// plus the context's own view of it, so one call both acts and shows what the renderer made of it.

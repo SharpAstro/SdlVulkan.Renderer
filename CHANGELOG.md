@@ -7,6 +7,23 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.96
+
+**The debug inspector is in Release, behind a run-time opt-in (#179).** `DebugInspector` and `DebugInspectorOptions` are no
+longer `#if DEBUG`, nor are what they need: the frame average behind `frameStats` (two doubles of arithmetic a frame; the
+`frame.slow` log line stays DEBUG), `DebugPrimaryView`, and the swapchain readback behind `screenshot` (every hook returns at
+once unless a capture was requested, so there is no readback or allocation with the inspector off). `GpuFaultInjection` and the
+`gpuFault` verb stay DEBUG.
+
+- `Attach` now starts the core through DIR.Lib's `DebugInspectorCore.StartIfOptedIn`: `DIR_INSPECTOR=1` plus `DIR_INSPECTOR_TOKEN`
+  (every request must carry the token, else `unauthorized`). With the variable unset, or set with no token, it returns an inert
+  inspector (`IsActive` false): no socket, no registry file and no `OnLoopIteration` hook, so frame pacing is untouched.
+  Call it unconditionally, not under `#if DEBUG`. A Debug build stays always-on when `DIR_INSPECTOR` is absent.
+- DIR.Lib pin: 11.70.* (the minor that carries SharpAstro/DIR.Lib#242), for both `DIR.Lib` and `DIR.Lib.Debug`.
+- The `Inspector*Tests` classes are no longer `#if DEBUG`, so CI's Release run covers them, with new tests for the unset,
+  no-token and opted-in cases.
+- The Debug twin package stays, for `GpuFaultInjection` and the diagnostics; it is no longer the only way to get the inspector.
+
 ## 7.95
 
 **Glyph atlases start transparent.** A Vulkan image's contents are undefined until written, and both glyph atlases
