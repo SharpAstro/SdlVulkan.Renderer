@@ -7,7 +7,10 @@ var loop = new SdlEventLoop();
 #if REFS_ONLY
 // Same renderer types the Attach variant names (SdlEventLoop, SdlWindowView), no Attach call: isolates what the types cost.
 var refView = (SdlWindowView)RuntimeHelpers.GetUninitializedObject(typeof(SdlWindowView));
-Console.WriteLine("refs only: " + loop.GetType().Name + " " + refView.GetType().Name);
+// Prints through the same interpolated bool + int the Attach variant uses, so the formatting code is not a difference.
+var refActive = args.Length == 0 && refView is not null;
+var refPort = args.Length;
+Console.WriteLine($"IsActive={refActive} Port={refPort}");
 return 0;
 #elif NO_ATTACH
 Console.WriteLine("attach: not called (" + loop.GetType().Name + ")");
