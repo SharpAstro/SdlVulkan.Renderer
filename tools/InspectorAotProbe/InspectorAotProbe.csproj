@@ -25,6 +25,7 @@
     <IsPackable>false</IsPackable>
     <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
     <DefineConstants Condition="'$(NoAttach)' == 'true'">$(DefineConstants);NO_ATTACH</DefineConstants>
+    <DefineConstants Condition="'$(RefsOnly)' == 'true'">$(DefineConstants);REFS_ONLY</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
