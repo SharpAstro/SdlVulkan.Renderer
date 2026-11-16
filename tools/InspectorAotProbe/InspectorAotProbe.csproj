@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Manual tool (not in CI, not in the solution): proves that a NativeAOT app on the renderer has no debug inspector
+    unless it is published with -p:DirInspectorSupport=true (DIR.Lib's DIR.Lib.Inspector.IsSupported feature switch,
+    which DebugInspector.Attach follows; issue #182). Headless: no SDL, no window, no Vulkan. Sits outside src/, so
+    Central Package Management does not apply; DIR.Lib arrives through the renderer's own PackageReference, and so do
+    its buildTransitive targets that turn the switch off for a trimmed publish.
+
+    Run (Git Bash needs the VS Installer folder on PATH first, or the link step fails MSB3073 on vswhere):
+      dotnet publish tools/InspectorAotProbe/InspectorAotProbe.csproj -c Release -r win-x64 -p:NoAttach=true -p:IlcGenerateMapFile=true -o OUT1
+      dotnet publish tools/InspectorAotProbe/InspectorAotProbe.csproj -c Release -r win-x64 -p:IlcGenerateMapFile=true -o OUT2
+      dotnet publish tools/InspectorAotProbe/InspectorAotProbe.csproj -c Release -r win-x64 -p:DirInspectorSupport=true -p:IlcGenerateMapFile=true -o OUT3
+    OUT1 has no Attach call (the baseline), OUT2 has the call with the switch at its publish default (off), OUT3
+    keeps the inspector. Compare the .exe sizes and grep the map files (obj/.../native/*.map.xml) for DebugInspector,
+    then run OUT2 and OUT3 with DIR_INSPECTOR=1 DIR_INSPECTOR_TOKEN=x. Measured sizes are in CHANGELOG 7.97.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PublishAot>true</PublishAot>
+    <IsPackable>false</IsPackable>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <DefineConstants Condition="'$(NoAttach)' == 'true'">$(DefineConstants);NO_ATTACH</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SdlVulkan.Renderer\SdlVulkan.Renderer.csproj" />
+  </ItemGroup>
+
+</Project>
