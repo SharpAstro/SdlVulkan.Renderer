@@ -94,7 +94,27 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// nothing is started or chained. The returned <see cref="IDisposable"/> stops the server when disposed.
     /// </summary>
     public static DebugInspector Attach(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
+        => Attach(loop, view, opts, DebugInspectorCore.IsSupported, Console.Error);
+
+    /// <summary>
+    /// The decision behind <see cref="Attach(SdlEventLoop, SdlWindowView, DebugInspectorOptions)"/>, with DIR.Lib's
+    /// feature switch and stderr passed in (the test seam; the public overload passes <see cref="DebugInspectorCore.IsSupported"/>
+    /// directly so ILC sees the constant). With the switch off nothing here starts or hands the inspector to the host
+    /// code, even in a Debug build, so ILC can trim the verbs; DIR_INSPECTOR=1 gets one stderr line saying why.
+    /// </summary>
+    internal static DebugInspector Attach(
+        SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts, bool supported, TextWriter stderr)
     {
+        if (!supported)
+        {
+            if (Environment.GetEnvironmentVariable(DebugInspectorCore.OptInVariable) == "1")
+            {
+                stderr.WriteLine($"[inspector] {DebugInspectorCore.OptInVariable}=1 but the inspector was trimmed out of this build: publish with -p:DirInspectorSupport=true");
+                stderr.Flush();
+            }
+            return new DebugInspector(loop, view, opts); // inert: _core stays null
+        }
+
         var inspector = new DebugInspector(loop, view, opts);
 
         var discovery = opts.EnableDiscovery ? DebugInspectorDiscovery.Registry : DebugInspectorDiscovery.None;

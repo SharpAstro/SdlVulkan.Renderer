@@ -81,7 +81,7 @@ public sealed class InspectorClient
     public static InspectorInstance Resolve(IReadOnlyList<InspectorInstance> all, int pid)
     {
         if (all.Count == 0)
-            throw new InspectorException("connect", "No inspectable instances found. Is an app running with DIR_INSPECTOR=1 and DIR_INSPECTOR_TOKEN set?");
+            throw new InspectorException("connect", "No inspectable instances found. Is an app running with DIR_INSPECTOR=1 and DIR_INSPECTOR_TOKEN set? A trimmed or NativeAOT publish has no inspector unless it was published with -p:DirInspectorSupport=true.");
         if (pid != 0)
         {
             return all.FirstOrDefault(i => i.Pid == pid)
