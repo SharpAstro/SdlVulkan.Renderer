@@ -395,8 +395,12 @@ Backend notes:
 
 ## Debug inspector: screenshot and resize
 
-The `#if DEBUG` `DebugInspector` (client: `SdlVulkan.Renderer.Inspector`, which also has a `selftest` mode) answers
-these window verbs:
+`DebugInspector` is compiled into Release builds too and is inert unless the process opts in: set `DIR_INSPECTOR=1` and
+`DIR_INSPECTOR_TOKEN=<secret>` (DIR.Lib's contract) and call `DebugInspector.Attach(loop, opts)` unconditionally. With
+the variable unset (or no token) `Attach` returns an inactive inspector: no socket, no registry file, no loop hook.
+Every client request must carry the token. A Debug build stays always-on when `DIR_INSPECTOR` is absent. The
+`gpuFault` verb stays Debug only. The client is `SdlVulkan.Renderer.Inspector`, which also has a `selftest` mode.
+It answers these window verbs:
 
 - `screenshot` un-minimises a minimised window itself, waits for the first presented frame and captures, and the
   reply says it did so. `reminimize: true` puts the window back minimised afterwards. If no frame is presented
@@ -409,8 +413,9 @@ these window verbs:
 
 ## Debug twin package (`SdlVulkan.Renderer.Debug`)
 
-The in-process `DebugInspector` is `#if DEBUG`, and a published `SdlVulkan.Renderer` is built Release, so a
-Debug build of a consumer that restored the package has no inspector. `SdlVulkan.Renderer.Debug` is the same
+The inspector is now in the Release package (see above), so the twin is no longer the only way to get it. What
+only a Debug build has is the other `#if DEBUG` code: `GpuFaultInjection` and the `gpuFault` verb, the slow-frame
+log and the `[rdiag]` diagnostics. `SdlVulkan.Renderer.Debug` is the same
 library packed from a Debug build at the same version; it depends on `DIR.Lib.Debug` rather than `DIR.Lib`.
 Switch by configuration:
 

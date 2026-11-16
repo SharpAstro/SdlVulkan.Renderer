@@ -16,7 +16,7 @@
     <IsAotCompatible>true</IsAotCompatible>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageID>SdlVulkan.Renderer</PackageID>
-    <Description>SDL3 + Vulkan rendering backend for DIR.Lib's Renderer&lt;TSurface&gt;: window, device and swapchain lifecycle, pre-baked SPIR-V pipelines, bitmap and MSDF glyph atlases, and a surfaceless offscreen path for headless rendering and tests. Desktop and Android, AOT compatible.</Description>
+    <Description>SDL3 + Vulkan rendering backend for DIR.Lib's Renderer&lt;TSurface&gt;: window, device and swapchain lifecycle, pre-baked SPIR-V pipelines, bitmap and MSDF glyph atlases, and a surfaceless offscreen path for headless rendering and tests. Desktop and Android, AOT compatible. Includes an opt-in debug inspector (DIR_INSPECTOR=1 plus DIR_INSPECTOR_TOKEN), inert otherwise.</Description>
     <PackageTags>sdl3 vulkan rendering gpu spirv msdf text aot cross-platform</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -29,14 +29,14 @@
   <!--
     Opt-in Debug twin (-p:DebugTwin=true): the same library packed from a Debug build as SdlVulkan.Renderer.Debug,
     at the same version as SdlVulkan.Renderer, depending on DIR.Lib.Debug rather than DIR.Lib. A published
-    SdlVulkan.Renderer is built Release, so every #if DEBUG type in it (DebugInspector, DebugInspectorOptions,
-    GpuFaultInjection) is absent and a Debug consumer cannot compile against it. A consumer switches with a
+    SdlVulkan.Renderer is built Release, so every #if DEBUG type in it (GpuFaultInjection and the
+    diagnostics; the DebugInspector is in Release since 7.96) is absent and a Debug consumer cannot compile against it. A consumer switches with a
     Configuration-conditioned PackageReference: SdlVulkan.Renderer when not Debug, SdlVulkan.Renderer.Debug when
     Debug. Visual Studio needs a restore after switching configuration.
   -->
   <PropertyGroup Condition="'$(DebugTwin)' == 'true'">
     <PackageID>SdlVulkan.Renderer.Debug</PackageID>
-    <Description>The Debug build of SdlVulkan.Renderer, for Debug consumers that need the debug inspector and the #if DEBUG types (DebugInspector, DebugInspectorOptions, GpuFaultInjection), which the Release SdlVulkan.Renderer package does not contain. Same version as SdlVulkan.Renderer. Reference SdlVulkan.Renderer when the configuration is not Debug and SdlVulkan.Renderer.Debug when it is, with a Configuration-conditioned PackageReference; Visual Studio needs a restore after switching configuration.</Description>
+    <Description>The Debug build of SdlVulkan.Renderer, for Debug consumers that need the #if DEBUG types (GpuFaultInjection and the diagnostics), which the Release SdlVulkan.Renderer package does not contain. The DebugInspector itself is in the Release package too, inert unless DIR_INSPECTOR=1 and DIR_INSPECTOR_TOKEN are set. Same version as SdlVulkan.Renderer. Reference SdlVulkan.Renderer when the configuration is not Debug and SdlVulkan.Renderer.Debug when it is, with a Configuration-conditioned PackageReference; Visual Studio needs a restore after switching configuration.</Description>
   </PropertyGroup>
   <Target Name="RequireDebugForTwin" BeforeTargets="Pack;GenerateNuspec;CoreCompile" Condition="'$(DebugTwin)' == 'true' AND '$(Configuration)' != 'Debug'">
     <Error Text="DebugTwin=true packs SdlVulkan.Renderer.Debug and must be built with -c Debug (Configuration is '$(Configuration)')." />
