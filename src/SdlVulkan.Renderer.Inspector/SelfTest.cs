@@ -2,6 +2,8 @@ using System.IO.Compression;
 using System.Text.Json;
 using SharpAstro.Png;
 
+using SdlVulkan.Renderer.Inspector.Client;
+
 namespace SdlVulkan.Renderer.Inspector;
 
 /// <summary>

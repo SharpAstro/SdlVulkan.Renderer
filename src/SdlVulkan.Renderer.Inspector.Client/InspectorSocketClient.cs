@@ -4,7 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 
-namespace SdlVulkan.Renderer.Inspector;
+namespace SdlVulkan.Renderer.Inspector.Client;
 
 /// <summary>Render-thread liveness verdict from <see cref="InspectorSocketClient.ProbeRenderAsync"/>.</summary>
 public enum RenderLiveness
@@ -28,6 +28,25 @@ public readonly record struct RenderProbeResult(RenderLiveness Status, double Rt
 public sealed class InspectorSocketClient
 {
     private int _nextId;
+    private readonly string? _token;
+
+    /// <summary>A client presenting the token in <c>DIR_INSPECTOR_TOKEN</c> (none when unset).</summary>
+    public InspectorSocketClient() : this(null)
+    {
+    }
+
+    /// <summary>A client presenting <paramref name="token"/> on every request; null takes <c>DIR_INSPECTOR_TOKEN</c>.</summary>
+    public InspectorSocketClient(string? token)
+    {
+        var t = token ?? Environment.GetEnvironmentVariable("DIR_INSPECTOR_TOKEN");
+        _token = string.IsNullOrEmpty(t) ? null : t;
+    }
+
+    /// <summary>The request line, <c>{id,method,token?,params}</c>. The token is a top-level string, as the server reads it.</summary>
+    internal string BuildRequest(int id, string method, string? paramsJson)
+        => $"{{\"id\":{id},\"method\":{Json.Quote(method)}"
+            + (_token is null ? "" : $",\"token\":{Json.Quote(_token)}")
+            + $",\"params\":{paramsJson ?? "{}"}}}";
 
     /// <summary>
     /// Connects to <paramref name="target"/>, sends <c>{id,method,params}</c>, reads one response
@@ -46,16 +65,19 @@ public sealed class InspectorSocketClient
         using var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
 
         var id = Interlocked.Increment(ref _nextId);
-        var request = $"{{\"id\":{id},\"method\":{Json.Quote(method)},\"params\":{paramsJson ?? "{}"}}}";
-        await writer.WriteLineAsync(request.AsMemory(), ct);
+        await writer.WriteLineAsync(BuildRequest(id, method, paramsJson).AsMemory(), ct);
 
         var responseLine = await reader.ReadLineAsync(ct)
-            ?? throw new InvalidOperationException($"instance {target.App} (pid {target.Pid}) closed the connection with no response");
+            ?? throw new InspectorException(method,
+                $"instance {target.App} (pid {target.Pid}) closed the connection with no response");
 
         using var doc = JsonDocument.Parse(responseLine);
         var root = doc.RootElement;
         if (root.TryGetProperty("error", out var err))
-            throw new InvalidOperationException($"inspector error: {err.GetString()}");
+        {
+            var message = err.ValueKind == JsonValueKind.String ? err.GetString() ?? "" : err.GetRawText();
+            throw new InspectorException(method, message, unauthorized: message.Contains("unauthorized", StringComparison.OrdinalIgnoreCase));
+        }
         return root.GetProperty("result").Clone();
     }
 
@@ -103,7 +125,7 @@ public sealed class InspectorSocketClient
         {
             using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             readCts.CancelAfter(budget);
-            await writer.WriteLineAsync($"{{\"id\":{id},\"method\":\"ping\"}}".AsMemory(), readCts.Token);
+            await writer.WriteLineAsync(BuildRequest(id, "ping", null).AsMemory(), readCts.Token);
             var line = await reader.ReadLineAsync(readCts.Token);
             sw.Stop();
 

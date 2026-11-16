@@ -2,7 +2,7 @@ using System.Net;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using SdlVulkan.Renderer.Inspector;
+using SdlVulkan.Renderer.Inspector.Client;
 
 // Stdio MCP server bridging an AI agent to running Debug-build SDL3+Vulkan apps. Spawned by the
 // MCP client (e.g. Claude Code) as a child process via `dnx SdlVulkan.Renderer.Inspector --yes`.

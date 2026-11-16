@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
-namespace SdlVulkan.Renderer.Inspector;
+namespace SdlVulkan.Renderer.Inspector.Client;
 
 /// <summary>
 /// JSON writing by hand, for requests going out to an app's inspector.

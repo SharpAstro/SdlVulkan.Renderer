@@ -4,7 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 
-namespace SdlVulkan.Renderer.Inspector;
+namespace SdlVulkan.Renderer.Inspector.Client;
 
 /// <summary>A discovered debuggable instance (one running Debug-build app).</summary>
 /// <param name="Address">Where the instance was found: <c>127.0.0.1</c> for a registry entry, otherwise where the

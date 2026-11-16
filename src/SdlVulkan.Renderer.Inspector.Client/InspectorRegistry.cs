@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 
-namespace SdlVulkan.Renderer.Inspector;
+namespace SdlVulkan.Renderer.Inspector.Client;
 
 /// <summary>
 /// Reads DIR.Lib's per-user inspector registry: one <c>&lt;pid&gt;-&lt;tcpPort&gt;.json</c> descriptor per running

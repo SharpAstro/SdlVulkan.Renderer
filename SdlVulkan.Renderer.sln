@@ -15,6 +15,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SdlVulkan.Renderer.WebView.
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SdlVulkan.Renderer.Inspector", "src\SdlVulkan.Renderer.Inspector\SdlVulkan.Renderer.Inspector.csproj", "{2500E72C-ABE1-41B3-8F2B-A174515D964D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SdlVulkan.Renderer.Inspector.Client", "src\SdlVulkan.Renderer.Inspector.Client\SdlVulkan.Renderer.Inspector.Client.csproj", "{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -85,6 +87,18 @@ Global
 		{2500E72C-ABE1-41B3-8F2B-A174515D964D}.Release|x64.Build.0 = Release|Any CPU
 		{2500E72C-ABE1-41B3-8F2B-A174515D964D}.Release|x86.ActiveCfg = Release|Any CPU
 		{2500E72C-ABE1-41B3-8F2B-A174515D964D}.Release|x86.Build.0 = Release|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Debug|x64.Build.0 = Debug|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Debug|x86.Build.0 = Debug|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Release|x64.ActiveCfg = Release|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Release|x64.Build.0 = Release|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Release|x86.ActiveCfg = Release|Any CPU
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -94,5 +108,6 @@ Global
 		{FE445B5C-7C46-4A55-9412-ADBA6A773F5E} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{622E961C-AEFD-404D-8743-FE1D189D3E1D} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{2500E72C-ABE1-41B3-8F2B-A174515D964D} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{ADFA69E8-CE11-4ABE-B8DA-F34E1691439D} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

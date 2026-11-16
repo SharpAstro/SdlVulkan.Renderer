@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Typed client for an inspected SdlVulkan.Renderer app (DebugInspector, opt-in at run time through
+    DIR_INSPECTOR=1 and DIR_INSPECTOR_TOKEN). Like the MCP sidecar it references neither the framework
+    nor DIR.Lib: it speaks the newline-delimited JSON protocol and reads DIR.Lib's per-user registry by
+    its spec. The sidecar is built on it. No reflective serialiser: trimming and AOT safe.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsAotCompatible>true</IsAotCompatible>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <PackageId>SdlVulkan.Renderer.Inspector.Client</PackageId>
+    <Description>Typed async client for the live-UI inspector of apps built on SdlVulkan.Renderer: connect by pid and token, then describe the UI, click, type, resize and take screenshots from a test or a tool.</Description>
+    <PackageTags>sdl;vulkan;debugging;inspector;ui;testing</PackageTags>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/SharpAstro/SdlVulkan.Renderer.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SharpAstro.Png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>SdlVulkan.Renderer.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>SdlVulkan.Renderer.Inspector</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>
