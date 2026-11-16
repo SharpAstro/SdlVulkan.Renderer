@@ -52,6 +52,19 @@ public sealed unsafe partial class VulkanContext
     }
 
     /// <summary>
+    /// Disarms a request no frame has picked up yet and drops any finished snapshot, so an abandoned
+    /// capture (timeout, a minimized window that never presented) cannot ride a later frame and answer a
+    /// later request with a stale picture. A copy already recorded into a frame in flight still lands
+    /// harmlessly and is replaced by the next request. Render thread only.
+    /// </summary>
+    internal void CancelPresentCapture()
+    {
+        AssertFrameThread(nameof(CancelPresentCapture));
+        _presentCaptureRequested = false;
+        _presentCaptureReadyRgba = null;
+    }
+
+    /// <summary>
     /// Hands over the finished capture (RGBA, top-to-bottom rows) and clears the ready state.
     /// Returns false while no capture has completed.
     /// </summary>

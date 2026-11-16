@@ -67,14 +67,17 @@ public class InspectorWindowVerbTests
         }
 
         public void RequestRedraw() { }
-        public void RequestCapture() { Captures++; }
+        public void RequestCapture() { Captures++; Armed = true; }
+        public void CancelCapture() { Cancels++; Armed = false; _captureReady = false; }
+        public bool Armed;
+        public int Cancels;
 
         /// <summary>The loop's side: one iteration, which presents a frame if the window is showing.</summary>
         public void RunFrame()
         {
             if (IsMinimized || (Restores > 0 && !PresentOnRestore)) return;
             FramesPresented++;
-            if (Captures > 0) { _captureReady = true; CaptureSize = SizePixels; }
+            if (Armed) { _captureReady = true; CaptureSize = SizePixels; }
         }
 
         public bool TryTakeCapture(out byte[] rgba, out uint width, out uint height)
@@ -85,6 +88,7 @@ public class InspectorWindowVerbTests
             rgba = new byte[4 * width * height];
             var ready = _captureReady;
             _captureReady = false;
+            if (ready) Armed = false;
             return ready;
         }
     }
@@ -146,6 +150,87 @@ public class InspectorWindowVerbTests
         reply.ShouldNotContain("\"base64\"");
         (Environment.TickCount64 - started).ShouldBeLessThan(2000);
         w.Captures.ShouldBe(0);
+    }
+
+    /// <summary>A clock the test steps by hand: no wall time in the budget checks.</summary>
+    private sealed class FakeClock
+    {
+        public long Ms;
+        public long Now() => Ms;
+    }
+
+    /// <summary>One loop iteration per 100 ms of fake time.</summary>
+    private static string? DriveClocked(DebugInspector.ScreenshotOperation op, FakeWindow w, FakeClock c, int maxSteps)
+    {
+        for (var i = 0; i < maxSteps; i++)
+        {
+            c.Ms += 100;
+            w.RunFrame();
+            var reply = op.Advance();
+            if (reply is not null) return reply;
+        }
+        return null;
+    }
+
+    [Fact]
+    public void AWindowMinimisedAfterTheCaptureWasArmedFailsClearlyAndDisarmsIt()
+    {
+        var w = new FakeWindow();
+        var c = new FakeClock();
+        var op = new DebugInspector.ScreenshotOperation(w, false, TimeSpan.FromSeconds(2), nowMs: c.Now);
+        w.Armed.ShouldBeTrue();
+        w.Minimize(); // before any frame carried the capture
+
+        var reply = DriveClocked(op, w, c, maxSteps: 100);
+
+        reply.ShouldNotBeNull();
+        reply.ShouldContain("minimized");
+        reply.ShouldNotContain("\"base64\"");
+        c.Ms.ShouldBeLessThanOrEqualTo(2500);
+        w.Armed.ShouldBeFalse("a request left armed would ride the next presented frame");
+    }
+
+    [Fact]
+    public void ASecondScreenshotAfterAMinimisedOneStartsCleanly()
+    {
+        var w = new FakeWindow();
+        var c = new FakeClock();
+        var first = new DebugInspector.ScreenshotOperation(w, false, TimeSpan.FromSeconds(2), nowMs: c.Now);
+        w.Minimize();
+        DriveClocked(first, w, c, 100).ShouldNotBeNull();
+
+        w.Restore();
+        var second = new DebugInspector.ScreenshotOperation(w, false, TimeSpan.FromSeconds(2), nowMs: c.Now);
+        var reply = DriveClocked(second, w, c, 20);
+
+        reply.ShouldNotBeNull();
+        reply.ShouldContain("\"base64\"");
+    }
+
+    [Fact]
+    public void AMinimisedWindowThatNeverRestoresFailsSayingMinimized()
+    {
+        var w = new FakeWindow { IsMinimized = true, PresentOnRestore = false };
+        var c = new FakeClock();
+        var op = new DebugInspector.ScreenshotOperation(w, false, TimeSpan.FromSeconds(1), nowMs: c.Now);
+        w.IsMinimized = true; // the restore did not take
+
+        var reply = DriveClocked(op, w, c, 100);
+
+        reply.ShouldNotBeNull();
+        reply.ShouldContain("minimized");
+    }
+
+    [Fact]
+    public void DisposeDisarmsAnAbandonedCapture()
+    {
+        var w = new FakeWindow();
+        var op = new DebugInspector.ScreenshotOperation(w, false, TimeSpan.FromSeconds(5));
+        w.Armed.ShouldBeTrue();
+
+        ((IDisposable)op).Dispose();
+
+        w.Armed.ShouldBeFalse();
     }
 
     [Fact]

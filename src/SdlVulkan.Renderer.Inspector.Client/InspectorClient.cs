@@ -70,23 +70,26 @@ public sealed class InspectorClient
         ct.ThrowIfCancellationRequested();
         var all = InspectorRegistry.Read(registryDirectory)
             .Where(i => InspectorDiscoveryClient.IsSdl(i.Kind)).ToList();
+        return Task.FromResult(new InspectorClient(Resolve(all, pid), token));
+    }
+
+    /// <summary>
+    /// The one place a pid (0 = "the only one") is resolved against the running instances, shared by this
+    /// client and the MCP sidecar. None, an unknown pid, or several with pid 0 throw an
+    /// <see cref="InspectorException"/> that says what was found and, for several, asks for a pid.
+    /// </summary>
+    public static InspectorInstance Resolve(IReadOnlyList<InspectorInstance> all, int pid)
+    {
         if (all.Count == 0)
             throw new InspectorException("connect", "No inspectable instances found. Is an app running with DIR_INSPECTOR=1 and DIR_INSPECTOR_TOKEN set?");
-        InspectorInstance target;
         if (pid != 0)
         {
-            target = all.FirstOrDefault(i => i.Pid == pid)
+            return all.FirstOrDefault(i => i.Pid == pid)
                 ?? throw new InspectorException("connect", $"No instance with pid {pid}. Found: {Summarize(all)}");
         }
-        else if (all.Count == 1)
-        {
-            target = all[0];
-        }
-        else
-        {
-            throw new InspectorException("connect", $"Multiple instances running; pass a pid. Found: {Summarize(all)}");
-        }
-        return Task.FromResult(new InspectorClient(target, token));
+        if (all.Count == 1) return all[0];
+        throw new InspectorException("connect",
+            $"{all.Count} inspected apps are running and instance 0 does not say which: pass a pid. Found: {Summarize(all)}");
     }
 
     private static string Summarize(IReadOnlyList<InspectorInstance> all)

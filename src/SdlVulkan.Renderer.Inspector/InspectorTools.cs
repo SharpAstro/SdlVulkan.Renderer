@@ -451,19 +451,38 @@ public sealed class InspectorTools
     private static string MissingArg(string tool, string parameter, string expected)
         => $"error: {tool} requires a '{parameter}' argument. {expected}";
 
+    // One resolution for the client and the sidecar: InspectorClient.Resolve. Its InspectorException (none,
+    // unknown pid, several with pid 0) reaches the caller as the server's own text through InspectorErrorFilter.
     private static async Task<InspectorInstance> ResolveAsync(InspectorDiscoveryClient discovery, int pid, CancellationToken ct)
-    {
-        var all = await discovery.DiscoverAsync(ct);
-        if (all.Count == 0)
-            throw new InvalidOperationException("No debuggable instances found. Is a Debug-build app running with DebugInspector.Attach?");
-        if (pid != 0)
-            return all.FirstOrDefault(i => i.Pid == pid)
-                ?? throw new InvalidOperationException($"No instance with pid {pid}. Found: {Summarize(all)}");
-        if (all.Count == 1)
-            return all[0];
-        throw new InvalidOperationException($"Multiple instances running; pass instance=<pid>. Found: {Summarize(all)}");
-    }
+        => InspectorClient.Resolve(await discovery.DiscoverAsync(ct), pid);
+}
 
-    private static string Summarize(IReadOnlyList<InspectorInstance> all)
-        => string.Join(", ", all.Select(i => $"{i.App}(pid {i.Pid})"));
+/// <summary>
+/// The SDK replaces an ordinary exception from a tool with "An error occurred invoking '&lt;tool&gt;'." and keeps
+/// the text only for an <see cref="McpException"/>. This ONE call-tool filter (registered once in Program) turns
+/// the failures a tool can meet into an error result carrying the real message, so no tool needs its own
+/// try/catch and the agent sees why (e.g. "'screenshot' is already in progress", "pass a pid").
+/// </summary>
+public static class InspectorErrorFilter
+{
+    public static McpRequestFilter<CallToolRequestParams, CallToolResult> Create()
+        => next => async (context, ct) =>
+        {
+            try
+            {
+                return await next(context, ct);
+            }
+            catch (Exception ex) when (ex is InspectorException or System.IO.IOException
+                or System.Net.Sockets.SocketException or TimeoutException)
+            {
+                return Failure(ex);
+            }
+        };
+
+    /// <summary>The error result for <paramref name="ex"/>: the server's own message, flagged as an error.</summary>
+    public static CallToolResult Failure(Exception ex) => new()
+    {
+        IsError = true,
+        Content = [new TextContentBlock { Text = ex.Message }],
+    };
 }

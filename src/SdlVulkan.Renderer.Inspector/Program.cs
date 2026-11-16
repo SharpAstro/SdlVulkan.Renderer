@@ -53,6 +53,7 @@ builder.Services
             """;
     })
     .WithStdioServerTransport()
+    .WithRequestFilters(filters => filters.AddCallToolFilter(InspectorErrorFilter.Create()))
     .WithTools<InspectorTools>();
 
 await builder.Build().RunAsync();
