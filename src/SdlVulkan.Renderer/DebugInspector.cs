@@ -41,7 +41,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     private readonly DebugInspectorOptions _opts;
     private readonly SdlWindowView _view;
     private readonly SdlEventLoop _loop; // for frame-timing readback (frameStats)
-    private readonly string _startedAtUtc;
+    private string _startedAtUtc = ""; // set only on the active path: formatting it roots DateTime/culture code a trimmed publish must not keep
     private DebugInspectorCore? _core;
 
     private DebugInspector(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
@@ -49,7 +49,6 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         _opts = opts;
         _view = view;
         _loop = loop;
-        _startedAtUtc = DateTimeOffset.UtcNow.ToString("o");
     }
 
     /// <summary>The ephemeral loopback port the command server bound to; 0 before
@@ -115,7 +114,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
             return new DebugInspector(loop, view, opts); // inert: _core stays null
         }
 
-        var inspector = new DebugInspector(loop, view, opts);
+        var inspector = new DebugInspector(loop, view, opts) { _startedAtUtc = DateTimeOffset.UtcNow.ToString("o") };
 
         var discovery = opts.EnableDiscovery ? DebugInspectorDiscovery.Registry : DebugInspectorDiscovery.None;
 #if DEBUG
