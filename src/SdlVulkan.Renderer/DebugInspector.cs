@@ -93,7 +93,12 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// nothing is started or chained. The returned <see cref="IDisposable"/> stops the server when disposed.
     /// </summary>
     public static DebugInspector Attach(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
-        => Attach(loop, view, opts, DebugInspectorCore.IsSupported, Console.Error);
+    {
+        // Branch on the property itself, so ILC's feature-switch substitution makes the active half unreachable.
+        // A bool passed down as a parameter is not propagated, and the whole active half stayed rooted.
+        if (DebugInspectorCore.IsSupported) return AttachSupported(loop, view, opts);
+        return AttachUnsupported(loop, view, opts, Console.Error);
+    }
 
     /// <summary>
     /// The decision behind <see cref="Attach(SdlEventLoop, SdlWindowView, DebugInspectorOptions)"/>, with DIR.Lib's
@@ -103,17 +108,21 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// </summary>
     internal static DebugInspector Attach(
         SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts, bool supported, TextWriter stderr)
-    {
-        if (!supported)
-        {
-            if (Environment.GetEnvironmentVariable(DebugInspectorCore.OptInVariable) == "1")
-            {
-                stderr.WriteLine($"[inspector] {DebugInspectorCore.OptInVariable}=1 but the inspector was trimmed out of this build: publish with -p:DirInspectorSupport=true");
-                stderr.Flush();
-            }
-            return new DebugInspector(loop, view, opts); // inert: _core stays null
-        }
+        => supported ? AttachSupported(loop, view, opts) : AttachUnsupported(loop, view, opts, stderr);
 
+    private static DebugInspector AttachUnsupported(
+        SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts, TextWriter stderr)
+    {
+        if (Environment.GetEnvironmentVariable(DebugInspectorCore.OptInVariable) == "1")
+        {
+            stderr.WriteLine($"[inspector] {DebugInspectorCore.OptInVariable}=1 but the inspector was trimmed out of this build: publish with -p:DirInspectorSupport=true");
+            stderr.Flush();
+        }
+        return new DebugInspector(loop, view, opts); // inert: _core stays null
+    }
+
+    private static DebugInspector AttachSupported(SdlEventLoop loop, SdlWindowView view, DebugInspectorOptions opts)
+    {
         var inspector = new DebugInspector(loop, view, opts) { _startedAtUtc = DateTimeOffset.UtcNow.ToString("o") };
 
         var discovery = opts.EnableDiscovery ? DebugInspectorDiscovery.Registry : DebugInspectorDiscovery.None;
