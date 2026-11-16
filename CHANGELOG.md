@@ -27,6 +27,11 @@ once unless a capture was requested, so there is no readback or allocation with 
   validation_report, render_liveness and signals) and `InspectorException` carrying the server's message. The registry
   reader, discovery and socket client moved into it from the MCP sidecar, which is now built on it; every request carries
   the token.
+- Inspector traps fixed: a `screenshot` on a window minimized after the request now fails within the present budget saying the
+  window is minimized, and the operation disarms its capture request on completion, timeout and dispose (it is `IDisposable`),
+  so the next screenshot is not refused as already in progress. Instance 0 with several apps throws `InspectorException`
+  listing app and pid and asking for one (`InspectorClient.Resolve`, shared by the client and the sidecar). The sidecar's
+  tools pass the real error text through one call-tool filter instead of the SDK's "An error occurred invoking".
 - The Debug twin package stays, for `GpuFaultInjection` and the diagnostics; it is no longer the only way to get the inspector.
 
 ## 7.95

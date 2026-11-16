@@ -450,6 +450,8 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
         void RequestRedraw();
         /// <summary>Marks the next presented frame to capture itself.</summary>
         void RequestCapture();
+        /// <summary>Disarms a capture request no frame has taken, and drops a finished unconsumed snapshot.</summary>
+        void CancelCapture();
         bool TryTakeCapture(out byte[] rgba, out uint width, out uint height);
     }
 
@@ -485,6 +487,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
             => view.Window.TryGetUsableSizeInPixels(out width, out height);
         public void RequestRedraw() => view.RequestRedraw();
         public void RequestCapture() => view.Renderer.Context.RequestPresentCapture();
+        public void CancelCapture() => view.Renderer.Context.CancelPresentCapture();
         public bool TryTakeCapture(out byte[] rgba, out uint width, out uint height)
             => view.Renderer.Context.TryTakePresentCapture(out rgba, out width, out height);
     }
@@ -601,32 +604,39 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
     /// <para>With a size, the window is resized first (see <see cref="ResizeCore"/>), captured at that size,
     /// then put back as it was: maximised again, or its floating size and position.</para>
     /// </summary>
-    internal sealed class ScreenshotOperation : IDebugInspectorOperation
+    internal sealed class ScreenshotOperation : IDebugInspectorOperation, IDisposable
     {
         internal static readonly TimeSpan DefaultPresentBudget = TimeSpan.FromSeconds(5);
         internal const string NoPresentError = "the window presented no frame: is the display off?";
+        internal const string MinimizedError = "the window is minimized and did not restore: no frame can be captured";
 
         private readonly IInspectorWindow _window;
         private readonly bool _reminimize;
         private readonly TimeSpan _presentBudget;
         private readonly bool _unminimised;
         private readonly long _baselineFrames;
-        private readonly long _startTick = Environment.TickCount64;
+        private readonly Func<long> _nowMs;
+        private readonly long _startTick;
         private readonly (int W, int H)? _size;
         private ResizeCore? _resize;
         private bool _captureRequested;
+        private bool _finished;
+        private long _lastFrames, _lastProgressTick;
         private bool _wasMaximized;
         private (int Width, int Height) _oldSize;
         private (int X, int Y) _oldPos;
 
         internal ScreenshotOperation(IInspectorWindow window, bool reminimize, TimeSpan presentBudget,
-            int? width = null, int? height = null)
+            int? width = null, int? height = null, Func<long>? nowMs = null)
         {
+            _nowMs = nowMs ?? (() => Environment.TickCount64);
+            _startTick = _nowMs();
             _window = window;
             _reminimize = reminimize;
             _presentBudget = presentBudget;
             _size = width is { } w && height is { } h ? (w, h) : null;
-            _baselineFrames = window.FramesPresented;
+            _baselineFrames = _lastFrames = window.FramesPresented;
+            _lastProgressTick = _startTick;
             if (window.IsMinimized)
             {
                 _unminimised = true;
@@ -683,6 +693,10 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
             var reply = Step();
             if (reply is not null)
             {
+                _finished = true;
+                // The slot is free once a reply is given; so must the context be: a request still armed
+                // would ride whatever frame presents next and answer a later screenshot with a stale one.
+                _window.CancelCapture();
                 PutBack();
                 if (_unminimised && _reminimize)
                 {
@@ -691,6 +705,23 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
             }
             return reply;
         }
+
+        /// <summary>The core disposes an operation that hit its deadline or whose client gave up.</summary>
+        public void Dispose()
+        {
+            if (_finished) return;
+            _finished = true;
+            _window.CancelCapture();
+            PutBack();
+        }
+
+        private void MarkProgress()
+        {
+            _lastFrames = _window.FramesPresented;
+            _lastProgressTick = _nowMs();
+        }
+
+        private string NoFrameError() => _window.IsMinimized ? MinimizedError : NoPresentError;
 
         private string? Step()
         {
@@ -713,11 +744,12 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
                     {
                         _window.RequestCapture();
                         _captureRequested = true;
+                        MarkProgress();
                     }
                 }
-                else if (Environment.TickCount64 - _startTick >= _presentBudget.TotalMilliseconds)
+                else if (_nowMs() - _startTick >= _presentBudget.TotalMilliseconds)
                 {
-                    return Error(NoPresentError);
+                    return Error(NoFrameError());
                 }
 
                 _window.RequestRedraw();
@@ -731,6 +763,7 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
                 if (r.Length > 0) return Error(r);
                 _window.RequestCapture();
                 _captureRequested = true;
+                MarkProgress();
                 _window.RequestRedraw();
                 return null;
             }
@@ -745,6 +778,20 @@ public sealed class DebugInspector : IDisposable, IDebugInspectorHost, IDebugIns
                 // Structured error rather than more waiting: never queue work behind a fence that is
                 // not signalling. The caller can retry once the GPU recovers.
                 return Error("screenshot unavailable: GPU stalled");
+            }
+
+            // The window may have been minimized (or hidden) after the request: no frame ever carries it,
+            // and waiting out the whole timeout would hold the slot against every later screenshot.
+            var frames = _window.FramesPresented;
+            var now = _nowMs();
+            if (frames > _lastFrames)
+            {
+                _lastFrames = frames;
+                _lastProgressTick = now;
+            }
+            else if (now - _lastProgressTick >= _presentBudget.TotalMilliseconds)
+            {
+                return Error(NoFrameError());
             }
 
             _window.RequestRedraw(); // keep frames coming until the capture frame's fence is waited

@@ -405,6 +405,9 @@ It answers these window verbs:
 - `screenshot` un-minimises a minimised window itself, waits for the first presented frame and captures, and the
   reply says it did so. `reminimize: true` puts the window back minimised afterwards. If no frame is presented
   within a short budget it fails at once with "the window presented no frame: is the display off?".
+  A window minimised (or hidden) after the capture was requested fails within the same budget, saying the window is
+  minimized, and the capture request is disarmed on completion, timeout and dispose, so a later `screenshot` is not
+  refused as already in progress and no stale capture rides a later frame.
 - `resize` takes `width` and `height` in window pixels, un-maximises if needed, sets the client size clamped to the
   display work area, and answers once the next frame at that size has been laid out.
 - `screenshot` with optional `width` and `height` resizes, captures at that size and puts the window back as it was
@@ -417,6 +420,9 @@ The MCP sidecar is built on a library you can use from a test or a tool. It refe
 DIR.Lib. `InspectorClient.ConnectAsync(pid, token)` finds the app in DIR.Lib's per-user registry (pid 0 is the one
 running instance) and sends the token on every request; the token defaults to `DIR_INSPECTOR_TOKEN`. Each verb is a
 typed async method, and a failure the app reports throws `InspectorException` with the verb and the server's own text.
+With pid 0 and several inspected apps running it throws `InspectorException` naming how many and each app and pid, and
+asking for a pid (`InspectorClient.Resolve`, shared with the MCP sidecar). The sidecar turns every such failure into an
+MCP error whose text is the server's message, not "An error occurred invoking ...".
 
 ```csharp
 var client = await InspectorClient.ConnectAsync(pid, token);
