@@ -11,10 +11,14 @@
       dotnet publish tools/InspectorAotProbe/InspectorAotProbe.csproj -c Release -r win-x64 -p:NoAttach=true -p:IlcGenerateMapFile=true -o OUT1
       dotnet publish tools/InspectorAotProbe/InspectorAotProbe.csproj -c Release -r win-x64 -p:IlcGenerateMapFile=true -o OUT2
       dotnet publish tools/InspectorAotProbe/InspectorAotProbe.csproj -c Release -r win-x64 -p:DirInspectorSupport=true -p:IlcGenerateMapFile=true -o OUT3
+      dotnet publish tools/InspectorAotProbe/InspectorAotProbe.csproj -c Release -r win-x64 -p:RefsOnly=true -p:IlcGenerateMapFile=true -o OUT4
     OUT1 has no Attach call (the baseline), OUT2 has the call with the switch at its publish default (off), OUT3
-    keeps the inspector. Compare the .exe sizes and grep the map files (obj/.../native/*.map.xml) for DebugInspector,
-    then run OUT2 and OUT3 with DIR_INSPECTOR=1 DIR_INSPECTOR_TOKEN=x. Measured (win-x64, 7.97): OUT1 1,166,336 bytes,
-    OUT2 1,509,888, OUT3 2,867,200; see CHANGELOG 7.97.
+    keeps the inspector, OUT4 names the same renderer types as OUT2 (SdlEventLoop, SdlWindowView) and prints the same
+    line but does not call Attach: OUT2 minus OUT4 is what Attach itself costs. Compare the .exe sizes and grep the map
+    files (obj/.../native/*.map.xml) for DebugInspector, then run OUT2 and OUT3 with DIR_INSPECTOR=1
+    DIR_INSPECTOR_TOKEN=x. Measured (win-x64, 7.97): OUT1 1,166,336 bytes, OUT4 1,199,616, OUT2 1,202,176, OUT3
+    2,865,664; see CHANGELOG 7.97. Diff two map files by their MethodCode entries per name, not by name alone (a
+    GCInfo entry shares its method's name).
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>

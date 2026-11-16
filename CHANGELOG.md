@@ -21,8 +21,17 @@ Measured with `tools/InspectorAotProbe` (win-x64 NativeAOT, no SDL or window, `I
 | Publish | exe bytes |
 | --- | --- |
 | no `Attach` call (baseline) | 1,166,336 |
-| `Attach`, default (switch off) | 1,509,888 |
-| `Attach`, `-p:DirInspectorSupport=true` | 2,867,200 |
+| same renderer types (`SdlEventLoop`, `SdlWindowView`), no `Attach` call | 1,199,616 |
+| `Attach`, default (switch off) | 1,202,176 |
+| `Attach`, `-p:DirInspectorSupport=true` | 2,865,664 |
+
+The first measurement of the switch-off row was 1,509,888, 343,552 bytes over the baseline. 33,280 of that is the renderer's own
+types (the third row, `SdlWindowView` and what it pulls in), not the inspector. The other 310,272 was `Attach` itself: its
+shared overload took the switch as a `bool` parameter, which ILC does not propagate, so the active half stayed rooted, and
+with it the start-time `DateTimeOffset.UtcNow.ToString("o")` (DateTime and culture formatting, calendars, `TimeZoneInfo`,
+`Enum` formatting: about 170 KB of method code and the metadata behind it, found by diffing the two map files). `Attach` now
+branches on `DebugInspectorCore.IsSupported` itself, into a supported and an unsupported half, and the start time is formatted
+on the active path only. The switch-off row is now 2,560 bytes over the third row.
 
 The ilc rsp carries `DIR.Lib.Inspector.IsSupported=false` by default and `=true` with the property. The default map file
 mentions `DebugInspector` 23 times against 589 with the property, and has no verb methods (no `Screenshot`); what remains is
