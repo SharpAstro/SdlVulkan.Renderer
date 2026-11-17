@@ -7,6 +7,19 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.99
+
+**Built against DIR.Lib 11.79 (was 11.73).** No renderer code change; a lockstep release so a consumer holding this and
+Console.Lib or WebGl.Renderer restores one DIR.Lib by intent. Every crossed minor is additive (DIR.Lib's newest breaking
+release is 11.25). What they bring that this package's users will see:
+
+- **11.79: a menu panel's Back and close controls are reachable by keyboard.** Tab moves to them and Shift+Tab back;
+  arrows stay on the rows; Enter on a focused control runs it. `PixelMenuWidget` passes the key's modifiers through, so a
+  host routing keys through `InputRouter` (or calling `HandleInput`) needs no change. The focused control is lit in the
+  selected row's colours and the row selection hides while it is.
+- 11.74: the menu panel's Back and close controls themselves. 11.78: SVG icons (`IconBaker`, `VectorIcon`).
+  11.75 and 11.77: prototypes. 11.76: the inspector's publish-only trim fix.
+
 ## 7.98
 
 **A software rasteriser's cost is bounded, and a full repaint is drawn once (#181).** Two changes for a device that
