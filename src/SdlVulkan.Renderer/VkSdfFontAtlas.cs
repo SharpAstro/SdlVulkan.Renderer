@@ -162,6 +162,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
 
     public void OnPagesWillBeDestroyed()
     {
+        _ctx.TryWaitPriorFramesIdle("sdf atlas evict-all"); // WIP-OLD-BEHAVIOUR
         // Evict-all teardown used to wait here for prior in-flight frames. That wait is bounded and
         // can skip or time out, and then the pages were destroyed under a frame that still sampled
         // them. Nothing is waited for now: OnPageDestroyed hands each page's GPU half to
@@ -189,7 +190,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
         // Evict-all runs at a frame start, but the previous frame may still be in flight and sampling
         // this page's image through its descriptor set, and copying from its upload slots.
         PagesDeferredDestroyed++;
-        _ctx.DeferDestroy(() => DestroyPage(res));
+        DestroyPage(res); // WIP-OLD-BEHAVIOUR
     }
 
     // ---- flush: record dirty-region uploads into the frame command buffer ------------------------
