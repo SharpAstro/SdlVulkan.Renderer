@@ -230,8 +230,10 @@ public sealed class BitmapAtlasGrowValidationTests
                 grewFrames++;
                 Assert.NotEqual(setBefore, renderer.FontAtlas.DescriptorSet);
                 Assert.NotEqual(ctx.DescriptorSet, renderer.FontAtlas.DescriptorSet);
-                Assert.True(ctx.PendingDeferredDestroys > 0,
-                    "the grow queued nothing for deferred destroy: the old image, view, memory and set were destroyed at once");
+                // Not a count of the queue: an upload slot buffer replaced in the same frame also queues,
+                // which would hide a destroy-at-once Grow. Ask for the grow's own old set instead.
+                Assert.True(ctx.IsDeferredDestroyPending(setBefore),
+                    "the grown atlas's old descriptor set is not in the deferred queue: the grow destroyed its old image, view, memory and set at once");
             }
 
             ctx.WaitOffscreenFrameComplete();
