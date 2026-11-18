@@ -288,7 +288,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     public void Dispose()
     {
         // Caller (VkRenderer.Dispose) ensures the GPU is idle before disposing the renderer.
-        // Core Dispose fires OnPageDestroyed for every page (descending) — freeing the GPU half at once.
+        // Core Dispose fires OnPageDestroyed for every page (descending), freeing the GPU half at once.
         _disposing = true;
         _core.Dispose();
         _ctx.DeviceApi.vkDestroySampler(_sampler);

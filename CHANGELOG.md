@@ -28,7 +28,19 @@ recorded in a frame stays provisional until the frame reaches the queue.
   new set inside `RecordUploads`, old objects through `DeferDestroy`, a dropped frame's growths and batches recorded
   again, staging recycled after the frame retires), so no change to the store. `SlugGlyphStoreValidationTests` grows
   it from 512 words under batch and persistent draws with earlier glyphs in the same frames, and, in Debug, drops a
-  frame that recorded a growth, asserting zero validation errors and lit pixels after.
+  frame that recorded a growth, asserting zero validation errors and lit pixels after. Per operation, where the GPU
+  change happens and whether a draw-path call reaches it:
+  - *Miss:* `TryGet` only queues the encode on a worker and the caller skips the glyph; no GPU call. Draw path: yes, and
+    that is all it does.
+  - *Upload drain:* finished encodes are written to staging with one copy and a transfer-to-shader barrier in
+    `RecordUploads`, before `BeginRenderPass`. Draw path: no.
+  - *Growth:* a full buffer doubles by copy into a new buffer in `RecordUploads`; the old buffer and memory go through
+    `DeferDestroy`. Draw path: no.
+  - *New descriptor set:* made together with the grown buffer in `RecordUploads`, the old set through `DeferDestroy`;
+    the store never writes the device's shared set. Draw path: no.
+  - *Dropped-frame re-record:* `OnFrameDropped` treats the frame's drains and growths as provisional and records them
+    again in the next frame (the buffers a growth copied from are held until then). Draw path: no.
+  - *Staging recycle:* staging is reused only after the frame that recorded its copy has retired. Draw path: no.
 
 ## 7.104
 

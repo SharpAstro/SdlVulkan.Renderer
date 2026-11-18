@@ -366,12 +366,11 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         if (_cursorY + glyphHeight > _atlasHeight)
         {
-            // Full. Growing swaps the image and rewrites the context's descriptor set, which must not
-            // happen while a frame records: a glyph drawn earlier in this frame has already bound that
-            // set and recorded a draw sampling the old view, and the pool has no update-after-bind, so
-            // the swap would invalidate the command buffer (tianwen#621; on the Adreno and on Windows'
-            // ICDs the frame's submit fails). A miss reaches here from the draw calls, mid-recording, so
-            // the grow waits for the next BeginFrame, like the eviction below. The glyph is not cached,
+            // Full. A miss reaches here from the draw calls, mid-recording, and a glyph drawn earlier in
+            // this frame has already bound the current image and set, so a draw-path call must not
+            // replace them (tianwen#621; on the Adreno and on Windows' ICDs the frame's submit fails).
+            // It only records the need: the grow (or the eviction below) runs at the next BeginFrame,
+            // where Grow allocates a new image and set and defers the old ones. The glyph is not cached,
             // so the next frame rasterizes it into the grown atlas; this frame it only moves the pen.
             if (_atlasWidth < MaxAtlasSize || _atlasHeight < MaxAtlasSize)
             {
@@ -447,10 +446,14 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         // The old image, view, memory and set may be bound by a frame still in flight (or by one recorded
         // and not yet submitted), so they go through DeferDestroy rather than a wait: it retires them once
         // every such frame has. The new image gets its own set, so no set a command buffer holds is rewritten.
-        _ctx.DeferDestroy(_imageView, _image, _imageMemory, descriptorSet: _descriptorSet);
+        var oldView = _imageView;
+        var oldImage = _image;
+        var oldMemory = _imageMemory;
+        var oldSet = _descriptorSet;
         CreateImage(_atlasWidth, _atlasHeight);
         _descriptorSet = _ctx.AllocateDescriptorSet();
         _ctx.UpdateDescriptorSet(_descriptorSet, _imageView, _sampler);
+        _ctx.DeferDestroy(oldView, oldImage, oldMemory, descriptorSet: oldSet);
 
         _dirtyX0 = 0; _dirtyY0 = 0;
         _dirtyX1 = _atlasWidth; _dirtyY1 = _atlasHeight;
@@ -529,11 +532,10 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         if (_uploadBuffers[slot] != VkBuffer.Null)
         {
-            // Slot grows only when the dirty region is larger than the previous peak
-            // for this slot — by the time we're here BeginFrame has waited on the
-            // matching fence, so destroying the previous allocation is safe.
-            api.vkDestroyBuffer(_uploadBuffers[slot]);
-            api.vkFreeMemory(_uploadMemories[slot]);
+            // The slot grows only when the dirty region is larger than the previous peak for this slot.
+            // The old buffer is retired through DeferDestroy like every other object an atlas replaces,
+            // rather than relying on the slot's fence having been waited.
+            _ctx.DeferDestroy(memory: _uploadMemories[slot], buffer: _uploadBuffers[slot]);
         }
 
         VkBufferCreateInfo bufCI = new()
