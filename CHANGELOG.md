@@ -7,6 +7,29 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.105
+
+**One rule for when a glyph atlas may touch the GPU, written down and checked under validation for all three (#193).**
+The atlases kept breaking the same way: a draw-path call (a miss, reached from the draw methods between `BeginFrame`
+and `EndFrame`) destroyed, recreated or rewrote a GPU object that the current or an in-flight frame still used. CLAUDE.md
+now states the rule ("When an atlas may touch the GPU"): such a call only records the need; the change happens at the
+next `BeginFrame`, in the frame's pre-pass upload with its barriers, or through `DeferDestroy`, never by a fence wait
+and never to the frame being recorded; an atlas owns its descriptor sets and never writes the device's shared one; work
+recorded in a frame stays provisional until the frame reaches the queue.
+
+- **Bitmap atlas (`VkFontAtlas`, colour and emoji glyphs):** a grow now allocates a new image, view and descriptor set
+  of its own and defers the old ones, where it used to rewrite the shared `ctx.DescriptorSet`. Covered by
+  `BitmapAtlasGrowValidationTests`, including eviction and a dropped frame.
+- **MTSDF atlas (`VkSdfFontAtlas`, base and large tier):** evict-all handed each page to a bounded wait and then
+  destroyed it, which can skip or time out under a frame that still samples the page; each page's GPU half now goes
+  through `DeferDestroy`. Page append and the per-page LRU recycle were already safe. `SdfAtlasValidationTests` floods
+  append, recycle, evict-all and a dropped frame with zero validation errors asserted.
+- **Slug glyph store (`VkSlugGlyphStore`):** audited and already obeys the rule (growth by copy into a new buffer and a
+  new set inside `RecordUploads`, old objects through `DeferDestroy`, a dropped frame's growths and batches recorded
+  again, staging recycled after the frame retires), so no change to the store. `SlugGlyphStoreValidationTests` grows
+  it from 512 words under batch and persistent draws with earlier glyphs in the same frames, and, in Debug, drops a
+  frame that recorded a growth, asserting zero validation errors and lit pixels after.
+
 ## 7.104
 
 **`ShutdownDrain` lives here (#140), and a wrong-thread dispose names itself.** `ShutdownDrain.PumpUntilComplete(loop,
