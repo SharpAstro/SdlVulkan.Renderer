@@ -7,7 +7,7 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
-## 7.101
+## 7.103
 
 **The bitmap glyph atlas no longer grows under a recording frame** (tianwen#621). `VkFontAtlas`, which holds the colour
 and emoji glyphs, grew by destroying its image and view and rewriting the context's descriptor set, and it did that
@@ -19,6 +19,25 @@ machine's GPU the frame's submit failed with `VK_ERROR_INITIALIZATION_FAILED`. T
 that one frame (it still moves the pen) and drawn from the grown atlas on the next. `IsDirty` reports a pending grow,
 so an idle host still draws that frame. `BitmapAtlasGrowValidationTests` floods the atlas under a recording frame on a
 validated context and asserts no validation error and a grown atlas; it failed on the old code.
+
+## 7.102
+
+**The event loop dispatches SDL's window mouse-leave (#173).** `SdlEventLoop` now turns `WindowMouseLeave` into DIR.Lib's
+`InputEvent.PointerLeft` on the view's `OnPointerInput`, so an app is told the pointer left its window (a hover
+clears, a tooltip drops). It arms a redraw only when the handler returns true. The legacy per-event callbacks get
+nothing new, and the inspector's synthetic pointer never sends or flushes a leave.
+
+A leave with a button held is withheld. The view tracks the buttons held on the real SDL path; a leave with none
+held is sent at once, a leave with one held is sent after the release that clears the last button (after that
+`MouseUp`), and a `WindowMouseEnter` first drops it. So a drag that runs off the window keeps its moves and release,
+as DIR.Lib's `PointerLeft` remark requires.
+
+Why the rule holds whatever SDL does (SDL release-3.4.0, read as source): `SDL_UpdateMouseCapture` captures the mouse
+while a button is down (`SDL_mouse.c` 1443, hint `SDL_HINT_MOUSE_AUTO_CAPTURE`, default on), and the Windows
+`WM_MOUSELEAVE` is ignored while captured (`SDL_windowsevents.c` 1512), so there the leave arrives only after the
+release. X11's `LeaveNotify` (`SDL_x11events.c` 1495) skips `NotifyGrab`/`NotifyUngrab` but otherwise calls
+`SDL_SetMouseFocus(NULL)` (`SDL_mouse.c` 571, sends the leave at 593) with no capture check, so a leave can arrive
+mid-drag there, or anywhere auto capture is off.
 
 ## 7.100
 

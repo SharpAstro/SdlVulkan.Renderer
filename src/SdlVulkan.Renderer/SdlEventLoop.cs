@@ -998,6 +998,7 @@ public sealed class SdlEventLoop
                 if (TryView(evt.Button.WindowID, out var vmd))
                 {
                     var dScale = PointerScale(vmd);
+                    vmd.NoteButtonDown(evt.Button.Button);
                     vmd.DispatchPointerDown(evt.Button.Button, evt.Button.X * dScale, evt.Button.Y * dScale, evt.Button.Clicks, GetModState().ToInputModifier);
                     vmd.NeedsRedraw = true;
                 }
@@ -1010,10 +1011,28 @@ public sealed class SdlEventLoop
                     // Action<byte> signature drops them. The synthesized event keeps them, so
                     // position-dependent release logic (tap-vs-drag slop, tap-to-select) just works.
                     var uScale = PointerScale(vmu);
-                    if (vmu.DispatchPointerUp(evt.Button.Button, evt.Button.X * uScale, evt.Button.Y * uScale))
+                    vmu.NoteButtonUp(evt.Button.Button);
+                    var upConsumed = vmu.DispatchPointerUp(evt.Button.Button, evt.Button.X * uScale, evt.Button.Y * uScale);
+                    // A leave withheld while a button was held goes out after the release that clears the last one.
+                    var leaveConsumed = vmu.FlushPendingLeave();
+                    if (upConsumed || leaveConsumed)
                     {
                         vmu.NeedsRedraw = true;
                     }
+                }
+                break;
+
+            case EventType.WindowMouseLeave:
+                if (TryView(evt.Window.WindowID, out var vml) && vml.DispatchPointerLeave())
+                {
+                    vml.NeedsRedraw = true;
+                }
+                break;
+
+            case EventType.WindowMouseEnter:
+                if (TryView(evt.Window.WindowID, out var vme))
+                {
+                    vme.NoteMouseEnter();
                 }
                 break;
 

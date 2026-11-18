@@ -134,6 +134,65 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
         return consumed;
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Pointer leave. Only the real SDL path calls these (the DebugInspector goes through the
+    // DispatchPointer* methods above, which never touch this state), so a synthetic click can
+    // neither flush nor create a leave.
+    //
+    // What SDL does with a button held (release-3.4.0, read as source; no window is reachable here):
+    //  - src/events/SDL_mouse.c:1443 SDL_UpdateMouseCapture captures the mouse while any button is
+    //    down (hint SDL_HINT_MOUSE_AUTO_CAPTURE, default true, :213), so moves and the release keep
+    //    arriving after the pointer leaves the window.
+    //  - src/video/windows/SDL_windowsevents.c:1512 WM_MOUSELEAVE is ignored while
+    //    SDL_WINDOW_MOUSE_CAPTURE is set, so no leave is sent during a captured drag on Windows;
+    //    SDL_SetMouseFocus(NULL) (SDL_mouse.c:571, sends WINDOW_MOUSE_LEAVE at :593) runs at once the
+    //    capture ends.
+    //  - src/video/x11/SDL_x11events.c:1513 LeaveNotify with NotifyGrab/NotifyUngrab sends no leave,
+    //    but a plain LeaveNotify does, and SDL_SetMouseFocus(NULL) is not capture-gated there.
+    // So the leave arrives with a button held on X11 (and when auto capture is off or capture is
+    // unsupported), but not on Windows. The rule below holds either way: a leave with a button held
+    // is withheld until the last button is released; an enter first drops it.
+    // ---------------------------------------------------------------------------------------------
+
+    private uint _heldButtons;
+    private bool _leavePending;
+
+    private static uint ButtonBit(byte sdlButton) => 1u << (sdlButton & 31);
+
+    /// <summary>Record a real button press (SDL path only).</summary>
+    internal void NoteButtonDown(byte sdlButton) => _heldButtons |= ButtonBit(sdlButton);
+
+    /// <summary>Record a real button release (SDL path only).</summary>
+    internal void NoteButtonUp(byte sdlButton) => _heldButtons &= ~ButtonBit(sdlButton);
+
+    /// <summary>SDL's window mouse-leave. With no button held it goes out now as
+    /// <see cref="InputEvent.PointerLeft"/> and returns what the handler returned; with one held it is withheld
+    /// (see <see cref="FlushPendingLeave"/>) and returns false.</summary>
+    internal bool DispatchPointerLeave()
+    {
+        if (_heldButtons != 0)
+        {
+            _leavePending = true;
+            return false;
+        }
+        _leavePending = false;
+        return OnPointerInput?.Invoke(new InputEvent.PointerLeft()) == true;
+    }
+
+    /// <summary>SDL's window mouse-enter: the pointer came back, so a withheld leave is dropped.</summary>
+    internal void NoteMouseEnter() => _leavePending = false;
+
+    /// <summary>After a release: sends the withheld leave once the last button is up. Returns what the handler returned.</summary>
+    internal bool FlushPendingLeave()
+    {
+        if (!_leavePending || _heldButtons != 0)
+        {
+            return false;
+        }
+        _leavePending = false;
+        return OnPointerInput?.Invoke(new InputEvent.PointerLeft()) == true;
+    }
+
     /// <summary>SDL button byte (1=left, 2=middle, 3=right, 4=X1/back, 5=X2/forward) to the DIR.Lib button enum;
     /// a button SDL numbers beyond those maps to Left.</summary>
     internal static MouseButton ToMouseButton(byte sdlButton) => sdlButton switch
