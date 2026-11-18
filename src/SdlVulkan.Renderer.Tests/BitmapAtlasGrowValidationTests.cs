@@ -201,12 +201,16 @@ public sealed class BitmapAtlasGrowValidationTests
         // the atlas's descriptor set and records a draw that samples the current image.
         renderer.OnPreFlush = () => renderer.PreWarmGlyph(font, Size, first);
 
+        var grewFrames = 0;
         for (var frame = 0; frame < 4; frame++)
         {
+            var widthBefore = renderer.FontAtlas!.AtlasWidth;
+            var setBefore = renderer.FontAtlas.DescriptorSet;
             if (!renderer.BeginOffscreenFrame(black))
             {
                 continue;
             }
+            var pendingBefore = ctx.PendingDeferredDestroys;
 
             renderer.DrawSingleGlyph(font, Size, first, -1, white, 8f, 8f);
             // Then misses on every new glyph in the same frame, until the atlas is full and must grow.
@@ -216,8 +220,24 @@ public sealed class BitmapAtlasGrowValidationTests
             }
 
             renderer.EndOffscreenFrame();
+
+            if (renderer.FontAtlas.AtlasWidth != widthBefore)
+            {
+                // The pins that tell a grow that defers from one that destroys at once, which the validation
+                // layer cannot (every frame is waited below, so none is in flight when the atlas grows):
+                // the grown atlas has a set of its own, never the context's shared one, and the old image,
+                // view, memory and set sit in the deferred queue until their frames retire (read here,
+                // before the next frame's start retires them).
+                grewFrames++;
+                Assert.NotEqual(setBefore, renderer.FontAtlas.DescriptorSet);
+                Assert.NotEqual(ctx.DescriptorSet, renderer.FontAtlas.DescriptorSet);
+                Assert.True(ctx.PendingDeferredDestroys > pendingBefore,
+                    $"the grow queued nothing for deferred destroy ({pendingBefore} before, {ctx.PendingDeferredDestroys} after)");
+            }
+
             ctx.WaitOffscreenFrameComplete();
         }
+        Assert.True(grewFrames > 0, "no frame grew the atlas");
 
         // The sequence only means something if the atlas did grow under it.
         Assert.True(renderer.FontAtlas!.AtlasWidth > 512, $"the flood never grew the atlas (width {renderer.FontAtlas.AtlasWidth})");
