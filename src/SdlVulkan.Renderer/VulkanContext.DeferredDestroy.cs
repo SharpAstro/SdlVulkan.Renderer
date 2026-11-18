@@ -69,6 +69,7 @@ public sealed unsafe partial class VulkanContext
     /// <summary>
     /// True when <paramref name="descriptorSet"/> is waiting in the deferred queue. Lets a test pin that a
     /// specific replaced object was deferred, not merely that something was. Render thread only.
+    /// The scan is linear in the queue length, which is fine for a test-only internal query (review note, #195).
     /// </summary>
     internal bool IsDeferredDestroyPending(VkDescriptorSet descriptorSet)
     {
