@@ -31,7 +31,10 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     private readonly Dictionary<GlyphKey, GlyphInfo> _glyphs = new();
     private readonly HashSet<GlyphKey> _unflushedGlyphs = new();
 
-    private const int MaxAtlasSize = 4096;
+    // The cap a grow stops at, after which a full atlas evicts. Settable for tests, which cannot afford the
+    // thousands of glyphs it takes to reach 4096.
+    internal const int DefaultMaxAtlasSize = 4096;
+    internal int MaxAtlasSize { get; set; }
 
     private int _atlasWidth;
     private int _atlasHeight;
@@ -60,6 +63,9 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     private VkDeviceMemory _imageMemory;
     private VkImageView _imageView;
     private VkSampler _sampler;
+    // This atlas's OWN descriptor set. ctx.DescriptorSet is the device's one set, shared by every window's atlas
+    // on a shared device, so an atlas must never write it; a grow gets a new set and defers the old one.
+    private VkDescriptorSet _descriptorSet;
 
     // Per-frame upload ring — one slot per frame-in-flight. See VkSdfFontAtlas
     // for the rationale: the previous single-slot design needed a
@@ -75,11 +81,14 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     public VkImageView ImageView => _imageView;
     public VkSampler Sampler => _sampler;
+    /// <summary>The set that binds the atlas image and sampler; changes when the atlas grows (at a frame start).</summary>
+    public VkDescriptorSet DescriptorSet => _descriptorSet;
 
     public VkFontAtlas(VulkanContext ctx, ManagedFontRasterizer? rasterizer = null,
-        int initialWidth = 512, int initialHeight = 512)
+        int initialWidth = 512, int initialHeight = 512, int maxAtlasSize = DefaultMaxAtlasSize)
     {
         _ctx = ctx;
+        MaxAtlasSize = maxAtlasSize;
         // Use the injected (process-owned, shared) rasterizer when given; otherwise create and own one.
         Rasterizer = rasterizer ?? new ManagedFontRasterizer();
         _ownsRasterizer = rasterizer is null;
@@ -90,7 +99,8 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         CreateImage(initialWidth, initialHeight);
         CreateSampler();
-        ctx.UpdateDescriptorSet(ctx.DescriptorSet, _imageView, _sampler);
+        _descriptorSet = ctx.AllocateDescriptorSet();
+        ctx.UpdateDescriptorSet(_descriptorSet, _imageView, _sampler);
     }
 
     /// <summary>
@@ -204,6 +214,9 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     /// <summary>The atlas image's current width, in pixels (tests: a grow happened).</summary>
     internal int AtlasWidth => _atlasWidth;
 
+    /// <summary>How many times a full atlas at its cap was wiped (tests: eviction happened).</summary>
+    internal int EvictionCount { get; private set; }
+
     public void Flush(VkCommandBuffer cmd)
     {
         if (_dirtyX0 >= _dirtyX1 || _dirtyY0 >= _dirtyY1)
@@ -313,6 +326,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         api.vkDestroyImageView(_imageView);
         api.vkDestroyImage(_image);
         api.vkFreeMemory(_imageMemory);
+        _ctx.FreeDescriptorSet(_descriptorSet);
     }
 
     private GlyphInfo RasterizeGlyph(GlyphKey key)
@@ -430,21 +444,13 @@ internal sealed unsafe class VkFontAtlas : IDisposable
             _glyphs[key] = g with { U0 = g.U0 * scaleX, V0 = g.V0 * scaleY, U1 = g.U1 * scaleX, V1 = g.V1 * scaleY };
         }
 
-        var api = _ctx.DeviceApi;
-        // Drain the GPU before swapping the atlas image — same in-flight use-after-free + in-use-descriptor
-        // hazard as VkSdfFontAtlas.Grow: with MaxFramesInFlight=2, frame N-1 may still be sampling the old
-        // image through this descriptor when frame N grows, and the Adreno X1-85 punishes that by failing
-        // the next vkQueueSubmit. This was historically masked by the per-Flush vkDeviceWaitIdle that the
-        // upload-ring refactor removed — that drain ran every frame, so it had been incidentally protecting
-        // Grow too. Grows are rare (the atlas only doubles), so a targeted device idle here is cheap.
-        // Bounded (was an unbounded vkDeviceWaitIdle): waits on prior in-flight frames only, capped, and
-        // skips when the GPU is already wedged — a grow that coincides with a stuck GPU must not freeze.
-        _ctx.TryWaitPriorFramesIdle("font atlas grow");
-        api.vkDestroyImageView(_imageView);
-        api.vkDestroyImage(_image);
-        api.vkFreeMemory(_imageMemory);
+        // The old image, view, memory and set may be bound by a frame still in flight (or by one recorded
+        // and not yet submitted), so they go through DeferDestroy rather than a wait: it retires them once
+        // every such frame has. The new image gets its own set, so no set a command buffer holds is rewritten.
+        _ctx.DeferDestroy(_imageView, _image, _imageMemory, descriptorSet: _descriptorSet);
         CreateImage(_atlasWidth, _atlasHeight);
-        _ctx.UpdateDescriptorSet(_ctx.DescriptorSet, _imageView, _sampler);
+        _descriptorSet = _ctx.AllocateDescriptorSet();
+        _ctx.UpdateDescriptorSet(_descriptorSet, _imageView, _sampler);
 
         _dirtyX0 = 0; _dirtyY0 = 0;
         _dirtyX1 = _atlasWidth; _dirtyY1 = _atlasHeight;
@@ -452,6 +458,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     private void EvictAll()
     {
+        EvictionCount++;
         _glyphs.Clear();
         _cursorX = 0; _cursorY = 0; _rowHeight = 0;
         _staging = new byte[_atlasWidth * _atlasHeight * 4];

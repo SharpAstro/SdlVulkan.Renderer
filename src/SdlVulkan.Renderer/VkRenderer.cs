@@ -1896,7 +1896,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
         BindPipeline(_pipelines.TexturedPipeline);
 
-        var descriptorSet = Surface.DescriptorSet;
+        var descriptorSet = _fontAtlas!.DescriptorSet;
         api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
             Surface.PipelineLayout, 0, 1, &descriptorSet, 0, null);
 
@@ -2956,7 +2956,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var api = Surface.DeviceApi;
         _pushConstants[20] = 0f; // sdfEdge, unused by a bitmap batch
         BindPipeline(_pipelines!.TexturedPipeline);
-        var bmpDescriptor = Surface.DescriptorSet;
+        var bmpDescriptor = _fontAtlas!.DescriptorSet;
         api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
             Surface.PipelineLayout, 0, 1, &bmpDescriptor, 0, null);
         fixed (float* pPC = _pushConstants)
