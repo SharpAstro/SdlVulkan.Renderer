@@ -6,8 +6,10 @@ on:
   pull_request:
     branches: [ main ]
     # Listing types replaces the default set, so the defaults are spelled out. 'labeled' is the addition:
-    # labelling an open PR 'preview' must start a run. A run for any other label just rebuilds the PR
-    # with no suffix and publishes nothing; see the VERSION_SUFFIX step and the publish-preview job.
+    # labelling an open PR 'preview' must start a run. A 'labeled' run for any other label is skipped
+    # by the build job's condition (every other job needs build), so a pilot or triage label costs
+    # nothing and, on a PR already labelled 'preview', publishes no further prerelease. See the
+    # VERSION_SUFFIX step and the publish-preview job.
     types: [opened, synchronize, reopened, labeled]
 
 env:
@@ -26,6 +28,8 @@ env:
 
 jobs:
   build:
+    # A 'labeled' event runs CI only for the 'preview' label; every other job needs build, so they skip too.
+    if: github.event.action != 'labeled' || github.event.label.name == 'preview'
     # Every job is bounded. GitHub's default is 6 hours, which is how an unreachable apt archive
     # parked webview-smoke-linux for an afternoon; healthy runs here are minutes, so a job over
     # these limits is stuck rather than slow.
@@ -340,6 +344,8 @@ jobs:
   # Only for a PR whose head branch is in this repository: a fork PR gets no secrets, and must not try.
   # The condition is the one the version step uses to stamp the suffix. This job cannot fire on a push
   # or dispatch, and publish-nuget cannot fire on a pull request, so nothing is pushed twice.
+  # Opening a PR with the label already on fires 'opened' and 'labeled', so two prereleases of the same
+  # content are pushed; harmless.
   # --skip-duplicate makes a re-run of the same run and attempt harmless.
   publish-preview:
     needs: build
