@@ -134,7 +134,7 @@ public sealed class SdfAtlasValidationTests
             ctx.WaitOffscreenFrameComplete();
             Frames++;
             // Background rasterization lands over a few frames; the frame loop is the clock.
-            Thread.Sleep(2);
+            Thread.Sleep(8);
         }
     }
 
@@ -223,7 +223,8 @@ public sealed class SdfAtlasValidationTests
 
         try
         {
-            while (drv.Frames < 60 && atlas.PageCount < 3)
+            // Debug rasterizes slowly: the frame loop (and its pause) is the clock, bounded by MaxFrames.
+            while (drv.Frames < MaxFrames && atlas.PageCount < 3)
             {
                 drv.Frame(Window());
                 cursor += 4;
