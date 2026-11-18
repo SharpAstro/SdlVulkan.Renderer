@@ -242,6 +242,12 @@ public sealed unsafe partial class VulkanContext : IDisposable
     // turns it into an immediate, named failure in DEBUG at zero release cost.
     private int _frameThreadId;
 
+    // Recorded in Release too (AssertFrameThread is DEBUG only), so Dispose can name a wrong-thread teardown.
+    private void RecordFrameThread()
+    {
+        if (!_isOffscreen && _frameThreadId == 0) _frameThreadId = Environment.CurrentManagedThreadId;
+    }
+
     [Conditional("DEBUG")]
     private void AssertFrameThread(string method)
     {
@@ -856,6 +862,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     public VkCommandBuffer BeginFrame(out bool resized)
     {
+        RecordFrameThread();
         AssertFrameThread(nameof(BeginFrame));
         resized = false;
         NoteUnendedFrameDropped();
@@ -1363,6 +1370,9 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
+        // An abandoned context is torn down (leaked) by design from wherever the app is on its way down;
+        // offscreen contexts have no owning thread.
+        if (!_abandoned && !_isOffscreen) DisposeThreadGuard.Enforce(_frameThreadId, "VulkanContext");
         _disposed = true;
 
         // An abandoned recovery task is still running on a thread nobody can join -- that is what

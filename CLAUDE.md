@@ -127,5 +127,6 @@ Side-car pipelines with their own `VkPipelineLayout` can define any push constan
 - `VkPipelineSet.cs` — pipeline creation from the pre-baked SPIR-V embedded in the assembly (Flat, Textured, Ellipse, Page, Stroke, SDF, RoundRect, blend variants, Mesh, Slug, SlugInstanced). Shaders are authored as GLSL 450 in `Shaders/*.vert|*.frag` and baked to `Shaders/spirv/*.spv` by `tools/BakeShaders`; re-run it after editing one and commit the `.spv`
 - `VkTexture.cs` — per-image Vulkan texture with blocking and deferred upload modes
 - `SdlEventLoop.cs` — event-driven (multi-window) render loop with resize handling
+- `ShutdownDrain.cs`: `PumpUntilComplete(loop, task)`: after `Run` returns, pump the loop while background work drains, before disposing; `DisposeThreadGuard.cs` makes a window/context disposed off the loop's thread throw in DEBUG and log in Release
 - `SdlInputMapping.cs` — SDL3 scancode/keymod → DIR.Lib `InputKey`/`InputModifier` mapping
 - `DebugInspector.cs` / `DebugInspectorOptions.cs` — in-process debug inspector (client lives in `SdlVulkan.Renderer.Inspector`)

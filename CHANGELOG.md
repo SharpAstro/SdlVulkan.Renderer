@@ -7,6 +7,15 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.104
+
+**`ShutdownDrain` lives here (#140), and a wrong-thread dispose names itself.** `ShutdownDrain.PumpUntilComplete(loop,
+task)` moves from tianwen: after `SdlEventLoop.Run` returns it pumps the loop while background work drains, with a
+timeout, on `TimeProvider`. tianwen and pilot drop their copies in their own repos. `SdlVulkanWindow.Dispose` and
+`VulkanContext.Dispose` called off the thread that owns them (the window's creator; the context's frame thread, now
+recorded in Release too) throw `InvalidOperationException` in Debug and log one warning in Release, naming both threads
+and pointing at `ShutdownDrain`. Offscreen and abandoned contexts are exempt.
+
 ## 7.103
 
 **The bitmap glyph atlas no longer grows under a recording frame** (tianwen#621). `VkFontAtlas`, which holds the colour
