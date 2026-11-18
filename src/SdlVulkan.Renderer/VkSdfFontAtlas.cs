@@ -171,6 +171,9 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     /// <summary>Pages whose GPU half was handed to the context's deferred destroy (evict-all), for the tests.</summary>
     internal int PagesDeferredDestroyed { get; private set; }
 
+    /// <summary>Pages whose GPU half has actually been destroyed, for the tests: lags PagesDeferredDestroyed while frames are in flight.</summary>
+    internal int PagesDestroyed { get; private set; }
+
     /// <summary>Pages created over this atlas's life, the first included, for the tests.</summary>
     internal int PagesCreated { get; private set; }
 
@@ -358,6 +361,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
 
     private void DestroyPage(VkPageResources p)
     {
+        PagesDestroyed++;
         var api = _ctx.DeviceApi;
         _ctx.FreeDescriptorSet(p.DescriptorSet);
         for (var i = 0; i < VulkanContext.MaxFramesInFlight; i++)

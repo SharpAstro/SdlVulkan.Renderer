@@ -198,10 +198,12 @@ public sealed class SdfAtlasValidationTests
         }
         Assert.True(atlas.PagesDeferredDestroyed > 0, $"the flood never evicted all pages ({atlas.FrameStats})");
         // The counter above is bumped beside the DeferDestroy call, so it survives a mutant that drops the
-        // call. The queue itself does not: the wiped pages are still waiting for their frames to retire
-        // (an entry retires two frames after the one that queued it, and the loop stopped on that frame).
-        Assert.True(ctx.PendingDeferredDestroys > 0,
-            "the evict-all wipe queued nothing for deferred destroy: the pages were destroyed at once or leaked");
+        // call, and the queue's length survives too (the upload-buffer deferral keeps it non-empty). What does
+        // not survive is the pages themselves: the wipe ran on the last frame, so its pages are still waiting
+        // for their frames to retire (an entry retires two frames after the one that queued it) and fewer have
+        // been destroyed than were handed over.
+        Assert.True(atlas.PagesDestroyed < atlas.PagesDeferredDestroyed && ctx.PendingDeferredDestroys > 0,
+            $"the evict-all wipe destroyed its pages at once ({atlas.PagesDestroyed} destroyed of {atlas.PagesDeferredDestroyed}, {ctx.PendingDeferredDestroys} pending)");
 
         // And the atlas still works after the wipe: a few more frames of fresh glyphs, then a lit readback.
         for (var f = 0; f < 12; f++)
