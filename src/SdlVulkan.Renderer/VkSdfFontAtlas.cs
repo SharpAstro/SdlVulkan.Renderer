@@ -40,6 +40,7 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     }
 
     private readonly List<VkPageResources> _pageResources = new();
+    private bool _disposing;
 
     public VkSdfFontAtlas(VulkanContext ctx, ManagedFontRasterizer rasterizer,
         SdfGlyphDiskCache? diskCache = null,
@@ -155,19 +156,40 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
         }
         _ctx.UpdateDescriptorSet(res.DescriptorSet, res.ImageView, _sampler);
         _pageResources.Add(res);
+        PagesCreated++;
         RenderDiag.Log("sdf.newpage", $"page {pageIndex} allocated {pageDimension}x{pageDimension}");
     }
 
     public void OnPagesWillBeDestroyed()
-        // Evict-all teardown: those pages' descriptor sets may still be referenced by the previous
-        // frame's draws, so wait for prior in-flight frames first. Bounded (was an unbounded
-        // vkDeviceWaitIdle): prior in-flight frames only, capped, skip-when-stuck.
-        => _ctx.TryWaitPriorFramesIdle("sdf atlas evict-all");
+    {
+        // Evict-all teardown used to wait here for prior in-flight frames. That wait is bounded and
+        // can skip or time out, and then the pages were destroyed under a frame that still sampled
+        // them. Nothing is waited for now: OnPageDestroyed hands each page's GPU half to
+        // DeferDestroy, which frees it once every frame that could reference it has retired.
+    }
+
+    /// <summary>Pages whose GPU half was handed to the context's deferred destroy (evict-all), for the tests.</summary>
+    internal int PagesDeferredDestroyed { get; private set; }
+
+    /// <summary>Pages created over this atlas's life, the first included, for the tests.</summary>
+    internal int PagesCreated { get; private set; }
 
     public void OnPageDestroyed(int pageIndex)
     {
-        DestroyPage(_pageResources[pageIndex]);
+        var res = _pageResources[pageIndex];
+        // Index parity with the core is kept immediately; only the GPU half is late.
         _pageResources.RemoveAt(pageIndex);
+        if (_disposing)
+        {
+            // The core's Dispose fires this for every page with the GPU already idle (the caller
+            // guarantees it), so the page is freed at once.
+            DestroyPage(res);
+            return;
+        }
+        // Evict-all runs at a frame start, but the previous frame may still be in flight and sampling
+        // this page's image through its descriptor set, and copying from its upload slots.
+        PagesDeferredDestroyed++;
+        _ctx.DeferDestroy(() => DestroyPage(res));
     }
 
     // ---- flush: record dirty-region uploads into the frame command buffer ------------------------
@@ -266,7 +288,8 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     public void Dispose()
     {
         // Caller (VkRenderer.Dispose) ensures the GPU is idle before disposing the renderer.
-        // Core Dispose fires OnPageDestroyed for every page (descending) — freeing the GPU half.
+        // Core Dispose fires OnPageDestroyed for every page (descending) — freeing the GPU half at once.
+        _disposing = true;
         _core.Dispose();
         _ctx.DeviceApi.vkDestroySampler(_sampler);
     }
@@ -359,11 +382,10 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
 
         if (page.UploadBuffers[slot] != VkBuffer.Null)
         {
-            // Slot grows only when the dirty region is larger than the previous peak
-            // for this slot — by the time we're here BeginFrame has waited on the
-            // matching fence, so destroying the previous allocation is safe.
-            api.vkDestroyBuffer(page.UploadBuffers[slot]);
-            api.vkFreeMemory(page.UploadMemories[slot]);
+            // Slot grows only when the dirty region is larger than the previous peak for this slot.
+            // BeginFrame waited on the slot's fence, but that wait is the only thing making the old
+            // buffer safe, so it goes through the deferred destroy like every other atlas object.
+            _ctx.DeferDestroy(buffer: page.UploadBuffers[slot], memory: page.UploadMemories[slot]);
         }
 
         VkBufferCreateInfo bufCI = new()

@@ -1150,6 +1150,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         }
     }
 
+    /// <summary>The base and large-tier SDF atlases, for the validation tests.</summary>
+    internal VkSdfFontAtlas? BaseSdfAtlas => _sdfFontAtlas;
+    internal VkSdfFontAtlas? LargeSdfAtlas => _sdfFontAtlasLarge;
+
     /// <summary>Per-tier SDF atlas residency (pages + glyphs) for the tiered-atlas A/B — the small
     /// tier, plus the large tier when it's enabled. Cheap; intended for DEBUG/diagnostic reads.</summary>
     public string SdfAtlasStats => _sdfFontAtlasLarge is { } lg
