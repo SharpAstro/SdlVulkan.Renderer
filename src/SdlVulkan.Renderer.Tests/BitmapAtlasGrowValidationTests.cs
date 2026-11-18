@@ -37,7 +37,20 @@ public sealed class BitmapAtlasGrowValidationTests
     private static string FontPath => Path.Combine(AppContext.BaseDirectory, "Fixtures", "DejaVuSans.ttf");
 
     [Fact]
-    public async Task A_grow_while_a_frame_records_after_a_drawn_glyph_leaves_the_frame_valid()
+    public Task A_grow_while_a_frame_records_after_a_drawn_glyph_leaves_the_frame_valid()
+        => RunValidated(Run, "the bitmap atlas grew under a recording frame");
+
+    [Fact]
+    public Task Eviction_at_the_cap_over_several_frames_leaves_every_frame_valid()
+        => RunValidated(RunEviction, "the bitmap atlas evicted at its cap");
+
+#if DEBUG
+    [Fact]
+    public Task A_dropped_frame_that_grew_and_flushed_the_atlas_leaves_the_next_frames_valid()
+        => RunValidated(RunDroppedFrame, "a frame that grew the bitmap atlas was dropped");
+#endif
+
+    private static async Task RunValidated(Func<VulkanContext, Action> run, string what)
     {
         if (!ValidatedOffscreen.TryCreate(Width, Height, out var ctx, out var messenger, out var api, out var skip))
         {
@@ -49,20 +62,19 @@ public sealed class BitmapAtlasGrowValidationTests
         var wedged = false;
         try
         {
-            var run = Task.Run(Run(ctx!), TestContext.Current.CancellationToken);
-            var finished = await Task.WhenAny(run, Task.Delay(Deadman, TestContext.Current.CancellationToken)) == run;
+            var task = Task.Run(run(ctx!), TestContext.Current.CancellationToken);
+            var finished = await Task.WhenAny(task, Task.Delay(Deadman, TestContext.Current.CancellationToken)) == task;
             if (!finished)
             {
                 wedged = true;
                 Assert.Fail($"deadman: the bitmap atlas flood did not finish within {Deadman.TotalSeconds:0}s. " +
                             $"Validation messages so far:\n{ValidatedOffscreen.DumpMessages()}");
             }
-            await run;
+            await task;
 
             var errors = ValidatedOffscreen.Messages.Where(ValidatedOffscreen.IsError).ToArray();
             Assert.True(errors.Length == 0,
-                $"the validation layer reported {errors.Length} error(s) while the bitmap atlas grew under a " +
-                $"recording frame:\n{string.Join("\n\n", errors)}");
+                $"the validation layer reported {errors.Length} error(s) while {what}:\n{string.Join("\n\n", errors)}");
         }
         finally
         {
@@ -73,6 +85,107 @@ public sealed class BitmapAtlasGrowValidationTests
         }
     }
 
+    private static Rune[] Flood() => Enumerable.Range('B', 25).Concat(Enumerable.Range('a', 26)).Concat(Enumerable.Range('0', 10))
+        .Select(c => new Rune((char)c)).ToArray();
+
+    // Eviction runs at a frame start, so a flood reaches the cap in one frame and the wipe happens in the next:
+    // several frames, each drawing 'A' (warmed, so a draw bound the set and sampled the image before and after a
+    // wipe) and a different slice of the flood. The cap is the initial size, so no grow intervenes.
+    private static Action RunEviction(VulkanContext ctx) => () =>
+    {
+        var font = FontPath;
+        var black = new RGBAColor32(0, 0, 0, 255);
+        var white = new RGBAColor32(255, 255, 255, 255);
+        var first = new Rune('A');
+        var flood = Flood();
+
+        using var renderer = new VkRenderer(ctx, Width, Height);
+        renderer.FontAtlas!.MaxAtlasSize = 512;
+        renderer.OnPreFlush = () => renderer.PreWarmGlyph(font, Size, first);
+
+        for (var frame = 0; frame < 8; frame++)
+        {
+            if (!renderer.BeginOffscreenFrame(black))
+            {
+                continue;
+            }
+
+            renderer.DrawSingleGlyph(font, Size, first, -1, white, 8f, 8f);
+            foreach (var r in flood.Skip(frame * 7 % flood.Length).Take(30))
+            {
+                renderer.DrawSingleGlyph(font, Size, r, -1, white, 8f, 8f);
+            }
+            renderer.DrawSingleGlyph(font, Size, first, -1, white, 40f, 8f);
+
+            renderer.EndOffscreenFrame();
+            ctx.WaitOffscreenFrameComplete();
+        }
+
+        Assert.Equal(512, renderer.FontAtlas!.AtlasWidth);
+        Assert.True(renderer.FontAtlas.EvictionCount >= 2, $"the flood evicted {renderer.FontAtlas.EvictionCount} time(s), expected several");
+    };
+
+#if DEBUG
+    // A frame that grew the atlas (new image, new set, whole-atlas upload) is refused at submit and takes its
+    // recording with it; the frames after must still validate and draw the glyph.
+    private static Action RunDroppedFrame(VulkanContext ctx) => () =>
+    {
+        var font = FontPath;
+        var black = new RGBAColor32(0, 0, 0, 255);
+        var white = new RGBAColor32(255, 255, 255, 255);
+        var first = new Rune('A');
+        var flood = Flood();
+
+        using var renderer = new VkRenderer(ctx, Width, Height);
+        renderer.OnPreFlush = () => renderer.PreWarmGlyph(font, Size, first);
+        var fault = ctx.FaultInjection;
+
+        void Frame(bool flooding)
+        {
+            if (!renderer.BeginOffscreenFrame(black))
+            {
+                return;
+            }
+            renderer.DrawSingleGlyph(font, Size, first, -1, white, 8f, 8f);
+            if (flooding)
+            {
+                foreach (var r in flood)
+                {
+                    renderer.DrawSingleGlyph(font, Size, r, -1, white, 8f, 8f);
+                }
+            }
+            renderer.EndOffscreenFrame();
+            ctx.WaitOffscreenFrameComplete();
+        }
+
+        try
+        {
+            Frame(flooding: true);                       // fills the atlas, flags the grow
+            Assert.Equal(512, renderer.FontAtlas!.AtlasWidth);
+
+            fault.RejectSubmits();                       // this frame grows, flushes the whole atlas, and is refused
+            Assert.ThrowsAny<Exception>(() => Frame(flooding: false));
+            fault.Clear();
+            Assert.True(renderer.FontAtlas.AtlasWidth > 512, "the dropped frame never grew the atlas");
+
+            Frame(flooding: false);                      // re-owes the upload and the first-use clear
+            Frame(flooding: true);
+
+            var rgba = ctx.ReadbackOffscreenRgba();
+            var lit = 0;
+            for (var i = 0; i < rgba.Length; i += 4)
+            {
+                if (rgba[i] > 32) lit++;
+            }
+            Assert.True(lit > 50, $"the glyph did not draw after the dropped frame ({lit} lit pixels)");
+        }
+        finally
+        {
+            fault.Clear();
+        }
+    };
+#endif
+
     private static Action Run(VulkanContext ctx) => () =>
     {
         var font = FontPath;
@@ -80,8 +193,7 @@ public sealed class BitmapAtlasGrowValidationTests
         var white = new RGBAColor32(255, 255, 255, 255);
         var first = new Rune('A');
         // Distinct glyphs the atlas has not seen, more than its first size holds at this raster size.
-        var flood = Enumerable.Range('B', 25).Concat(Enumerable.Range('a', 26)).Concat(Enumerable.Range('0', 10))
-            .Select(c => new Rune((char)c)).ToArray();
+        var flood = Flood();
 
         using var renderer = new VkRenderer(ctx, Width, Height);
 
