@@ -33,6 +33,9 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
     // SDL out from under their sibling windows.
     private readonly bool _ownsSdl;
 
+    // The thread that created the window runs its loop; Dispose must happen there (DisposeThreadGuard).
+    private readonly int _ownerThreadId = Environment.CurrentManagedThreadId;
+
     private SdlVulkanWindow(nint handle, VkInstance instance, VkSurfaceKHR surface, bool ownsSdl)
     {
         Handle = handle;
@@ -815,6 +818,7 @@ public sealed unsafe class SdlVulkanWindow : IDisposable, IActivatableWindow
 
     public void Dispose()
     {
+        DisposeThreadGuard.Enforce(_ownerThreadId, "SdlVulkanWindow");
         foreach (var id in _globalHotKeys.ToArray())
             UnregisterGlobalHotKey(id);
         if (OperatingSystem.IsWindows())

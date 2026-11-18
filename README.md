@@ -307,6 +307,29 @@ renderer.DrawHdrImage(image, x, y, width, height, HdrPrimaries.Bt2020, sourcePea
 dotnet run --project tools/SdrFrameBench -c Release -- --frames 300
 ```
 
+## Shutting down an app whose Main is async
+
+The window and its `VulkanContext` belong to the thread that ran `SdlEventLoop.Run`, and background work (a camera
+closing, a save) often needs that thread's loop to keep pumping before it can finish. Two spellings hang:
+
+```csharp
+loop.Run(...);
+await drain;              // wrong: the continuation may resume on another thread, and nothing pumps the loop
+drain.GetAwaiter().GetResult();   // wrong: blocks the loop's thread while the work waits for the loop
+```
+
+Call this after `Run` returns, before disposing anything:
+
+```csharp
+loop.Run(...);
+ShutdownDrain.PumpUntilComplete(loop, drainTask);   // pumps the loop until drainTask completes or a timeout (10 s)
+window.Dispose();
+```
+
+It takes an optional `TimeProvider`, `ILogger` and timeout, and returns false when the timeout won. Disposing an
+`SdlVulkanWindow` or `VulkanContext` on another thread throws `InvalidOperationException` in Debug and logs a
+warning in Release, naming both threads and pointing here.
+
 ## Native WebView (optional)
 
 Host a native browser view *inside* an `SdlVulkanWindow`. The window system composites it

@@ -17,7 +17,7 @@ namespace SdlVulkan.Renderer;
 /// on the returned view.
 /// </para>
 /// </summary>
-public sealed class SdlEventLoop
+public sealed class SdlEventLoop : IShutdownDrainLoop
 {
     // windowID -> view, plus a stable iteration list (render order, also survives dict churn).
     private readonly Dictionary<uint, SdlWindowView> _views = new();
@@ -263,6 +263,12 @@ public sealed class SdlEventLoop
 
     /// <summary>Stops the event loop. Safe to call from any callback.</summary>
     public void Stop() => _running = false;
+
+    // Explicit so ShutdownDrain can be tested against a fake loop; these only forward.
+    void IShutdownDrainLoop.Run(CancellationToken ct) => Run(ct);
+    Action? IShutdownDrainLoop.OnRender { get => OnRender; set => OnRender = value; }
+    Func<bool>? IShutdownDrainLoop.CheckNeedsRedraw { get => CheckNeedsRedraw; set => CheckNeedsRedraw = value; }
+    Func<bool>? IShutdownDrainLoop.OnQuit { get => OnQuit; set => OnQuit = value; }
 
     /// <summary>
     /// Optional diagnostic sink. Android apps have no console (Console.Error is not routed to logcat),
