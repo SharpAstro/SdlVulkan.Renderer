@@ -7,6 +7,19 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.100
+
+**Built against DIR.Lib 11.81 (was 11.79).** No renderer code change; a lockstep release with Console.Lib and
+WebGl.Renderer. Both crossed minors are additive:
+
+- **11.81: F1 on a menu shows its keys.** `MenuModel.ShowingHelp` turns the card into a list of the keys that menu
+  answers to (`HelpLines`: arrows, Enter, the row digits, Tab only when there is a Back or close control, then the
+  host's own `HostHelp`). F1 or Esc closes it; every other key is swallowed while it is open. `MenuLayout` declares F1
+  on the column and Esc on the title, so a host routing through `InputRouter` gets it with no change. A host that takes
+  Esc or Backspace before the router should skip that while `ShowingHelp` is true, or Esc goes back instead of closing
+  the list.
+- 11.80: SVG icons and images with clips, masks, markers, images, patterns and text.
+
 ## 7.99
 
 **Built against DIR.Lib 11.79 (was 11.73).** No renderer code change; a lockstep release so a consumer holding this and
