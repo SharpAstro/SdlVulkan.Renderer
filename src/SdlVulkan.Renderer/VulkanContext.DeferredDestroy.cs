@@ -67,6 +67,26 @@ public sealed unsafe partial class VulkanContext
     public int PendingDeferredDestroys => _deferredDestroys.Count;
 
     /// <summary>
+    /// True when <paramref name="descriptorSet"/> is waiting in the deferred queue. Lets a test pin that a
+    /// specific replaced object was deferred, not merely that something was. Render thread only.
+    /// </summary>
+    internal bool IsDeferredDestroyPending(VkDescriptorSet descriptorSet)
+    {
+        if (descriptorSet == VkDescriptorSet.Null)
+        {
+            return false;
+        }
+        foreach (var d in _deferredDestroys)
+        {
+            if (d.DescriptorSet == descriptorSet)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Destroys the given handles once every frame that could reference them has retired: the frame
     /// being recorded, if any, and every frame still in flight. Null handles are ignored, so a caller
     /// passes whatever it holds. Render thread only, like the frame state machine. This is the ONLY
