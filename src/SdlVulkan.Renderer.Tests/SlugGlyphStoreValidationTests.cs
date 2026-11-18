@@ -190,21 +190,40 @@ public sealed class SlugGlyphStoreValidationTests
             }
             Assert.True(renderer.SlugStoreStats.GrowCount >= 2, $"the setup never grew ({renderer.SlugStoreStats})");
 
+            var store = renderer.SlugGlyphStore;
             var dropped = 0;
-            var grewInDropped = false;
-            for (var attempt = 0; attempt < 40 && !(grewInDropped && dropped >= 2); attempt++)
+            var grewInDropped = 0;
+            for (var attempt = 0; attempt < 3; attempt++)
             {
-                var before = renderer.SlugStoreStats.GrowCount;
+                // Fill the buffer to within a few glyphs of full, so the next big drain has to grow it.
+                while (drv.Frames < MaxFrames && store.CapacityWords - store.UsedWords > 8000)
+                {
+                    drv.Frame(Window());
+                    cursor += 5;
+                }
+
+                // A big fresh window: requested by a clean frame, then waited for until every encode is done, so the
+                // frame refused at submit finds all of it waiting and has to grow to take it.
+                var big = Enumerable.Range(0, 40).Select(k => Pool[(cursor + k) % Pool.Length]).ToArray();
+                cursor += 40;
+                drv.Frame(big);
+                var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+                while (store.EncodesInFlight > 0)
+                {
+                    Assert.True(DateTime.UtcNow < deadline, "the encodes did not finish within 60 s");
+                    Thread.Sleep(2);
+                }
+
+                var before = store.GrowCount;
                 fault.RejectSubmits();
-                Assert.ThrowsAny<Exception>(() => drv.Frame(Window()));
+                Assert.ThrowsAny<Exception>(() => drv.Frame(big));
                 fault.Clear();
                 dropped++;
-                if (renderer.SlugStoreStats.GrowCount > before) grewInDropped = true;
-                cursor += 5;
-                // Let the workers deliver the next window before the next refused frame.
-                drv.Frame(Window());
+                if (store.GrowCount > before) grewInDropped++;
+                // The next frame records the dropped frame's growth and uploads again.
+                drv.Frame(big);
             }
-            Assert.True(grewInDropped, $"no dropped frame recorded a growth ({renderer.SlugStoreStats})");
+            Assert.True(grewInDropped >= 1, $"no dropped frame recorded a growth ({renderer.SlugStoreStats}, {dropped} dropped)");
 
             for (var f = 0; f < 8; f++)
             {
