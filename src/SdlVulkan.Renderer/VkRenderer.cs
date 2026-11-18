@@ -334,7 +334,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// It uploads inside each frame's <c>BeginFrame</c>, from the frame after it is created.
     /// </summary>
     internal VkSlugGlyphStore SlugGlyphStore =>
-        _slugGlyphStore ??= new VkSlugGlyphStore(Surface, _fontAtlas!.Rasterizer);
+        _slugGlyphStore ??= new VkSlugGlyphStore(Surface, _fontAtlas!.Rasterizer, SlugInitialCapacityWords);
+
+    /// <summary>Starting size, in words, of the Slug store made on first use. A test sets it small to make the store grow;
+    /// it has no effect once the store exists.</summary>
+    internal int SlugInitialCapacityWords { get; set; } = VkSlugGlyphStore.DefaultInitialCapacityWords;
 
     /// <summary>
     /// True while the Slug store has a glyph asked for that is not in its buffer yet (still encoding, or waiting for
