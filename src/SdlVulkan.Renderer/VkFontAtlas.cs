@@ -43,6 +43,8 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
     private int _dirtyX0, _dirtyY0, _dirtyX1, _dirtyY1;
     private bool _needsEviction;
+    // Set when a glyph did not fit and the atlas can still double; BeginFrame grows it (see RasterizeGlyph).
+    private bool _needsGrow;
 
     // Set whenever CreateImage allocates a fresh VkImage (initial + every Grow). The image starts
     // in VK_IMAGE_LAYOUT_UNDEFINED; the first Flush must transition from there. Previously CreateImage
@@ -92,11 +94,17 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     }
 
     /// <summary>
-    /// Call at the start of each frame to handle deferred eviction.
+    /// Call at the start of each frame, before anything is recorded that binds the atlas, to handle a
+    /// deferred grow or eviction.
     /// This ensures no stale UV coordinates exist in the current frame's batch.
     /// </summary>
     public void BeginFrame()
     {
+        if (_needsGrow)
+        {
+            Grow();
+            _needsGrow = false;
+        }
         if (_needsEviction)
         {
             EvictAll();
@@ -191,7 +199,10 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         return MaxRasterSize;
     }
 
-    public bool IsDirty => _needsEviction || (_dirtyX0 < _dirtyX1 && _dirtyY0 < _dirtyY1);
+    public bool IsDirty => _needsGrow || _needsEviction || (_dirtyX0 < _dirtyX1 && _dirtyY0 < _dirtyY1);
+
+    /// <summary>The atlas image's current width, in pixels (tests: a grow happened).</summary>
+    internal int AtlasWidth => _atlasWidth;
 
     public void Flush(VkCommandBuffer cmd)
     {
@@ -341,14 +352,23 @@ internal sealed unsafe class VkFontAtlas : IDisposable
 
         if (_cursorY + glyphHeight > _atlasHeight)
         {
+            // Full. Growing swaps the image and rewrites the context's descriptor set, which must not
+            // happen while a frame records: a glyph drawn earlier in this frame has already bound that
+            // set and recorded a draw sampling the old view, and the pool has no update-after-bind, so
+            // the swap would invalidate the command buffer (tianwen#621; on the Adreno and on Windows'
+            // ICDs the frame's submit fails). A miss reaches here from the draw calls, mid-recording, so
+            // the grow waits for the next BeginFrame, like the eviction below. The glyph is not cached,
+            // so the next frame rasterizes it into the grown atlas; this frame it only moves the pen.
             if (_atlasWidth < MaxAtlasSize || _atlasHeight < MaxAtlasSize)
             {
-                Grow();
-                return RasterizeGlyph(key);
+                _needsGrow = true;
             }
-            // Defer eviction to next frame start to avoid stale UVs in current batch
-            _needsEviction = true;
-            return default;
+            else
+            {
+                // Defer eviction to next frame start to avoid stale UVs in current batch
+                _needsEviction = true;
+            }
+            return new GlyphInfo(0, 0, 0, 0, 0, 0, bitmap.AdvanceX, 0, 0);
         }
 
         // Blit glyph RGBA into staging buffer

@@ -7,6 +7,19 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.101
+
+**The bitmap glyph atlas no longer grows under a recording frame** (tianwen#621). `VkFontAtlas`, which holds the colour
+and emoji glyphs, grew by destroying its image and view and rewriting the context's descriptor set, and it did that
+on the spot when a glyph did not fit. A miss reaches the atlas from the draw calls, so with a colour glyph drawn earlier
+in the same frame the grow rewrote a descriptor set the recording command buffer had bound, and destroyed a view a
+recorded draw samples. The pool has no update-after-bind, so either one invalidates the command buffer: on this
+machine's GPU the frame's submit failed with `VK_ERROR_INITIALIZATION_FAILED`. The grow now waits for the next
+`BeginFrame`, before anything is recorded, the way eviction already did; the glyph that did not fit is skipped for
+that one frame (it still moves the pen) and drawn from the grown atlas on the next. `IsDirty` reports a pending grow,
+so an idle host still draws that frame. `BitmapAtlasGrowValidationTests` floods the atlas under a recording frame on a
+validated context and asserts no validation error and a grown atlas; it failed on the old code.
+
 ## 7.100
 
 **Built against DIR.Lib 11.81 (was 11.79).** No renderer code change; a lockstep release with Console.Lib and
