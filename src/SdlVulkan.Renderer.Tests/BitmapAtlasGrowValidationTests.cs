@@ -210,7 +210,6 @@ public sealed class BitmapAtlasGrowValidationTests
             {
                 continue;
             }
-            var pendingBefore = ctx.PendingDeferredDestroys;
 
             renderer.DrawSingleGlyph(font, Size, first, -1, white, 8f, 8f);
             // Then misses on every new glyph in the same frame, until the atlas is full and must grow.
@@ -227,12 +226,12 @@ public sealed class BitmapAtlasGrowValidationTests
                 // layer cannot (every frame is waited below, so none is in flight when the atlas grows):
                 // the grown atlas has a set of its own, never the context's shared one, and the old image,
                 // view, memory and set sit in the deferred queue until their frames retire (read here,
-                // before the next frame's start retires them).
+                // before a later frame's start retires them; the grow runs inside this frame's start).
                 grewFrames++;
                 Assert.NotEqual(setBefore, renderer.FontAtlas.DescriptorSet);
                 Assert.NotEqual(ctx.DescriptorSet, renderer.FontAtlas.DescriptorSet);
-                Assert.True(ctx.PendingDeferredDestroys > pendingBefore,
-                    $"the grow queued nothing for deferred destroy ({pendingBefore} before, {ctx.PendingDeferredDestroys} after)");
+                Assert.True(ctx.PendingDeferredDestroys > 0,
+                    "the grow queued nothing for deferred destroy: the old image, view, memory and set were destroyed at once");
             }
 
             ctx.WaitOffscreenFrameComplete();
