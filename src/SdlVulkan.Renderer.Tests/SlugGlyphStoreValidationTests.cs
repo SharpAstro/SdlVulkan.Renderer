@@ -148,7 +148,7 @@ public sealed class SlugGlyphStoreValidationTests
         var cursor = 0;
 
         // 'A' is drawn first, alone, so it is an already drawn glyph when the flood starts.
-        while (drv.Frames < MaxFrames && renderer.SlugStoreStats.GlyphCount == 0 || drv.Frames < 3)
+        while (drv.Frames < MaxFrames && renderer.SlugStoreStats.Glyphs == 0 || drv.Frames < 3)
         {
             drv.Frame([]);
         }
