@@ -18,6 +18,13 @@ needs to plan, build, check and land.
 - Never wait with a job that sleeps or polls: use `pilot leg wait --for-file <path>` and end the turn. Long builds
   and test runs go through `pilot run -- <command>`. The machine is shared, so a job may wait its turn first.
 
+## Packages first
+
+- A consumer (tianwen and the sebgod apps) that needs a change here which is not released yet pins that PR's preview
+  package or waits for the release, and moves its pin to the release before it lands.
+- Label a same-repo PR `preview` and CI publishes its packages to nuget.org as `<Major.Minor>.<run><attempt>-pr<N>`.
+  nuget.org keeps every prerelease, so label only when a consumer needs one.
+
 ## Build and check
 
 ```bash

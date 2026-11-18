@@ -5,6 +5,10 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+    # Listing types replaces the default set, so the defaults are spelled out. 'labeled' is the addition:
+    # labelling an open PR 'preview' must start a run. A run for any other label just rebuilds the PR
+    # with no suffix and publishes nothing; see the VERSION_SUFFIX step and the publish-preview job.
+    types: [opened, synchronize, reopened, labeled]
 
 env:
   # Release notes live in CHANGELOG.md at the repo root, not here. Nothing in this workflow ever
@@ -31,6 +35,7 @@ jobs:
     # re-deriving it.
     outputs:
       version-prefix: ${{ steps.version.outputs.prefix }}
+      version-suffix: ${{ steps.version.outputs.suffix }}
     steps:
     - uses: actions/checkout@v7
     - uses: actions/setup-dotnet@v6
@@ -46,6 +51,13 @@ jobs:
       # the SDK first-run banner out — this is the job's first dotnet call — and the shape check makes
       # anything else unexpected, or a renamed property, fail the run rather than quietly stamping
       # every package ".<run>".
+      # VERSION_SUFFIX is the preview path: "-pr<N>" for a pull_request whose PR carries the 'preview'
+      # label and whose head repo is THIS repo, else empty. Event values come in through env:, never
+      # interpolated into the script. It goes into Version only, never FileVersion (a prerelease tag is
+      # illegal there).
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        IS_PREVIEW: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'preview') && github.event.pull_request.head.repo.full_name == github.repository }}
       run: |
         MM="$(dotnet msbuild src/Directory.Build.props -getProperty:VersionMajorMinor -nologo)"
         case "$MM" in
@@ -54,6 +66,15 @@ jobs:
         esac
         echo "VERSION_PREFIX=${MM}.${{ github.run_number }}" >> "$GITHUB_ENV"
         echo "prefix=${MM}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+        SUFFIX=""
+        if [ "$IS_PREVIEW" = "true" ]; then
+          case "$PR_NUMBER" in
+            ''|*[!0-9]*) echo "::error::preview build without a numeric pull request number (got '$PR_NUMBER')"; exit 1 ;;
+          esac
+          SUFFIX="-pr${PR_NUMBER}"
+        fi
+        echo "VERSION_SUFFIX=${SUFFIX}" >> "$GITHUB_ENV"
+        echo "suffix=${SUFFIX}" >> "$GITHUB_OUTPUT"
     - name: Install Android workload
       # The package multi-targets net10.0-android (SdlVulkanActivity host); restore resolves all TFMs,
       # so it needs the android workload. ubuntu runners already ship the Android SDK + JDK.
@@ -64,18 +85,18 @@ jobs:
       # DIR.Lib.Debug (7.83, 7.84). The csproj's RequireReleaseRestoreForPack now fails such a pack.
       run: dotnet restore -p:Configuration=$BUILD_CONF
     - name: Build
-      run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+      run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_SUFFIX}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
     # SdlVulkan.Renderer.Debug: the same library packed from a Debug build at the same stamped version. A
     # published package is Release, so its #if DEBUG types (DebugInspector) are absent, and a plane never
     # finds the sibling sources, so a Debug build there restored the Release package without the inspector.
     # GeneratePackageOnBuild is off so bin/Debug holds no second copy of the nupkg: the upload glob must
     # see the twin exactly once, from artifacts/debug-twin.
     - name: Pack SdlVulkan.Renderer.Debug twin
-      run: dotnet pack src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj -c Debug -p:DebugTwin=true -p:GeneratePackageOnBuild=false -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true -o artifacts/debug-twin
+      run: dotnet pack src/SdlVulkan.Renderer/SdlVulkan.Renderer.csproj -c Debug -p:DebugTwin=true -p:GeneratePackageOnBuild=false -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_SUFFIX}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true -o artifacts/debug-twin
     # Proves a Debug consumer compiles against the twin (it references DebugInspector). The version is the
     # stamped one without the +sha build metadata, which NuGet ignores when matching.
     - name: Check SdlVulkan.Renderer.Debug twin
-      run: dotnet build tools/debug-twin-check/DebugTwinCheck.csproj -c Debug -p:SdlVulkanRendererDebugVersion=${VERSION_PREFIX}${VERSION_REV}
+      run: dotnet build tools/debug-twin-check/DebugTwinCheck.csproj -c Debug -p:SdlVulkanRendererDebugVersion=${VERSION_PREFIX}${VERSION_REV}${VERSION_SUFFIX}
     - name: Upload NuGet package
       uses: actions/upload-artifact@v7
       with:
@@ -104,6 +125,7 @@ jobs:
     # Inherited from the build job rather than resolved again — same run, same version.
     env:
       VERSION_PREFIX: ${{ needs.build.outputs.version-prefix }}
+      VERSION_SUFFIX: ${{ needs.build.outputs.version-suffix }}
     strategy:
       fail-fast: false
       matrix:
@@ -138,7 +160,7 @@ jobs:
       # Only the test project (net10.0) — NOT the whole solution: building the net10.0-android TFM needs
       # the Android SDK, which the ubuntu-24.04-arm runner doesn't ship (ubuntu-latest x64 does). The
       # tests are net10.0 offscreen Vulkan, so the android TFM is irrelevant here (the build job packs it).
-      run: dotnet build src/SdlVulkan.Renderer.Tests -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+      run: dotnet build src/SdlVulkan.Renderer.Tests -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_SUFFIX}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
     - name: Test
       run: dotnet test src/SdlVulkan.Renderer.Tests -c $BUILD_CONF --no-build --logger "console;verbosity=detailed"
 
@@ -229,6 +251,7 @@ jobs:
     runs-on: windows-latest
     env:
       VERSION_PREFIX: ${{ needs.build.outputs.version-prefix }}
+      VERSION_SUFFIX: ${{ needs.build.outputs.version-suffix }}
       VULKAN_RT_VERSION: 1.4.363.0
       MESA_VERSION: 26.2.4
     defaults:
@@ -272,7 +295,7 @@ jobs:
       # every TFM, so the workload is needed even though nothing here builds for Android.
       run: dotnet workload install android
     - name: Build test project
-      run: dotnet build src/SdlVulkan.Renderer.Tests -c $env:BUILD_CONF "-p:Version=$env:VERSION_PREFIX$env:VERSION_REV$env:VERSION_HASH" "-p:FileVersion=$env:VERSION_PREFIX.$env:VERSION_REV" -p:ContinuousIntegrationBuild=true
+      run: dotnet build src/SdlVulkan.Renderer.Tests -c $env:BUILD_CONF "-p:Version=$env:VERSION_PREFIX$env:VERSION_REV$env:VERSION_SUFFIX$env:VERSION_HASH" "-p:FileVersion=$env:VERSION_PREFIX.$env:VERSION_REV" -p:ContinuousIntegrationBuild=true
     - name: Test
       run: dotnet test src/SdlVulkan.Renderer.Tests -c $env:BUILD_CONF --no-build --logger "console;verbosity=detailed"
     - name: Build WebView smoke
@@ -308,3 +331,28 @@ jobs:
         name: nuget-packages
     - name: Push NuGet package
       run: dotnet nuget push **/*.nupkg -s nuget.org -k ${{ secrets.NUGET_API_KEY }}
+
+  # Preview packages. A consumer (tianwen, the sebgod apps) that needs a change this repo has not
+  # released yet pins the prerelease this job publishes (<VersionMajorMinor>.<run><attempt>-pr<N>)
+  # while the PR is open, and moves its pin to the release before it lands.
+  # Opt-in by the 'preview' label, because nuget.org prereleases are permanent: a version can be
+  # unlisted but never deleted, and every push to a labelled PR leaves one behind.
+  # Only for a PR whose head branch is in this repository: a fork PR gets no secrets, and must not try.
+  # The condition is the one the version step uses to stamp the suffix. This job cannot fire on a push
+  # or dispatch, and publish-nuget cannot fire on a pull request, so nothing is pushed twice.
+  # --skip-duplicate makes a re-run of the same run and attempt harmless.
+  publish-preview:
+    needs: build
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'preview') && github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+    - name: Download NuGet packages
+      uses: actions/download-artifact@v8
+      with:
+        name: nuget-packages
+    - name: Push preview packages
+      # The key goes in through env:, so it is never part of the script text.
+      env:
+        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      run: dotnet nuget push **/*.nupkg -s nuget.org -k "$NUGET_API_KEY" --skip-duplicate
