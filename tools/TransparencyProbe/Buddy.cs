@@ -112,6 +112,12 @@ internal static class Buddy
             frames++;
         }
 
+        // What is up, said on screen: the buddy window is borderless and carries no name.
+        var what = $"buddy {mode}{(variant == "" ? "" : " " + variant)}: the library's transparent window, {ctx.AlphaPresentation}.";
+        var promise = ctx.PresentsAlpha ? "Promised: real alpha." : "Promised: opaque (a driver may blend anyway).";
+        const string legend = "Pale ring around the face: checkerboard = transparent, dark = opaque.";
+        backdrop.SetCaption(what, promise, legend);
+
         var clock = Stopwatch.StartNew();
         while (clock.Elapsed.TotalSeconds < 1.5)
             Frame();
@@ -119,11 +125,17 @@ internal static class Buddy
         // swapchain, the acquire and the present, which under Fifo wait for the display.
         Console.WriteLine($"{frames} frames in {clock.Elapsed.TotalSeconds:F2} s; BeginFrame to EndFrame "
             + $"{(frames == 0 ? 0 : frameTicks * 1000.0 / Stopwatch.Frequency / frames):F2} ms a frame");
+        static string Saw(bool? alpha) => alpha switch { true => "real alpha", false => "opaque", null => "neither" };
+        // Before the picture is written, the strip says what the capture saw, so the saved picture says it too.
         var (exit, captureSawAlpha) = Judge(backdrop, backdrop.Capture(), ctx.PresentsAlpha, buddyHwnd,
-            variant == "" ? mode : $"{mode}-{variant}", outDir);
+            variant == "" ? mode : $"{mode}-{variant}", outDir,
+            a => backdrop.SetCaption(what, promise, $"The capture saw: {Saw(a)}.", legend));
         if (look && exit != 3)
         {
-            var saw = Eye.Ask("Through the pale ring around the face, do you see the checkerboard?", Frame);
+            const string question = "Through the pale ring around the face, do you see the checkerboard?";
+            backdrop.SetCaption(what, promise, $"The capture saw: {Saw(captureSawAlpha)}.", legend,
+                $"{question} Press Y or N (click here first if the keys do nothing).");
+            var saw = Eye.Ask(question, Frame);
             Console.WriteLine(Eye.Compare(saw, captureSawAlpha));
         }
 
@@ -151,7 +163,7 @@ internal static class Buddy
 
     // The exit code, and what the capture says of the halo: true blended, false opaque, null neither.
     internal static (int Exit, bool? CaptureSawAlpha) Judge(Backdrop backdrop, byte[] after, bool presentsAlpha,
-        nint hwnd, string mode, string outDir)
+        nint hwnd, string mode, string outDir, Action<bool?>? announce = null)
     {
         if (Score.IsBlack(after))
         {
@@ -176,7 +188,9 @@ internal static class Buddy
         }
         Console.WriteLine($"clicks: corner {Click(5, 5)}, halo {Click(35, 120)}, body {Click(120, 160)}");
         var path = Path.Combine(outDir, $"buddy-{mode}-{(presentsAlpha ? "alpha" : "opaque")}.png");
-        Score.WriteSideBySide(path, before, after, W, H);
+        announce?.Invoke(haloBlended < 6 ? true : haloOpaque < 6 ? false : null);
+        var shown = backdrop.CaptureWithCaption(out var shownHeight);
+        Score.WriteSideBySide(path, before, after, W, H, shown, shownHeight);
         Console.WriteLine($"picture: {path} (backdrop alone | with the window)");
 
         var ok = corner < 3 && body < 3 && (haloBlended < 6 || (!presentsAlpha && haloOpaque < 6))

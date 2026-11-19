@@ -84,6 +84,8 @@ internal static unsafe class Present
         var flags = WindowFlags.Vulkan | WindowFlags.Borderless | WindowFlags.AlwaysOnTop;
         if (windowKind is "transparent" or "shape")
             flags |= WindowFlags.Transparent;
+        // A combination that turns out not to be offered opens no picture, so the strip names it while it is asked.
+        backdrop.SetCaption($"{d.Name} [{d.Driver}], {windowKind} window, {presentMode}: opening.");
         var window = CreateWindow("TransparencyProbe", W, H, flags);
         SetWindowPosition(window, backdrop.SdlX, backdrop.SdlY);
         RaiseWindow(window);
@@ -105,7 +107,7 @@ internal static unsafe class Present
                 Console.WriteLine($"{head} {presentMode} not offered");
                 return Verdict.Other;
             }
-            return Show(instance, api, d.Device, family, surface, window, presentMode, backdrop, head, windowKind, outDir, d.Name, quiet, look);
+            return Show(instance, api, d.Device, family, surface, window, presentMode, backdrop, head, windowKind, outDir, d.Name, d.Driver, quiet, look);
         }
         finally
         {
@@ -138,7 +140,7 @@ internal static unsafe class Present
 
     private static Verdict Show(VkInstance instance, VkInstanceApi api, VkPhysicalDevice physical, uint family,
         VkSurfaceKHR surface, nint window, VkPresentModeKHR presentMode, Backdrop backdrop, string head,
-        string windowKind, string outDir, string deviceName, bool quiet, bool look)
+        string windowKind, string outDir, string deviceName, string driver, bool quiet, bool look)
     {
         var priority = 1f;
         VkDeviceQueueCreateInfo queueCI = new() { queueFamilyIndex = family, queueCount = 1, pQueuePriorities = &priority };
@@ -260,14 +262,28 @@ internal static unsafe class Present
                 Thread.Sleep(8); // Mailbox does not pace; keep it from spinning the GPU flat out
         }
 
+        // What is up, said on screen as well as in the table: the window itself is borderless and carries no name.
+        var what = $"{deviceName} [{driver}], {windowKind} window, {presentMode}, swapchain alpha {alpha}.";
+        var promise = alpha == VkCompositeAlphaFlagsKHR.PreMultiplied
+            ? "Promised: real alpha."
+            : "Promised: opaque (a driver may blend anyway).";
+        const string legend = "Left third: checkerboard = transparent, black = opaque.";
+        backdrop.SetCaption(what, promise, legend);
+
         var clock = System.Diagnostics.Stopwatch.StartNew();
         while (clock.Elapsed.TotalSeconds < 1.5)
             Frame();
-        var (verdict, line, details) = Judge(backdrop, backdrop.Capture(), alpha, hwnd, head, windowKind, outDir, deviceName, presentMode);
+        static string Saw(Verdict v) => v switch { Verdict.RealAlpha => "real alpha", Verdict.Opaque => "opaque", _ => "neither" };
+        // Before the picture is written, the strip says what the capture saw, so the saved picture says it too.
+        var (verdict, line, details) = Judge(backdrop, backdrop.Capture(), alpha, hwnd, head, windowKind, outDir, deviceName, presentMode,
+            v => backdrop.SetCaption(what, promise, $"The capture saw: {Saw(v)}.", legend));
         if (look && verdict != Verdict.CaptureBlack)
         {
+            const string question = "Through the MIDDLE panel (half orange), do you see the checkerboard?";
+            backdrop.SetCaption(what, promise, $"The capture saw: {Saw(verdict)}.", legend,
+                $"{question} Press Y or N (click here first if the keys do nothing).");
             Console.WriteLine($"  now showing: {head.TrimEnd()} ({alpha})");
-            var saw = Eye.Ask("Through the MIDDLE panel (half orange), do you see the checkerboard?", Frame);
+            var saw = Eye.Ask(question, Frame);
             line += "  " + Eye.Compare(saw, verdict switch { Verdict.RealAlpha => true, Verdict.Opaque => false, _ => null });
         }
         Console.WriteLine(line);
@@ -290,7 +306,7 @@ internal static unsafe class Present
     // The verdict, the table line, and (for a single run) the details below it.
     private static (Verdict Verdict, string Line, string? Details) Judge(Backdrop backdrop, byte[] after,
         VkCompositeAlphaFlagsKHR alpha, nint hwnd, string head, string windowKind, string outDir, string deviceName,
-        VkPresentModeKHR presentMode)
+        VkPresentModeKHR presentMode, Action<Verdict> announce)
     {
         if (Score.IsBlack(after))
             return (Verdict.CaptureBlack, $"{head} {alpha,-13} screen captured black: display off, or the Remote Desktop client minimized?", null);
@@ -309,7 +325,9 @@ internal static unsafe class Present
             : Verdict.Other;
         var name = new string(deviceName.Select(c => char.IsLetterOrDigit(c) ? c : '-').ToArray()).Trim('-');
         var path = Path.Combine(outDir, $"present-{name}-{windowKind}-{presentMode}.png");
-        Score.WriteSideBySide(path, before, after, W, H);
+        announce(verdict);
+        var shown = backdrop.CaptureWithCaption(out var shownHeight);
+        Score.WriteSideBySide(path, before, after, W, H, shown, shownHeight);
 
         var text = verdict switch
         {
