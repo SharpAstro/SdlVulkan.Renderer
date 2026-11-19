@@ -55,7 +55,7 @@ public static class ShutdownDrain
     /// <param name="loop">The event loop that has just stopped.</param>
     /// <param name="drain">The shutdown task to wait for.</param>
     /// <param name="timeProvider">The clock the timeout runs on, so a test's fake clock ends the drain when advanced past it. Null means <see cref="TimeProvider.System"/>.</param>
-    /// <param name="logger">Logs a drain that faulted and one that was abandoned at the timeout.</param>
+    /// <param name="logger">Logs a drain that faulted and one that was abandoned (at the timeout, or by a second close request).</param>
     /// <param name="timeout">Overrides <see cref="DefaultTimeout"/>.</param>
     /// <returns>True if the drain finished, false if it was abandoned (at the timeout, or by a second close request).</returns>
     public static bool PumpUntilComplete(SdlEventLoop loop, Task drain, TimeProvider? timeProvider = null, ILogger? logger = null, TimeSpan? timeout = null)
