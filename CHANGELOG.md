@@ -7,6 +7,18 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.106
+
+**The event loop owns the caret blink (#200).** `SdlWindowView.Ui` (and `SdlEventLoop.Ui` for a single window) takes the
+window's `WindowUiSettings`, set once by the host. Before each frame the loop sets `CaretPhase` from
+`CaretBlink.PhaseAt` on its clock, so `OnRender` paints in it. While a text field has the keyboard (`Ui.Focus.Current`
+is set) the loop asks for a frame at each 530 ms phase change and its wait is the time to that change; a window with no
+focused field, or no `Ui`, asks for nothing, so an idle window draws no frame for the caret. `SdlEventLoop.TimeProvider`
+(init, default `TimeProvider.System`) is the clock every caret decision reads; frame pacing and backoff stay on the
+Stopwatch. The rule is the pure `CaretBlinkPacing`, tested on a fake clock. DIR.Lib 11.84 (`WindowUiSettings.CaretPhase`).
+Additive only. Hosts (tianwen's per-tab `CaretPhase` and `PaintedCaretPhase` check, pilot#1192) can drop their own caret
+glue once they set `Ui`.
+
 ## 7.105
 
 **One rule for when a glyph atlas may touch the GPU, written down and checked under validation for all three (#193).**
