@@ -98,6 +98,12 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
     /// <summary>The floor below which frames are considered normal (no slow-frame log).</summary>
     internal static double DebugSlowFrameFloorMs => SlowFrameFloorMs;
 
+    /// <summary>The clock every caret blink decision reads (frame pacing and backoff stay on the Stopwatch). Injectable for tests.</summary>
+    public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
+
+    /// <inheritdoc cref="SdlWindowView.Ui"/>
+    public WindowUiSettings? Ui { get => Primary.Ui; set => Primary.Ui = value; }
+
     /// <summary>Multi-window constructor. Add windows with <see cref="AddWindow"/>.</summary>
     public SdlEventLoop() { }
 
@@ -358,6 +364,14 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
             // window whose GPU is wedged never renders again, so it never forces the poll path either.
             foreach (var v in _viewList)
             {
+                // The caret: only a window whose field has the keyboard asks for anything.
+                if (!v.IsGpuWedged && v.Ui is { } caretUi && !v.Window.IsMinimizedOrHidden && CaretBlinkPacing.HasFocusedField(caretUi))
+                {
+                    if (CaretBlinkPacing.FrameOwed(caretUi, v.PaintedCaretPhase, TimeProvider))
+                        v.ArmForCheck();
+                    else
+                        waitMs = Math.Clamp(Math.Min(waitMs, CaretBlinkPacing.MillisecondsToNextChange(TimeProvider)), 1, 16);
+                }
                 if (v.IsGpuWedged || !v.NeedsRedraw || nowTick < v.NextRenderAttemptTick || v.Window.IsMinimizedOrHidden) continue;
                 PaceForCost(v);
                 if (nowStamp >= v.NextFrameDueTimestamp) { anyNeedsRedraw = true; break; }
@@ -413,6 +427,7 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                 var processorAtStart = Environment.CpuUsage.TotalTime;
                 v.NeedsRedraw = false;
                 // Committed to a frame: let the app configure it before the pass opens.
+                if (v.Ui is { } ui) v.PaintedCaretPhase = CaretBlinkPacing.Step(ui, TimeProvider);
                 v.OnBeforeFrame?.Invoke();
                 if (RenderView(v))
                 {

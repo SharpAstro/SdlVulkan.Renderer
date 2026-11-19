@@ -14,6 +14,14 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     public SdlVulkanWindow Window => window;
     public VkRenderer Renderer => renderer;
 
+    /// <summary>The settings every widget of this window shares, which the host sets once. When set, the loop owns the
+    /// caret blink for this window: it sets <see cref="WindowUiSettings.CaretPhase"/> before each frame and wakes at each
+    /// phase change while a text field has the keyboard (and only then). Null (the default) means no caret work.</summary>
+    public WindowUiSettings? Ui { get; set; }
+
+    // The caret phase last painted in this window; see CaretBlinkPacing.
+    internal long PaintedCaretPhase = CaretBlinkPacing.NeverPainted;
+
     /// <summary>Background clear color used for this window's <see cref="VkRenderer.BeginFrame"/>.</summary>
     public RGBAColor32 BackgroundColor { get; set; } = new(0x1a, 0x1a, 0x2e, 0xff);
 
@@ -263,7 +271,7 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
 
     /// <summary>
     /// Called each loop iteration before checking redraw for this window. Return true to force a
-    /// redraw (external state changes: background task completions, cursor blink, etc.).
+    /// redraw (external state changes: background task completions, etc.). A text caret no longer needs it: set <see cref="Ui"/> and the loop blinks it.
     /// </summary>
     public Func<bool>? CheckNeedsRedraw { get; set; }
 
