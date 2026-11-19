@@ -55,6 +55,69 @@ internal sealed class Backdrop : IDisposable
     public int SdlX { get; }
     public int SdlY { get; }
 
+    // The caption: SDL's 8x8 debug font, which is ASCII only, so no caption may carry anything else.
+    private const int CaptionPad = 6;
+    private const int CaptionLineHeight = DebugTextFontCharacterSize + 4;
+    private string[] _caption = [];
+    private int _strip;
+
+    // The display's content scale, whole: the 8x8 font is drawn this many times larger, so it reads at 200% too.
+    private int CaptionScale { get; } = Math.Max(1, (int)Math.Round(GetDisplayContentScale(GetPrimaryDisplay())));
+
+    /// <summary>
+    /// Says on screen what the person is looking at, in a strip below the checkerboard: which combination is up, what
+    /// the capture expects or saw, and how to read the picture. The windows under test are borderless and up for a
+    /// second or two, so without it nothing in front of the panel says which one is which. Each paragraph is wrapped
+    /// to the backdrop's width, never cut, and the window grows downwards to hold them all; the strip lies below the
+    /// captured area (<see cref="Width"/> x <see cref="Height"/> from the top left), so it never enters a score.
+    /// </summary>
+    public void SetCaption(params string[] paragraphs)
+    {
+        var perLine = (Width / CaptionScale - 2 * CaptionPad) / DebugTextFontCharacterSize;
+        _caption = paragraphs.SelectMany(p => Wrap(p, perLine)).ToArray();
+        _strip = _caption.Length == 0 ? 0 : (2 * CaptionPad + _caption.Length * CaptionLineHeight) * CaptionScale;
+        SetWindowSize(_window, Width, Height + _strip);
+        Paint();
+    }
+
+    /// <summary>
+    /// The backdrop with its caption as the screen shows it now, for the saved picture: the caption is painted and
+    /// presented first, then the compositor is waited out (<c>DwmFlush</c>, twice: the present may land just after
+    /// one composition), so the picture holds what the caption says rather than the one before it. BGRA, top-down,
+    /// <see cref="Width"/> wide and <paramref name="height"/> tall (the checkerboard, then the strip).
+    /// </summary>
+    public byte[] CaptureWithCaption(out int height)
+    {
+        Paint();
+        Win32.DwmFlush();
+        Win32.DwmFlush();
+        height = Height + _strip;
+        return Win32.CaptureScreen(X, Y, Width, height);
+    }
+
+    // Word wrap; a word longer than a line is broken across lines rather than cut.
+    internal static IEnumerable<string> Wrap(string text, int perLine)
+    {
+        var line = "";
+        foreach (var word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var w = word;
+            if (line.Length > 0 && line.Length + 1 + w.Length > perLine)
+            {
+                yield return line;
+                line = "";
+            }
+            while (w.Length > perLine)
+            {
+                yield return w[..perLine];
+                w = w[perLine..];
+            }
+            line = line.Length == 0 ? w : line + " " + w;
+        }
+        if (line.Length > 0)
+            yield return line;
+    }
+
     public void Paint()
     {
         SetRenderDrawColor(_renderer, 235, 235, 235, 255);
@@ -65,6 +128,18 @@ internal sealed class Backdrop : IDisposable
         {
             var r = new FRect { X = x, Y = y, W = CheckerSize, H = CheckerSize };
             RenderFillRect(_renderer, in r);
+        }
+        if (_caption.Length > 0)
+        {
+            SetRenderDrawColor(_renderer, 24, 24, 28, 255);
+            var strip = new FRect { X = 0, Y = Height, W = Width, H = _strip };
+            RenderFillRect(_renderer, in strip);
+            SetRenderDrawColor(_renderer, 240, 240, 240, 255);
+            SetRenderScale(_renderer, CaptionScale, CaptionScale);
+            var top = (float)Height / CaptionScale;
+            for (var i = 0; i < _caption.Length; i++)
+                RenderDebugText(_renderer, CaptionPad, top + CaptionPad + i * CaptionLineHeight + 2, _caption[i]);
+            SetRenderScale(_renderer, 1, 1);
         }
         RenderPresent(_renderer);
     }
@@ -182,6 +257,29 @@ internal static class Score
         }
         Png.Write(path, both, width * 2, height);
     }
+
+    /// <summary>
+    /// As <see cref="WriteSideBySide"/>, with the screen's caption strip below: <paramref name="shown"/> is the
+    /// backdrop as <see cref="Backdrop.CaptureWithCaption"/> took it, <paramref name="shownHeight"/> tall, whose rows
+    /// below <paramref name="height"/> go under the "with the window" half (the other half is left dark).
+    /// </summary>
+    public static void WriteSideBySide(string path, byte[] before, byte[] after, int width, int height, byte[] shown, int shownHeight)
+    {
+        var total = Math.Max(height, shownHeight);
+        var all = new byte[width * 2 * total * 4];
+        for (var i = 0; i < all.Length; i += 4)
+        {
+            all[i] = 28; all[i + 1] = 24; all[i + 2] = 24; all[i + 3] = 255;
+        }
+        for (var y = 0; y < height; y++)
+        {
+            Array.Copy(before, y * width * 4, all, y * width * 2 * 4, width * 4);
+            Array.Copy(after, y * width * 4, all, (y * width * 2 + width) * 4, width * 4);
+        }
+        for (var y = height; y < shownHeight; y++)
+            Array.Copy(shown, y * width * 4, all, (y * width * 2 + width) * 4, width * 4);
+        Png.Write(path, all, width * 2, total);
+    }
 }
 
 internal static class Png
@@ -274,6 +372,7 @@ internal static unsafe partial class Win32
 
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool GetWindowRect(nint hwnd, out RectL rect);
     [LibraryImport("user32.dll")] public static partial nint WindowFromPoint(Point p);
+    [LibraryImport("dwmapi.dll")] public static partial int DwmFlush();
     [LibraryImport("user32.dll")] public static partial nint GetWindow(nint hwnd, uint cmd);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool SetWindowPos(nint hwnd, nint insertAfter, int x, int y, int cx, int cy, uint flags);
