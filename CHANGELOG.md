@@ -12,7 +12,7 @@ this file disagrees with. Bump it there and add the entry here, in the same comm
 **The event loop owns the caret blink (#200).** `SdlWindowView.Ui` (and `SdlEventLoop.Ui` for a single window) takes the
 window's `WindowUiSettings`, set once by the host. Before each frame the loop sets `CaretPhase` from
 `CaretBlink.PhaseAt` on its clock, so `OnRender` paints in it. While a text field has the keyboard (`Ui.Focus.Current`
-is set) the loop asks for a frame at each 530 ms phase change and its wait is the time to that change; a window with no
+is set) the loop asks for a frame at each 530 ms phase change (the wait is the time to that change but never longer than the loop's base 16 ms, so it wakes at that rate while a field is focused and draws only at a change); a window with no
 focused field, or no `Ui`, asks for nothing, so an idle window draws no frame for the caret. `SdlEventLoop.TimeProvider`
 (init, default `TimeProvider.System`) is the clock every caret decision reads; frame pacing and backoff stay on the
 Stopwatch. The rule is the pure `CaretBlinkPacing`, tested on a fake clock. DIR.Lib 11.84 (`WindowUiSettings.CaretPhase`).

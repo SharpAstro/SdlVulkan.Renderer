@@ -15,8 +15,8 @@ public class CaretBlinkPacingTests
         ui.Focus.Current.ShouldBeNull();
         FocusField(ui);
         var clock = new FakeTimeProvider();
-        // Start exactly on a phase boundary so offsets below are in whole milliseconds.
-        clock.Advance(TimeSpan.FromMilliseconds(CaretBlinkPacing.MillisecondsToNextChange(clock) % CaretBlink.PhaseMilliseconds));
+        // Advance by the time to the next change: that lands exactly on a phase boundary, so offsets below are whole phases.
+        clock.Advance(TimeSpan.FromMilliseconds(CaretBlinkPacing.MillisecondsToNextChange(clock)));
         return (ui, clock);
     }
 
