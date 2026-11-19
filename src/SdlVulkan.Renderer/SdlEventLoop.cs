@@ -364,7 +364,8 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
             // window whose GPU is wedged never renders again, so it never forces the poll path either.
             foreach (var v in _viewList)
             {
-                // The caret: only a window whose field has the keyboard asks for anything.
+                // The caret: only a window whose field has the keyboard asks for anything. The wait is capped at the loop's
+                // base 16 ms, so the loop wakes at that rate while a field is focused; a frame is drawn only at a phase change.
                 if (!v.IsGpuWedged && v.Ui is { } caretUi && !v.Window.IsMinimizedOrHidden && CaretBlinkPacing.HasFocusedField(caretUi))
                 {
                     if (CaretBlinkPacing.FrameOwed(caretUi, v.PaintedCaretPhase, TimeProvider))
@@ -427,11 +428,13 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                 var processorAtStart = Environment.CpuUsage.TotalTime;
                 v.NeedsRedraw = false;
                 // Committed to a frame: let the app configure it before the pass opens.
-                if (v.Ui is { } ui) v.PaintedCaretPhase = CaretBlinkPacing.Step(ui, TimeProvider);
+                var caretPhase = v.Ui is { } ui ? CaretBlinkPacing.Step(ui, TimeProvider) : CaretBlinkPacing.NeverPainted;
                 v.OnBeforeFrame?.Invoke();
                 if (RenderView(v))
                 {
                     renderedAny = true;
+                    // Painted only once the frame was drawn: a failed or dropped frame leaves the phase owed, so the caret frame is retried.
+                    if (v.Ui is not null) v.PaintedCaretPhase = caretPhase;
                     // Paced from the frame's START, so the rate is the display's and not the display's
                     // less the time a frame takes; 95 percent of the interval, so a frame that is due
                     // on the vblank is not pushed to the next one by a tick of scheduling jitter.
