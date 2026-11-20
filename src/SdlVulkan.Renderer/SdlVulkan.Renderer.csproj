@@ -104,7 +104,7 @@
   </ItemGroup>
 
   <!--
-    Shaders are authored as GLSL 450 in Shaders/*.vert|*.frag and pre-baked to SPIR-V under
+    Shaders are authored as GLSL 450 in Shaders/*.vert|*.frag|*.comp and pre-baked to SPIR-V under
     Shaders/spirv/*.spv by the tools/BakeShaders tool (committed). The renderer embeds the .spv and
     loads it at runtime, so the shipped package carries NO shaderc dependency (it has no Android RID)
     and does NO runtime GLSL to SPIR-V compilation. Re-bake and commit the .spv when a shader
@@ -116,7 +116,7 @@
     <EmbeddedResource Include="Shaders\spirv\*.spv">
       <LogicalName>SdlVulkan.Renderer.Shaders.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
-    <ShaderSource Include="Shaders\*.vert;Shaders\*.frag" />
+    <ShaderSource Include="Shaders\*.vert;Shaders\*.frag;Shaders\*.comp" />
   </ItemGroup>
 
   <!-- Warn (never fail) when a shader source no longer matches what it was baked from, so an edit that

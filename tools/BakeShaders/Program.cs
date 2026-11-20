@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using Vortice.ShaderCompiler;
 
-// Bakes the renderer's GLSL 450 shaders (Shaders/*.vert, Shaders/*.frag) to a target format at
+// Bakes the renderer's GLSL 450 shaders (Shaders/*.vert, *.frag, *.comp) to a target format at
 // build time, so VkPipelineSet loads pre-compiled bytecode instead of invoking shaderc at runtime.
 // Runtime shaderc (Silk.NET.Shaderc.Native via Vortice.ShaderCompiler) ships NO android RID, so the
 // runtime path was unloadable on Android; baking here removes shaderc from the shipped package
@@ -12,7 +12,7 @@ using Vortice.ShaderCompiler;
 // naga/Tint, for a browser-WebGPU renderer) are reserved for when those consumers exist.
 //
 // usage: BakeShaders <shaderDir> [--target spirv|glsles|wgsl]
-//   <shaderDir>  directory holding *.vert / *.frag; output goes to <shaderDir>/<target>/
+//   <shaderDir>  directory holding *.vert / *.frag / *.comp; output goes to <shaderDir>/<target>/
 //   --target     output format (default: spirv)
 
 if (args.Length < 1)
@@ -57,15 +57,17 @@ if (target != "spirv")
 var outDir = Path.Combine(shaderDir, "spirv");
 Directory.CreateDirectory(outDir);
 
-// *.vert -> VertexShader, *.frag -> FragmentShader. Ordered for a stable, reviewable build log.
+// *.vert -> VertexShader, *.frag -> FragmentShader, *.comp -> ComputeShader. Ordered for a stable,
+// reviewable build log.
 var sources = Directory.GetFiles(shaderDir, "*.vert")
     .Concat(Directory.GetFiles(shaderDir, "*.frag"))
+    .Concat(Directory.GetFiles(shaderDir, "*.comp"))
     .OrderBy(p => p, StringComparer.Ordinal)
     .ToArray();
 
 if (sources.Length == 0)
 {
-    Console.Error.WriteLine($"no *.vert / *.frag shaders found in {shaderDir}");
+    Console.Error.WriteLine($"no *.vert / *.frag / *.comp shaders found in {shaderDir}");
     return 1;
 }
 
@@ -75,7 +77,12 @@ var manifest = new List<string>(sources.Length);
 foreach (var src in sources)
 {
     var fileName = Path.GetFileName(src);
-    var kind = Path.GetExtension(src) == ".vert" ? ShaderKind.VertexShader : ShaderKind.FragmentShader;
+    var kind = Path.GetExtension(src) switch
+    {
+        ".vert" => ShaderKind.VertexShader,
+        ".comp" => ShaderKind.ComputeShader,
+        _ => ShaderKind.FragmentShader,
+    };
     var source = File.ReadAllText(src);
 
     // Shader source must be ASCII: shaderc's lexer chokes on non-ASCII bytes even inside //

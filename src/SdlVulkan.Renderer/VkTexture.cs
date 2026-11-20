@@ -10,7 +10,7 @@ namespace SdlVulkan.Renderer;
 /// - CreateFromBgra: immediate upload via one-shot command (blocks GPU — use sparingly)
 /// - CreateDeferred + RecordUpload + CleanupStaging: non-blocking, records into frame command buffer
 /// </summary>
-public sealed unsafe class VkTexture : IDisposable
+public sealed unsafe partial class VkTexture : IDisposable
 {
     public VkDescriptorSet DescriptorSet { get; }
 
@@ -196,6 +196,12 @@ public sealed unsafe class VkTexture : IDisposable
     public void RecordUpload(VkCommandBuffer cmd)
     {
         if (IsUploaded) return;
+        // A texture made from Y'CbCr planes is written by a compute dispatch, not copied (VkTexture.YCbCr.cs).
+        if (_conversion is { } conversion)
+        {
+            if (!_disposed) RecordConversionIntoFrame(cmd, conversion);
+            return;
+        }
         // Nothing left to upload from: disposed, or its staging already freed. Recording a copy from a
         // null buffer is what this used to do for a disposed texture.
         if (_disposed || _stagingBuffer == VkBuffer.Null) return;
@@ -339,6 +345,7 @@ public sealed unsafe class VkTexture : IDisposable
 
         IsUploaded = false; // prevent use-after-free via stale references
         ReleaseStaging();
+        ReleaseConversion();
         // Deferred, not destroyed: a texture is routinely disposed in the same frame that drew it (a
         // consumer swaps an image and drops the old one), and the frame's command buffer already holds
         // its descriptor set. Destroying now would submit that frame against freed objects -- the GPU
