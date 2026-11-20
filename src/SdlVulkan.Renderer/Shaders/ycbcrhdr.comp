@@ -1,0 +1,105 @@
+#version 450
+// Y'CbCr planes to a linear-light float texture, for VkRenderer.DrawHdrImage (VkTexture.CreateDeferredFromYCbCr).
+//
+// One invocation per OUTPUT texel. Each averages a reduce x reduce block of source pixels in linear light (a whole
+// factor, so no source pixel is shared or skipped), and each source pixel goes through the conversion H.273 8.3
+// describes, in code units at the planes' bit depth, as SharpAstro.Heif's HeifYCbCrImage.ToRgb does on the CPU:
+// chroma repeated (no filter), narrow range expanded, the matrix inverted, each R'G'B' rounded half up and clamped,
+// then looked up in the caller's code-to-linear table. The CPU does that in double precision and this in float, so
+// a result lying within float error of a half code can round the other way: one code apart, rarely.
+//
+// The planes are 16-bit samples packed two to a uint, the low half first (the bytes of a ushort[] as they are).
+//
+// The brightest channel of any output texel is kept in `peak` as float bits: every value is >= 0, and for
+// non-negative floats the order of their bits as uints is the order of the floats, so atomicMax on the bits is a
+// max on the values. Each workgroup reduces in shared memory first and sends one atomic.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer LumaPlane { uint luma[]; };
+layout(std430, set = 0, binding = 1) readonly buffer CbPlane { uint cb[]; };
+layout(std430, set = 0, binding = 2) readonly buffer CrPlane { uint cr[]; };
+layout(std430, set = 0, binding = 3) readonly buffer CodeTable { float codeToLinear[]; };
+layout(std430, set = 0, binding = 4) buffer Peak { uint peak; };
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D outImage;
+
+layout(push_constant) uniform PC {
+    uint width;        // luma plane, pixels
+    uint height;
+    uint chromaWidth;  // chroma planes' row length, samples
+    uint shiftX;       // log2 chroma subsampling
+    uint shiftY;
+    uint reduce;       // output texel = reduce x reduce source pixels
+    uint bitDepth;
+    uint flags;        // 1: samples are full range; 2: identity matrix (GBR); 4: monochrome (no chroma planes)
+    float kr;
+    float kb;
+} pc;
+
+shared uint groupPeak;
+
+uint lumaAt(uint i) { return (luma[i >> 1] >> ((i & 1u) * 16u)) & 0xFFFFu; }
+uint cbAt(uint i) { return (cb[i >> 1] >> ((i & 1u) * 16u)) & 0xFFFFu; }
+uint crAt(uint i) { return (cr[i >> 1] >> ((i & 1u) * 16u)) & 0xFFFFu; }
+
+float toCode(float v, float maxCode) { return clamp(floor(v + 0.5), 0.0, maxCode); }
+
+vec3 linearAt(uint x, uint y) {
+    float maxCode = float((1u << pc.bitDepth) - 1u);
+    float y_ = float(lumaAt(y * pc.width + x));
+    float cb_, cr_;
+    if ((pc.flags & 4u) != 0u) {
+        cb_ = float(1u << (pc.bitDepth - 1u));
+        cr_ = cb_;
+    } else {
+        uint c = (y >> pc.shiftY) * pc.chromaWidth + (x >> pc.shiftX);
+        cb_ = float(cbAt(c));
+        cr_ = float(crAt(c));
+    }
+
+    vec3 code;
+    if ((pc.flags & 2u) != 0u) {
+        // GBR: Y' is G, Cb is B, Cr is R, as coded.
+        code = vec3(min(cr_, maxCode), min(y_, maxCode), min(cb_, maxCode));
+    } else {
+        float ey, ecb, ecr;
+        if ((pc.flags & 1u) != 0u) {
+            float mid = float(1u << (pc.bitDepth - 1u));
+            ey = y_;
+            ecb = cb_ - mid;
+            ecr = cr_ - mid;
+        } else {
+            float scale = float(1u << (pc.bitDepth - 8u));
+            ey = (y_ - 16.0 * scale) * maxCode / (219.0 * scale);
+            ecb = (cb_ - 128.0 * scale) * maxCode / (224.0 * scale);
+            ecr = (cr_ - 128.0 * scale) * maxCode / (224.0 * scale);
+        }
+        float er = ey + 2.0 * (1.0 - pc.kr) * ecr;
+        float eb = ey + 2.0 * (1.0 - pc.kb) * ecb;
+        float eg = (ey - pc.kr * er - pc.kb * eb) / (1.0 - pc.kr - pc.kb);
+        code = vec3(toCode(er, maxCode), toCode(eg, maxCode), toCode(eb, maxCode));
+    }
+    return vec3(codeToLinear[uint(code.r)], codeToLinear[uint(code.g)], codeToLinear[uint(code.b)]);
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) groupPeak = 0u;
+    barrier();
+
+    uint outWidth = pc.width / pc.reduce;
+    uint outHeight = pc.height / pc.reduce;
+    uvec2 o = gl_GlobalInvocationID.xy;
+    // No early return: every invocation must reach both barriers.
+    if (o.x < outWidth && o.y < outHeight) {
+        vec3 sum = vec3(0.0);
+        for (uint dy = 0u; dy < pc.reduce; dy++)
+            for (uint dx = 0u; dx < pc.reduce; dx++)
+                sum += linearAt(o.x * pc.reduce + dx, o.y * pc.reduce + dy);
+        vec3 rgb = sum / float(pc.reduce * pc.reduce);
+        imageStore(outImage, ivec2(o), vec4(rgb, 1.0));
+        atomicMax(groupPeak, floatBitsToUint(max(max(rgb.r, rgb.g), max(rgb.b, 0.0))));
+    }
+
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) atomicMax(peak, groupPeak);
+}

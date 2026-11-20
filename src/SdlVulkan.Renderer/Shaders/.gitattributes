@@ -5,6 +5,7 @@
 # every checkout gets back, so the hash always agrees.
 *.vert -text
 *.frag -text
+*.comp -text
 
 # Baked bytecode: never translate. Git's binary detection already infers this from the NUL bytes; state
 # it anyway, so a repo-wide `text=auto` added later cannot corrupt an embedded resource.

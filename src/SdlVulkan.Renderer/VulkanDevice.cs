@@ -142,6 +142,23 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         }
     }
 
+    private VkYCbCrConverter? _ycbcrConverter;
+    private readonly Lock _ycbcrConverterLock = new();
+
+    /// <summary>
+    /// The compute pipeline that converts Y'CbCr planes to a float texture (<see cref="VkTexture.CreateDeferredFromYCbCr"/>).
+    /// Built on first use, so a device that never converts a picture never makes it.
+    /// </summary>
+    /// <exception cref="NotSupportedException">The graphics queue runs no compute work.</exception>
+    internal VkYCbCrConverter YCbCrConverter
+    {
+        get
+        {
+            lock (_ycbcrConverterLock)
+                return _ycbcrConverter ??= new VkYCbCrConverter(this);
+        }
+    }
+
     /// <summary>Layout for the Slug glyph store's set: binding 0 one read-only storage buffer (the
     /// glyph words, <see cref="VkSlugGlyphStore"/>), visible to the vertex and fragment stages. A
     /// layout of its own, like <see cref="MaskedDescriptorSetLayout"/>, so the single-sampler layout
@@ -1340,6 +1357,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         DeviceApi.vkDestroyPipelineLayout(SlugPipelineLayout);
         if (_hdrImagePipelineLayout != VkPipelineLayout.Null)
             DeviceApi.vkDestroyPipelineLayout(_hdrImagePipelineLayout);
+        _ycbcrConverter?.Dispose();
         DeviceApi.vkDestroyDescriptorSetLayout(SlugDescriptorSetLayout);
         foreach (var pool in _descriptorPools)
             DeviceApi.vkDestroyDescriptorPool(pool);
