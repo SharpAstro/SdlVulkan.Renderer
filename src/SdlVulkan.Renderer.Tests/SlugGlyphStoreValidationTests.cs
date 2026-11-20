@@ -97,6 +97,19 @@ public sealed class SlugGlyphStoreValidationTests
         // One frame: the warmed 'A' and the window through the batch path, then the same window through one
         // persistent instanced draw. A glyph not in the store yet is skipped (batch) or blank (instance) until a
         // later frame has drained it, which is what makes the store grow while earlier glyphs are drawn.
+        /// <summary>Asks the store for <paramref name="window"/>'s glyphs without a frame: the misses are queued for the
+        /// encoders and nothing drains them until the next frame records its uploads.</summary>
+        public void Request(IReadOnlyList<Rune> window)
+        {
+            var rasterizer = renderer.GlyphRasterizer ?? throw new InvalidOperationException("The renderer has no glyph rasterizer.");
+            var scratch = new float[VkRenderer.SlugInstanceFloats];
+            foreach (var rune in window)
+            {
+                var gid = rasterizer.ResolveGlyphIdentity(FontPath, rune, -1, GlyphMapHint.Auto).Gid;
+                renderer.WriteSlugGlyphInstance(FontPath, gid, null, 0f, 0f, 14f, 0f, 1f, scratch);
+            }
+        }
+
         public void Frame(IReadOnlyList<Rune> window)
         {
             var rasterizer = renderer.GlyphRasterizer!;
@@ -202,11 +215,14 @@ public sealed class SlugGlyphStoreValidationTests
                     cursor += 5;
                 }
 
-                // A big fresh window: requested by a clean frame, then waited for until every encode is done, so the
-                // frame refused at submit finds all of it waiting and has to grow to take it.
+                // A big fresh window: requested OUTSIDE any frame, then waited for until every encode is done, so the
+                // frame refused at submit finds all of it waiting and has to grow to take it. It used to be requested
+                // by a clean frame, which raced the encoders: when they finished before that frame drained its uploads
+                // (warm, as they are after other glyph tests in the same process), the clean frame took the whole
+                // window and grew, and no dropped frame was left anything to grow.
                 var big = Enumerable.Range(0, 40).Select(k => Pool[(cursor + k) % Pool.Length]).ToArray();
                 cursor += 40;
-                drv.Frame(big);
+                drv.Request(big);
                 var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
                 while (store.EncodesInFlight > 0)
                 {
