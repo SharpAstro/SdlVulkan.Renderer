@@ -7,6 +7,25 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.107
+
+**Y'CbCr planes to an HDR texture on the GPU.** `VkTexture.CreateDeferredFromYCbCr(ctx, YCbCrPlanes, reduce)` takes a
+decoder's planes (luma, chroma, subsampling, `Kr`/`Kb`, range, and a code-to-linear table) and converts them in a compute
+shader (`Shaders/ycbcrhdr.comp`): chroma repeated, the H.273 matrix in code units, rounding, the transfer by table, an
+optional whole-factor reduction averaged in linear light, and the brightest channel, which `VkTexture.MeasuredPeak` reports
+once the frame that ran it has retired. The result is the R16G16B16A16Sfloat texture `DrawHdrImage` takes. The renderer
+knows no codec: SharpAstro.Heif 3.41's `HeifDecoder.DecodeYCbCr` hands over exactly this. The dispatch is recorded where a
+deferred upload's copy is and requeued the same way after a dropped frame; `CreateFromYCbCr` is the one-shot form. The
+pipeline, layouts and descriptor pool belong to the device (`VulkanDevice.YCbCrConverter`), made on first use; a graphics
+queue without compute is refused with `NotSupportedException`. Tested against a double-precision CPU reference in every
+H.265 layout, and under the validation layer with synchronization validation. BakeShaders and the stale-bake check take
+`*.comp`. Additive only.
+
+**`SlugGlyphStoreValidationTests`: the dropped-frame test no longer races its encoders.** It requested its glyphs in a clean
+frame, and when the encoder threads finished before that frame drained, the clean frame grew the store and the dropped
+frame had nothing to grow; it failed every full run once more test classes ran ahead of it. The glyphs are now requested
+outside any frame.
+
 ## 7.106
 
 **The event loop owns the caret blink (#200).** `SdlWindowView.Ui` (and `SdlEventLoop.Ui` for a single window) takes the
