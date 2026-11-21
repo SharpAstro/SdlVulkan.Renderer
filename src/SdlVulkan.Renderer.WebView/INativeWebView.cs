@@ -102,7 +102,11 @@ public interface INativeWebView : IDisposable
     /// </summary>
     /// <remarks>On WebView2 it is raised on the window's thread (WebView2's events arrive in the window's message
     /// loop), so the handler can resize the window and the view directly. Windows only for now: the WebKitGTK and
-    /// WKWebView backends never raise it.</remarks>
+    /// WKWebView backends never raise it.
+    /// <para>Since WebView2 158 the page is granted fullscreen only while the view has the keyboard focus; otherwise
+    /// <c>requestFullscreen()</c> rejects with "not granted" and this is not raised. A person's click on the page
+    /// focuses the view by itself; a host that starts fullscreen itself (a script it runs, or a protocol click)
+    /// calls <see cref="Focus"/> first (#203).</para></remarks>
     event Action<bool>? FullscreenChanged;
 
     /// <summary>Raised when a navigation completes; carries the final URL.</summary>

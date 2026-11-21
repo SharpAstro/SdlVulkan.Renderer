@@ -170,7 +170,14 @@ internal static partial class Program
         <!doctype html><meta charset="utf-8"><title>fullscreen-test</title>
         <div id="box" style="width:200px;height:120px;background:#c22"></div>
         <script>
-          window.addEventListener('load', function () { window.chrome.webview.postMessage({ ready: true }); });
+          var box = document.getElementById('box');
+          box.addEventListener('click', function () {
+            box.requestFullscreen().catch(function (e) { window.chrome.webview.postMessage({ fullscreenError: String(e) }); });
+          });
+          window.addEventListener('load', function () {
+            var r = box.getBoundingClientRect();
+            window.chrome.webview.postMessage({ ready: true, box: { x: r.x + r.width / 2, y: r.y + r.height / 2 } });
+          });
         </script>
         """;
 
@@ -669,8 +676,9 @@ internal static partial class Program
         return sent == inputs.Length ? "ok" : $"{sent} of {inputs.Length} sent, error {Marshal.GetLastPInvokeError()}";
     }
 
-    // The page's fullscreen: the box asks for it through the protocol with a user gesture (as a click on a video's
-    // fullscreen button would), FullscreenChanged(true) must follow, and the handler resizes the view as a host
+    // The page's fullscreen: the host focuses the view and clicks the box through the protocol's input events, and the
+    // box's own click handler asks for it (as a click on a video's fullscreen button does), FullscreenChanged(true)
+    // must follow, and the handler resizes the view as a host
     // filling the screen with its window does. The page must stay fullscreen through that; a second later the host
     // asks it to leave, and FullscreenChanged(false) must follow. A false before then is the page dropping out on
     // its own. WebView2 only (WebKitGTK has no protocol and does not raise the event yet): SKIP there.
@@ -688,8 +696,32 @@ internal static partial class Program
             _assertMode = assertMode;
             webView.MessageReceived += json =>
             {
-                if (json.Contains("\"ready\""))
-                    Evaluate("document.getElementById('box').requestFullscreen().then(() => 'ok')", userGesture: true);
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("box", out var box))
+                {
+                    // Since WebView2 158 (the runner image of 2026-11-16 has it), fullscreen is granted only while the
+                    // browser's window has the keyboard focus; without it requestFullscreen answers "TypeError: not
+                    // granted" however the request was made, a trusted click or Runtime.evaluate with userGesture (#203).
+                    // A person's click on the page focuses that window by itself; a protocol click does not, so the
+                    // view is focused first, as that click would have. Measured: the same click is refused without the
+                    // focus and granted with it, in this host and in Microsoft's WinForms one.
+                    webView.Focus();
+                    ClickAsync(webView, box.GetProperty("x").GetDouble(), box.GetProperty("y").GetDouble())
+                        .ContinueWith(t =>
+                        {
+                            var error = t.Exception?.GetBaseException();
+                            if (error is PlatformNotSupportedException && _assertMode)
+                            {
+                                Log($"SMOKE: SKIP ({error.Message})");
+                                FastExit(0);
+                            }
+                            else if (error is not null)
+                                _problem = $"the protocol click on the box failed: {error.Message}";
+                        }, TaskScheduler.Default);
+                }
+                else if (root.TryGetProperty("fullscreenError", out var refused))
+                    _problem = $"the page's requestFullscreen from a click was refused: {refused.GetString()}";
             };
             webView.FullscreenChanged += full =>
             {
