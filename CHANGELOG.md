@@ -7,6 +7,14 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.108
+
+**Dependencies to their latest releases.** DIR.Lib 11.99 (was 11.84; the fifteen releases between are DIR.Lib's own,
+see its changelog), SharpAstro.AppShell 1.4 (was 1.2: 1.3 adds `CrashTrace`, 1.4 `DesktopAccent` and
+`DesktopAppearance`, all opt-in) and, for the inspector, SharpAstro.Png 3.41 (was 3.14). Nothing in the renderer's own
+source changes. A consumer that pins AppShell itself (the PDF viewer does, to the same float as this file) moves with it.
+Additive only.
+
 ## 7.107
 
 **Y'CbCr planes to an HDR texture on the GPU.** `VkTexture.CreateDeferredFromYCbCr(ctx, YCbCrPlanes, reduce)` takes a
