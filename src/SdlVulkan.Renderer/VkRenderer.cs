@@ -1534,6 +1534,65 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         api.vkCmdDraw(_currentCmd, 6, 1, 0, 0);
     }
 
+    // Vertex scratch for DrawTexturedQuadRegions: grown to the largest run, kept for the renderer's life.
+    private float[] _texturedQuadScratch = [];
+
+    /// <summary>
+    /// <see cref="DrawTexturedQuadRegion"/> for many quads off ONE texture in one draw: the vertices of
+    /// every quad go into the ring together, then one bind and one <c>vkCmdDraw</c>. A sheet built from
+    /// thousands of raster strips packed into an image atlas otherwise pays a descriptor bind and a draw
+    /// for each strip. Each quad paints after the one before it, as separate calls would.
+    /// </summary>
+    public void DrawTexturedQuadRegions(VkDescriptorSet textureSet, ReadOnlySpan<TexturedQuad> quads)
+    {
+        if (_pipelines is null || quads.IsEmpty) return;
+        if (quads.Length == 1)
+        {
+            ref readonly var q = ref quads[0];
+            DrawTexturedQuadRegion(textureSet, q.X0, q.Y0, q.X1, q.Y1, q.X2, q.Y2, q.X3, q.Y3, q.U0, q.V0, q.U1, q.V1);
+            return;
+        }
+
+        var api = Surface.DeviceApi;
+        var floats = quads.Length * 24;
+        if (_texturedQuadScratch.Length < floats) _texturedQuadScratch = new float[Math.Max(floats, _texturedQuadScratch.Length * 2)];
+        var v = _texturedQuadScratch.AsSpan(0, floats);
+        for (var i = 0; i < quads.Length; i++)
+        {
+            ref readonly var q = ref quads[i];
+            var o = v.Slice(i * 24, 24);
+            // The same two triangles DrawTexturedQuadRegion writes.
+            o[0] = q.X0; o[1] = q.Y0; o[2] = q.U0; o[3] = q.V0;
+            o[4] = q.X1; o[5] = q.Y1; o[6] = q.U1; o[7] = q.V0;
+            o[8] = q.X3; o[9] = q.Y3; o[10] = q.U1; o[11] = q.V1;
+            o[12] = q.X0; o[13] = q.Y0; o[14] = q.U0; o[15] = q.V0;
+            o[16] = q.X3; o[17] = q.Y3; o[18] = q.U1; o[19] = q.V1;
+            o[20] = q.X2; o[21] = q.Y2; o[22] = q.U0; o[23] = q.V1;
+        }
+
+        _pushConstants[16] = 1f;
+        _pushConstants[17] = 1f;
+        _pushConstants[18] = 1f;
+        _pushConstants[19] = 1f;
+
+        var offset = Surface.WriteVertices(v);
+        if (offset == uint.MaxValue) return;
+
+        BindPipeline(_pipelines.PagePipeline);
+
+        fixed (float* pPC = _pushConstants)
+            api.vkCmdPushConstants(_currentCmd, Surface.PipelineLayout,
+                VkShaderStageFlags.Vertex | VkShaderStageFlags.Fragment, 0, 84, pPC);
+
+        api.vkCmdBindDescriptorSets(_currentCmd, VkPipelineBindPoint.Graphics,
+            Surface.PipelineLayout, 0, 1, &textureSet, 0, null);
+
+        var buffer = Surface.VertexBuffer;
+        var vkOffset = (ulong)offset;
+        api.vkCmdBindVertexBuffers(_currentCmd, 0, 1, &buffer, &vkOffset);
+        api.vkCmdDraw(_currentCmd, (uint)(quads.Length * 6), 1, 0, 0);
+    }
+
     /// <summary>
     /// <see cref="DrawTexturedQuad"/> through <see cref="VkPipelineSet.MaskedPipeline"/>: the drawn
     /// texture's alpha is multiplied by a coverage mask sampled at the same UV. Takes a set from

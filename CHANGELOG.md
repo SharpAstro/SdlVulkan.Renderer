@@ -7,6 +7,17 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.111
+
+**Many textured quads off one texture in one draw.** `VkRenderer.DrawTexturedQuadRegions(textureSet, quads)` takes a
+span of `TexturedQuad` (four corners and the UV rectangle they map, meaning what they mean for
+`DrawTexturedQuadRegion`), writes every quad's vertices into the ring together, and issues one bind and one draw. A
+page of many small images packed into one atlas texture paid a descriptor bind and a draw for each image. In the PDF
+viewer, a sheet of 1,365 raster strips went from 1,365 draws to 4 and its redraw from 4.7 to 1.7 ms of GPU (Adreno
+X1-85). Each quad paints after the one before it, as separate calls would, and the pixels are those of the quads drawn
+one call at a time (`TexturedQuadRegionsRenderTests`). One quad goes through `DrawTexturedQuadRegion`; an empty span
+draws nothing.
+
 ## 7.110
 
 Render-thread work traced in TianWen's GUI (2026-11-25). Additive: three public members, the rest internal.
