@@ -68,6 +68,62 @@ public class RedrawPendingTests
         view.RedrawPendingForPointerMoveAlone.ShouldBeFalse();
     }
 
+    // A frame the app's own check asked for, held by pacing past the next check, is still the check's own: the app
+    // knows what it asked it for. It used to read as a cause of the loop's, which an app that narrows draws in full.
+    [Fact]
+    public void AFrameTheCheckAskedForIsKnownAsTheAppsOwn()
+    {
+        var view = NewView();
+        view.NeedsRedraw = false;
+
+        view.ArmForCheck();
+        view.RedrawPending.ShouldBeTrue();
+        view.RedrawPendingForCheckAndPointerMovesAlone.ShouldBeTrue();
+        view.RedrawPendingForPointerMoveAlone.ShouldBeFalse("the check asked, not a move");
+
+        // A move a handler took changes neither answer, in either order.
+        view.ArmForPointerMove();
+        view.RedrawPendingForCheckAndPointerMovesAlone.ShouldBeTrue();
+
+        view.NeedsRedraw = false;
+        view.ArmForPointerMove();
+        view.ArmForCheck();
+        view.RedrawPendingForCheckAndPointerMovesAlone.ShouldBeTrue();
+        view.RedrawPendingForPointerMoveAlone.ShouldBeTrue("a check that agrees to a move's frame leaves it a move's");
+    }
+
+    // Anything the loop raises itself is a cause the app cannot name, before or after its own.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ACauseOfTheLoopsTakesTheAppsOwnAway(bool checkFirst)
+    {
+        var view = NewView();
+        view.NeedsRedraw = false;
+
+        if (checkFirst)
+        {
+            view.ArmForCheck();
+            view.RequestRedraw();
+        }
+        else
+        {
+            view.RequestRedraw();
+            view.ArmForCheck();
+        }
+
+        view.RedrawPendingForCheckAndPointerMovesAlone.ShouldBeFalse();
+
+        // And a drawn frame starts over.
+        view.NeedsRedraw = false;
+        view.RedrawPendingForCheckAndPointerMovesAlone.ShouldBeFalse("nothing is owed");
+        view.ArmForCheck();
+        view.RedrawPendingForCheckAndPointerMovesAlone.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void ANewWindowsFirstFrameIsNotTheAppsOwn() => NewView().RedrawPendingForCheckAndPointerMovesAlone.ShouldBeFalse();
+
     [Fact]
     public void ADrawnFrameStartsOver()
     {

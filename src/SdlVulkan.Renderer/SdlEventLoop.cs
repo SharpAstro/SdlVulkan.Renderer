@@ -25,8 +25,6 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
     private readonly SdlWindowView? _primary; // set by the single-window convenience ctor
     private bool _running;
 
-    private static readonly ulong MouseRedrawInterval = GetPerformanceFrequency() / 30; // ~30fps
-
     // GPU fence-timeout handling (see RenderView's catch). A late fence is retried NON-destructively
     // on this cadence — the context has switched to short fence polls after the first timeout, so each
     // attempt is nearly free and the loop keeps dispatching SDL events in between (the window stays
@@ -248,6 +246,41 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
     public bool RedrawPending => Primary.RedrawPending;
     /// <inheritdoc cref="SdlWindowView.RedrawPendingForPointerMoveAlone"/>
     public bool RedrawPendingForPointerMoveAlone => Primary.RedrawPendingForPointerMoveAlone;
+    /// <inheritdoc cref="SdlWindowView.RedrawPendingForCheckAndPointerMovesAlone"/>
+    public bool RedrawPendingForCheckAndPointerMovesAlone => Primary.RedrawPendingForCheckAndPointerMovesAlone;
+    /// <inheritdoc cref="SdlWindowView.IdleCheckInterval"/>
+    public TimeSpan IdleCheckInterval
+    {
+        get => Primary.IdleCheckInterval;
+        set => Primary.IdleCheckInterval = value;
+    }
+
+    // The event Wake pushes, registered by the first loop to run; and whether one is in the queue, so a burst of wakes
+    // from a busy thread is one event.
+    private static uint s_wakeEventType;
+    private int _wakePending;
+
+    // When the loop last dispatched an event of the system's (anything but an event an app registered): input, in the
+    // main, and what the idle pacing's settle time is measured from. 0 for never.
+    private long _lastSystemEventTimestamp;
+
+    /// <summary>
+    /// Wakes the loop from any thread and has it ask its windows' <see cref="SdlWindowView.CheckNeedsRedraw"/>: something
+    /// changed outside the loop (a background task finished, a reading arrived). For a host that stated an
+    /// <see cref="SdlWindowView.IdleCheckInterval"/>, since its check is otherwise not asked until that runs out; harmless
+    /// for one that did not. Any number of calls before the loop gets to them are one wake. Before <see cref="Run"/> it
+    /// does nothing: the loop asks every check on its first pass.
+    /// </summary>
+    public void Wake()
+    {
+        var type = Volatile.Read(ref s_wakeEventType);
+        if (type == 0 || Interlocked.Exchange(ref _wakePending, 1) != 0)
+            return;
+
+        var evt = default(Event);
+        evt.User.Type = type;
+        PushEvent(ref evt);
+    }
 
     /// <summary>Primary window's render-degraded (load-shed) callback. See <see cref="SdlWindowView.OnRenderDegraded"/>.</summary>
     public Action? OnRenderDegraded { get => Primary.OnRenderDegraded; set => Primary.OnRenderDegraded = value; }
@@ -344,6 +377,12 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
     public void Run(CancellationToken ct = default)
     {
         _running = true;
+        if (Volatile.Read(ref s_wakeEventType) == 0)
+            Volatile.Write(ref s_wakeEventType, RegisterEvents(1));
+
+        // This thread draws every frame: full speed whenever it runs, never an efficiency core for a window that is not
+        // in the foreground (RenderThreadQos).
+        RenderThreadQos.RequestForCurrentThread();
 
         while (_running && !ct.IsCancellationRequested)
         {
@@ -356,7 +395,12 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
             var anyNeedsRedraw = false;
             // A window with a redraw pending but not yet due (frame pacing) must not force PollEvent
             // either, or the loop busy-spins until it is due; it waits for exactly that long instead.
-            var waitMs = 16;
+            // With nothing owed the wait runs until the earliest redraw check falls due: 16 ms for a host that states no
+            // idle interval, as it always was, and as long as its host said for one that does (RedrawCheckPacing).
+            var ticksUntilCheck = long.MaxValue;
+            foreach (var v in _viewList)
+                ticksUntilCheck = Math.Min(ticksUntilCheck, v.NextCheckDueTimestamp - nowStamp);
+            var waitMs = _viewList.Count == 0 ? 16 : RedrawCheckPacing.IdleWaitMilliseconds(ticksUntilCheck, Stopwatch.Frequency);
             // A minimized (or hidden) window is excluded here (and skipped in the render pass below) so it never
             // forces the non-blocking PollEvent path: its surface is 0x0, so rendering it would just
             // busy-spin through failed acquire/present + swapchain recreation for frames nobody sees.
@@ -391,14 +435,27 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                 {
                     Dispatch(ref evt);
                 } while (_running && PollEvent(out evt));
+
+                // An event or a wake: something may have changed, so every check is due a paced spacing after it was
+                // last asked, however long its host had said it could go unasked.
+                foreach (var v in _viewList)
+                    v.NextCheckDueTimestamp = RedrawCheckPacing.PulledIn(
+                        v.NextCheckDueTimestamp, v.LastCheckTimestamp, FrameIntervalTicks(v), Stopwatch.Frequency);
             }
 
-            // Per-window external redraw checks (background task completions, cursor blink, …). Still
-            // asked of a wedged window, whose redraw is then never drawn: a host may use the check as its
-            // once-per-iteration hook, as a shutdown drain does to stop the loop when its work completes.
+            // Per-window external redraw checks (background task completions, a mirror's reading, ...), FRAME-RATE
+            // LIMITED (RedrawCheckPacing): here at most once a refresh, so an external change arms a frame within a refresh
+            // but a burst of input does not ask the check on every wake it makes; and in the render pass below, right before
+            // a frame is drawn, of a window this pass has not asked yet, so every frame folds in what changed outside the
+            // loop. Still asked of a wedged window, whose redraw is then never drawn: a host may use the check as its
+            // periodic hook, as a shutdown drain does to stop the loop when its work completes.
+            var checkStamp = Stopwatch.GetTimestamp();
             foreach (var v in _viewList)
-                if (v.CheckNeedsRedraw?.Invoke() == true)
-                    v.ArmForCheck();
+            {
+                v.CheckedThisPass = false;
+                if (RedrawCheckPacing.Due(checkStamp, v.NextCheckDueTimestamp))
+                    AskRedrawCheck(v, checkStamp);
+            }
 
             if (!_running)
                 break;
@@ -425,6 +482,15 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                 var frameStart = Stopwatch.GetTimestamp();
                 PaceForCost(v);
                 if (frameStart < v.NextFrameDueTimestamp) continue;
+                // Every frame folds in what changed outside the loop: a window the paced check above passed over is asked
+                // now, in the pass that draws it. Its answer can only arm the frame already committed to; what it is asked
+                // for is its side effects, the host's view of the world brought up to date for this frame. A check that
+                // stops the loop (a shutdown drain) stops it before the frame.
+                if (!v.CheckedThisPass)
+                {
+                    AskRedrawCheck(v, frameStart);
+                    if (!_running) break;
+                }
                 var processorAtStart = Environment.CpuUsage.TotalTime;
                 v.NeedsRedraw = false;
                 // Committed to a frame: let the app configure it before the pass opens.
@@ -454,10 +520,30 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
             if (renderedAny)
                 OnPostFrame?.Invoke();
 
+            if (FrameLog && _inputTrace.TryTakeSummary(Stopwatch.GetTimestamp(), Stopwatch.Frequency, out var input))
+                SdlVulkanLog.Logger.InputTraced(input.Seconds, input.Mouse, input.TouchMouse, input.PenMouse, input.Finger,
+                    input.Wheel, input.Key, input.AgeAvgMs, input.AgeMaxMs);
+
             // Every iteration, incl. when nothing rendered (idle, or every window minimized): a host's proof of life,
             // and the debug inspector's pump.
             OnLoopIteration?.Invoke();
         }
+    }
+
+    // Asks a window's CheckNeedsRedraw once in this pass and arms its frame on a yes. The next paced ask falls due a
+    // refresh later, whichever of the two places in Run asked it; for a window that owes no frame and whose host stated
+    // an idle interval, that long later (RedrawCheckPacing.NextDue). The interval is read AFTER the check: the host sets
+    // it there, from what the check has just learned.
+    private void AskRedrawCheck(SdlWindowView v, long now)
+    {
+        v.CheckedThisPass = true;
+        v.LastCheckTimestamp = now;
+        if (v.CheckNeedsRedraw?.Invoke() == true)
+            v.ArmForCheck();
+
+        var idleTicks = v.NeedsRedraw ? 0 : (long)(v.IdleCheckInterval.TotalSeconds * Stopwatch.Frequency);
+        var sinceInput = _lastSystemEventTimestamp == 0 ? long.MaxValue : now - _lastSystemEventTimestamp;
+        v.NextCheckDueTimestamp = RedrawCheckPacing.NextDue(now, FrameIntervalTicks(v), Stopwatch.Frequency, idleTicks, sinceInput);
     }
 
     // Renders one window. Returns true if a frame was actually drawn (false if the swapchain needed
@@ -874,8 +960,60 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
     // come through here.
     private static float PointerScale(SdlWindowView view) => view.Window.PixelDensity;
 
+    // SDLVK_FRAME_LOG's input line (InputTrace): what was dispatched, by source, and how long it had queued.
+    private readonly InputTrace _inputTrace = new();
+
+    private void TraceInput(ref Event evt)
+    {
+        InputTrace.Source source;
+        switch ((EventType)evt.Type)
+        {
+            case EventType.MouseMotion:
+                source = InputTrace.MouseSource(evt.Motion.Which, TouchMouseID, unchecked((uint)PenMouseID));
+                break;
+            case EventType.MouseButtonDown:
+            case EventType.MouseButtonUp:
+                source = InputTrace.MouseSource(evt.Button.Which, TouchMouseID, unchecked((uint)PenMouseID));
+                break;
+            case EventType.FingerDown:
+            case EventType.FingerMotion:
+            case EventType.FingerUp:
+                source = InputTrace.Source.Finger;
+                break;
+            case EventType.MouseWheel:
+                source = InputTrace.Source.Wheel;
+                break;
+            case EventType.KeyDown:
+            case EventType.KeyUp:
+                source = InputTrace.Source.Key;
+                break;
+            default:
+                return;
+        }
+
+        // SDL stamps an event with its own nanosecond clock as it queues it; the difference is the time it waited for us.
+        var stamp = evt.Common.Timestamp;
+        var now = GetTicksNS();
+        _inputTrace.Count(source, stamp > 0 && now >= stamp ? (now - stamp) / 1e6 : -1);
+    }
+
     private void Dispatch(ref Event evt)
     {
+        // A wake (Wake): nothing to dispatch, its arrival is the whole of it. Run pulls the checks in after the batch.
+        if (evt.Type == Volatile.Read(ref s_wakeEventType) && evt.Type != 0)
+        {
+            Volatile.Write(ref _wakePending, 0);
+            return;
+        }
+
+        // An event of the system's rather than one an app registered: input, in the main. The idle pacing settles
+        // from the last of these.
+        if (evt.Type < (uint)EventType.User)
+            _lastSystemEventTimestamp = Stopwatch.GetTimestamp();
+
+        if (FrameLog)
+            TraceInput(ref evt);
+
         switch ((EventType)evt.Type)
         {
             case EventType.Quit:
@@ -1072,13 +1210,13 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                         vmm.MouseY = newMy;
                         if (vmm.DispatchPointerMove(vmm.MouseX, vmm.MouseY, GetModState().ToInputModifier))
                         {
-                            // Throttle mouse-driven redraws to ~30fps (per window).
-                            var now = GetPerformanceCounter();
-                            if (now - vmm.LastMouseRedrawCounter >= MouseRedrawInterval)
-                            {
-                                vmm.LastMouseRedrawCounter = now;
-                                vmm.ArmForPointerMove();
-                            }
+                            // Every move a handler took owes a frame, and frame pacing (NextFrameDueTimestamp) is the one
+                            // thing that sets its rate: all the moves of a refresh fold into the frame drawn at its end.
+                            // A 30 fps limit used to sit here that DROPPED the arm of a move inside its window, from
+                            // before pacing existed. A host then had to redraw the dropped move on a timer of its own,
+                            // and the two clocks beat against each other: frames 14 ms apart, then a 65 ms hole, 13
+                            // updates a second under a moving pointer (the atlas's hover and pan, 2026-11-25).
+                            vmm.ArmForPointerMove();
                         }
                     }
                 }

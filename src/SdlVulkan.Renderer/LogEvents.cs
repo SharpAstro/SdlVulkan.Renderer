@@ -47,6 +47,10 @@ internal static partial class LogEvents
     public static partial void FrameTiming(this ILogger logger, uint windowId, long frame, double frameMs, double beginMs,
         double hooksMs, double renderMs, double endMs, long gpuFrame, double gpuMs, string gpuSections);
 
+    [LoggerMessage(121, LogLevel.Information, "[SdlEventLoop] input in {Seconds:F1}s: mouse {Mouse}, touch-as-mouse {TouchMouse}, pen-as-mouse {PenMouse}, finger {Finger}, wheel {Wheel}, key {Key}; queued {AgeAvgMs:F1}ms avg, {AgeMaxMs:F1}ms max")]
+    public static partial void InputTraced(this ILogger logger, double seconds, int mouse, int touchMouse, int penMouse, int finger,
+        int wheel, int key, double ageAvgMs, double ageMaxMs);
+
     [LoggerMessage(120, LogLevel.Warning, "[VkRenderer] the single-sample pipelines could not be built ({Reason}); every main pass stays multisampled.")]
     public static partial void SingleSamplePipelinesFailed(this ILogger logger, string? reason);
 

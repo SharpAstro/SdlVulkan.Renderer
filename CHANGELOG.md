@@ -7,6 +7,38 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.110
+
+Render-thread work traced in TianWen's GUI (2026-11-25). Additive: three public members, the rest internal.
+
+**The redraw check is asked once a refresh, not on every wake.** `SdlWindowView.CheckNeedsRedraw` is asked right before
+each frame drawn of the window and otherwise at most about once a display refresh (`RedrawCheckPacing`). A burst of
+input woke the loop thousands of times a second and asked the check on each: 3,700 times a second for 55 frames while
+dragging a sky map. A host that used the check as a once-per-pass hook now gets it about once a refresh. **BEHAVIOUR
+CHANGE** for such a host.
+
+**An idle host can say when it next needs asking.** `SdlWindowView.IdleCheckInterval` (default zero: one refresh, as
+before), set from inside the check, lets the loop leave an idle window unasked until then, an event, or
+`SdlEventLoop.Wake()`, which any thread calls when something changed outside the loop; any number of wakes before the
+loop gets to them are one. The loop bounds the interval at a second, and keeps the refresh's pace for a second after
+input. Sixty asks a second of an idle window were more of an idle GUI's render thread than its frames.
+
+**What a pending frame is owed to.** `SdlWindowView.RedrawPendingForCheckAndPointerMovesAlone` (and the same on
+`SdlEventLoop`): the frame owed is owed to nothing but the host's own check answers and pointer moves a handler took,
+so a host that keeps what its check asked a frame for may narrow that frame.
+
+**The render thread asks for full speed on Windows** (`RenderThreadQos`): `SetThreadInformation` with
+`ThreadPowerThrottling` execution-speed throttling off, so a hybrid processor does not run a background window's frames
+on an efficiency core at half speed. A no-op elsewhere and where Windows refuses it.
+
+**Text outside a partial repaint is not shaped** (`TextCulling`): a text that cannot reach the region a damage-limited
+pass paints is dropped before shaping, on a generous bound (two ems a glyph, an em of padding).
+
+**`SDLVK_FRAME_LOG` has an input line** (`InputTrace`): once a second while input arrives, what the loop dispatched by
+source (mouse, touch-as-mouse, pen-as-mouse, finger, wheel, key) and how long the events had waited in SDL's queue.
+
+- `VkRenderer`'s line boxes and `FillRectangles` add their vertex floats one by one instead of through a temporary array.
+
 ## 7.109
 
 **An iOS app gets SDL3 and MoltenVK from the package (sebgod/chess#74).** `buildTransitive/SdlVulkan.Renderer.targets`
