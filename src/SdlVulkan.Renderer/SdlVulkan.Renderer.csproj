@@ -47,6 +47,16 @@
     <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
+  <!-- The iOS frameworks every net10.0-ios head needs (SDL3 + MoltenVK): the targets add them as NativeReference
+       items and the script fetches the pinned releases. NuGet imports buildTransitive/<package id>.targets only, so
+       the file takes the package's id, which differs for the Debug twin. Included explicitly, not by updating the
+       SDK's default items: the multi-targeting outer build, which packs, has no default items to update. -->
+  <ItemGroup>
+    <None Remove="buildTransitive/**" />
+    <None Include="buildTransitive/SdlVulkan.Renderer.targets" Pack="true" PackagePath="buildTransitive/$(PackageId).targets" />
+    <None Include="buildTransitive/fetch-ios-frameworks.sh" Pack="true" PackagePath="buildTransitive/fetch-ios-frameworks.sh" />
+  </ItemGroup>
+
   <!--
     DIR.Lib (rendering primitives + font rasterization) is referenced via
     ProjectReference when a sibling working copy exists, so iteration can

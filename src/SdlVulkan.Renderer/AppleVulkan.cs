@@ -57,8 +57,9 @@ internal static class AppleVulkan
         {
             // The app set a resolver on SDL3-CS first; it knows where its SDL is.
         }
-        // This assembly imports SDL_RunApp itself (SdlVulkanIosApp, 7.93), under the same "SDL3" name. It has no other
-        // [DllImport], so the resolver answers for SDL3 alone and nothing else is redirected.
+        // This assembly imports SDL_RunApp itself (SdlVulkanIosApp, 7.93), under the same "SDL3" name. The resolver
+        // answers for SDL3 alone; for any other library (AppleAppInfo's CoreFoundation and libSystem, named by absolute
+        // path) it returns zero, which leaves that one to the runtime's ordinary probing.
         try
         {
             NativeLibrary.SetDllImportResolver(typeof(AppleVulkan).Assembly, resolver);

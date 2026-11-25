@@ -45,6 +45,9 @@
 
   <ItemGroup>
     <Content Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- IosFrameworksTargetsTests evaluates the package's iOS targets as an app would import them. Copied rather than
+         found through [CallerFilePath], which a ContinuousIntegrationBuild maps to /_/. -->
+    <Content Include="..\SdlVulkan.Renderer\buildTransitive\**" LinkBase="buildTransitive" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

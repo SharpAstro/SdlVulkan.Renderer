@@ -43,6 +43,16 @@ public abstract class SdlVulkanIosApp
     /// </summary>
     protected virtual bool Fullscreen => true;
 
+    /// <summary>
+    /// The file in the app's Documents folder that the renderer's diagnostics (<see cref="SdlEventLoop.DiagnosticLog"/>)
+    /// also go to, replaced on every launch and headed by the app's version, the device model and the OS version; null
+    /// for none (stderr, the device log, only). Default: the window title in lower case plus <c>.log</c> (a
+    /// <see cref="WindowTitle"/> of "Chess" writes chess.log). The Files app shows the folder, so a tester can send
+    /// the file, once the app's Info.plist sets <c>UIFileSharingEnabled</c>. Used by the default sink only: an app
+    /// that sets <see cref="SdlEventLoop.DiagnosticLog"/> before <see cref="Run"/> keeps its own.
+    /// </summary>
+    protected virtual string? LogFileName => MobileLog.FileNameFor(WindowTitle);
+
     /// <summary>The SDL window, available from <see cref="OnRendererReady"/> onward.</summary>
     protected SdlVulkanWindow SdlWindow { get; private set; } = null!;
 
@@ -86,11 +96,14 @@ public abstract class SdlVulkanIosApp
         try
         {
             // Default the diagnostic sink before bring-up, as the Android host does: a failure in the surface
-            // bring-up happens BEFORE OnRendererReady, where a consumer would install its own. On iOS stderr goes
-            // to the device log. ??= so a sink the consumer set earlier wins.
-            SdlEventLoop.DiagnosticLog ??= static m => Console.Error.WriteLine($"SdlVulkan: {m}");
+            // bring-up happens BEFORE OnRendererReady, where a consumer would install its own. stderr is the device
+            // log, which needs a Mac to read, so the lines also go to Documents/<LogFileName>. ??= so a sink the
+            // consumer set earlier wins.
+            var app = _running;
+            SdlEventLoop.DiagnosticLog ??= app?.DefaultLog() ?? StderrLog;
+            if (app is null)
+                throw new InvalidOperationException("SDL called back with no SdlVulkanIosApp running.");
 
-            var app = _running ?? throw new InvalidOperationException("SDL called back with no SdlVulkanIosApp running.");
             MobileHost.Run(app.WindowTitle, app.DesignSize, app.Fullscreen, app.BackgroundColor,
                 window => app.SdlWindow = window, app.OnRendererReady);
             return 0;
@@ -99,6 +112,26 @@ public abstract class SdlVulkanIosApp
         {
             SdlEventLoop.DiagnosticLog?.Invoke($"[ios] the app ended with an exception: {ex}");
             return 1;
+        }
+    }
+
+    private static readonly Action<string> StderrLog = static m => Console.Error.WriteLine($"SdlVulkan: {m}");
+
+    // stderr plus Documents/<LogFileName>, or stderr alone when there is no file name or the file cannot be opened.
+    // Never throws: it runs inside SDL's callback, before anything else could report a failure.
+    private Action<string> DefaultLog()
+    {
+        try
+        {
+            if (LogFileName is not { Length: > 0 } name)
+                return StderrLog;
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), name);
+            return MobileLog.Open(path, AppleAppInfo.Describe(WindowTitle, DateTimeOffset.Now), StderrLog) ?? StderrLog;
+        }
+        catch (Exception ex)
+        {
+            StderrLog($"[log] no log file: {ex.GetType().Name}: {ex.Message}");
+            return StderrLog;
         }
     }
 

@@ -1,0 +1,70 @@
+<Project>
+
+  <!--
+    The native frameworks an iOS app on SdlVulkan.Renderer needs, added to any net10.0-ios project that references
+    the package (sebgod/chess#74: they used to be each app's own plumbing).
+
+    iOS has no Vulkan loader and SDL3-CS ships no iOS natives, so the app bundles both as DYNAMIC frameworks, which
+    the iOS build copies into <App>.app/Frameworks/, where AppleVulkan loads them from
+    (Frameworks/SDL3.framework/SDL3 and Frameworks/MoltenVK.framework/MoltenVK):
+
+      SDL3.xcframework      from SDL's own release, the version the renderer's Android build binds (3.4.16). The
+                            renderer's net10.0 asset, which an iOS head consumes, is compiled against SDL3-CS's 3.5
+                            preview, for which no iOS framework exists. The pairing is safe: SDL3 keeps its ABI stable
+                            across minor versions, the renderer calls only what 3.4.16 has (its android build
+                            compiles the same source against 3.4.16 bindings), and a binding nobody calls is never
+                            resolved. Android must match exactly, as SDL's Java half checks its native's version at
+                            startup; iOS has no such check.
+      MoltenVK.xcframework  the dynamic one from Khronos's release (a static library cannot be loaded by path).
+
+    The first build fetches the pinned releases (fetch-ios-frameworks.sh, beside this file), checks each download's
+    SHA-256, and keeps them in obj/ (SdlVulkanIosFrameworksDir), so later builds find them there. Fetching needs
+    macOS, as an iOS build does anyway.
+
+    Properties an app may set:
+      SdlVulkanBundleIosFrameworks=false   bundle nothing; the app brings its own SDL3 and MoltenVK frameworks.
+      SdlVulkanIosFrameworksDir=<folder>   where the two .xcframework folders are kept (fetched into it when
+                                           absent), e.g. one folder shared by several apps, or filled by hand for an
+                                           offline build.
+
+    To move a pin, take both the version and the digest GitHub publishes for the asset:
+      gh api repos/libsdl-org/SDL/releases/tags/release-<version> -q '.assets[] | .name+" "+.digest'
+      gh api repos/KhronosGroup/MoltenVK/releases/tags/<version> -q '.assets[] | .name+" "+.digest'
+
+    Conditions read the platform from TargetFramework rather than TargetPlatformIdentifier, so the file also works
+    when a project imports it from its own body (a sibling ProjectReference build, which gets no package targets),
+    where the SDK has not inferred TargetPlatformIdentifier yet.
+  -->
+
+  <PropertyGroup Condition="'$([MSBuild]::GetTargetPlatformIdentifier(`$(TargetFramework)`))' == 'ios'">
+    <SdlVulkanBundleIosFrameworks Condition="'$(SdlVulkanBundleIosFrameworks)' == ''">true</SdlVulkanBundleIosFrameworks>
+    <SdlVulkanIosSdlVersion>3.4.16</SdlVulkanIosSdlVersion>
+    <SdlVulkanIosSdlSha256>675660a9e457239af615f9e41f788612168d1639b9d2eda2957e8dace26687fd</SdlVulkanIosSdlSha256>
+    <SdlVulkanIosMoltenVkVersion>v1.4.2</SdlVulkanIosMoltenVkVersion>
+    <SdlVulkanIosMoltenVkSha256>b5d947b1660e6e9fed40b9cd2387e160aaab9e80b775c0cef7e14059405178c1</SdlVulkanIosMoltenVkSha256>
+    <SdlVulkanIosFrameworksDir Condition="'$(SdlVulkanIosFrameworksDir)' == ''">$(BaseIntermediateOutputPath)sdlvulkan-ios/sdl-$(SdlVulkanIosSdlVersion)_moltenvk-$(SdlVulkanIosMoltenVkVersion)/</SdlVulkanIosFrameworksDir>
+    <!-- Normalized into a property of its own: one given on the command line is a global property, which no
+         assignment here can change, and it may lack the trailing separator the paths below rely on. -->
+    <_SdlVulkanIosFrameworksDir>$([MSBuild]::NormalizeDirectory(`$(MSBuildProjectDirectory)`, `$(SdlVulkanIosFrameworksDir)`))</_SdlVulkanIosFrameworksDir>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$([MSBuild]::GetTargetPlatformIdentifier(`$(TargetFramework)`))' == 'ios' AND '$(SdlVulkanBundleIosFrameworks)' == 'true'">
+    <NativeReference Include="$(_SdlVulkanIosFrameworksDir)SDL3.xcframework">
+      <Kind>Framework</Kind>
+      <SmartLink>False</SmartLink>
+    </NativeReference>
+    <NativeReference Include="$(_SdlVulkanIosFrameworksDir)MoltenVK.xcframework">
+      <Kind>Framework</Kind>
+      <SmartLink>False</SmartLink>
+    </NativeReference>
+  </ItemGroup>
+
+  <Target Name="SdlVulkanFetchIosFrameworks" BeforeTargets="PrepareForBuild"
+          Condition="'$([MSBuild]::GetTargetPlatformIdentifier(`$(TargetFramework)`))' == 'ios' AND '$(SdlVulkanBundleIosFrameworks)' == 'true' AND '$(DesignTimeBuild)' != 'true' AND (!Exists('$(_SdlVulkanIosFrameworksDir)SDL3.xcframework') OR !Exists('$(_SdlVulkanIosFrameworksDir)MoltenVK.xcframework'))">
+    <Error Condition="!$([MSBuild]::IsOSPlatform('OSX'))"
+           Text="SdlVulkan.Renderer: an iOS app needs SDL3.xcframework and MoltenVK.xcframework in $(_SdlVulkanIosFrameworksDir), and fetching them needs macOS. Build on a Mac, put both there by hand, or set SdlVulkanBundleIosFrameworks=false and bundle your own." />
+    <Exec Command="bash &quot;$(MSBuildThisFileDirectory)fetch-ios-frameworks.sh&quot; &quot;$(_SdlVulkanIosFrameworksDir)&quot;"
+          EnvironmentVariables="SDL_VERSION=$(SdlVulkanIosSdlVersion);SDL_SHA256=$(SdlVulkanIosSdlSha256);MOLTENVK_VERSION=$(SdlVulkanIosMoltenVkVersion);MOLTENVK_SHA256=$(SdlVulkanIosMoltenVkSha256)" />
+  </Target>
+
+</Project>

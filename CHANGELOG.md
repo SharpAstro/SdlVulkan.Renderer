@@ -7,6 +7,26 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.109
+
+**An iOS app gets SDL3 and MoltenVK from the package (sebgod/chess#74).** `buildTransitive/SdlVulkan.Renderer.targets`
+adds `SDL3.xcframework` (SDL 3.4.16) and the dynamic `MoltenVK.xcframework` (MoltenVK 1.4.2) as `NativeReference` items
+to any `net10.0-ios` project that references the package. The first build fetches the pinned releases
+(`buildTransitive/fetch-ios-frameworks.sh`, macOS only, as an iOS build is), checks their SHA-256 against GitHub's
+published digests, and keeps them in `obj/`; a framework is renamed into place only once complete, so an interrupted
+fetch is not taken for a finished one. `SdlVulkanIosFrameworksDir` moves the folder, `SdlVulkanBundleIosFrameworks=false`
+opts out. The versions, digests and the reason SDL 3.4.16 is safe under the 3.5 preview bindings move here from
+sebgod/chess, which carried them until now. Nothing changes for a project of any other target framework. The Debug
+twin carries the same file as `SdlVulkan.Renderer.Debug.targets`, and CI now fails a pack that lacks either.
+
+**The mobile hosts' log has a useful default (sebgod/chess#75).** `SdlVulkanIosApp` writes `SdlEventLoop.DiagnosticLog`
+to `Documents/<LogFileName>` as well as stderr: the title in lower case plus `.log` by default ("Chess" writes
+`chess.log`), replaced on each launch, its first line the bundle's version, the device model and the OS version (read
+through CoreFoundation and `sysctl`, as the assembly has no UIKit). It starts before the bring-up, so a failure there
+reaches the file. `SdlVulkanActivity.LogTag` (default "SdlVulkan", as before) is the logcat tag. An app that sets
+`DiagnosticLog` before the host starts keeps its own, as before. **BEHAVIOUR CHANGE** for an iOS app that set nothing:
+a file now appears in its Documents folder; override `LogFileName` to return null for stderr alone.
+
 ## 7.108
 
 **Dependencies to their latest releases.** DIR.Lib 11.99 (was 11.84; the fifteen releases between are DIR.Lib's own,
