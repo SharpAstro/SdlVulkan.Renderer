@@ -335,6 +335,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         SlugPipelineLayout = slugPipelineLayout;
         MsaaSamples = msaaSamples;
         DepthFormat = depthFormat;
+        SupportsBc1Textures = QueryBc1Textures(instanceApi, physicalDevice);
 
         // Linear filtering, clamp to edge, no mips — the settings every VkTexture used to ask for
         // individually.
@@ -383,12 +384,14 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         // Spelled out rather than built from VK_KHR_SWAPCHAIN_EXTENSION_NAME: that constant is a
         // UTF-8 span, and a mixed array of it and a string has no common element type.
         using var extensionNames = new VkStringArray(DeviceExtensions(instanceApi, physicalDevice, presents: true, out var wantsBudget));
+        var features = EnabledFeatures(instanceApi, physicalDevice);
         VkDeviceCreateInfo deviceCI = new()
         {
             queueCreateInfoCount = 1,
             pQueueCreateInfos = &queueCI,
             enabledExtensionCount = extensionNames.Length,
-            ppEnabledExtensionNames = extensionNames
+            ppEnabledExtensionNames = extensionNames,
+            pEnabledFeatures = &features
         };
         instanceApi.vkCreateDevice(physicalDevice, &deviceCI, null, out var device).CheckResult();
         var deviceApi = GetApi(instance, device);
@@ -443,12 +446,14 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         // surface extensions enabled.
         var offscreenExtensions = DeviceExtensions(instanceApi, physicalDevice, presents: false, out var wantsBudget);
         using var extensionNames = new VkStringArray(offscreenExtensions);
+        var features = EnabledFeatures(instanceApi, physicalDevice);
         VkDeviceCreateInfo deviceCI = new()
         {
             queueCreateInfoCount = 1,
             pQueueCreateInfos = &queueCI,
             enabledExtensionCount = offscreenExtensions.Length > 0 ? extensionNames.Length : 0,
             ppEnabledExtensionNames = offscreenExtensions.Length > 0 ? extensionNames : null,
+            pEnabledFeatures = &features,
         };
         instanceApi.vkCreateDevice(physicalDevice, &deviceCI, null, out var device).CheckResult();
         var deviceApi = GetApi(instance, device);
@@ -1652,6 +1657,33 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     /// required to include 1 and 4, the same guarantee <c>framebufferColorSampleCounts</c> gives the
     /// colour attachment this renderer already relies on.</para>
     /// </remarks>
+    /// <summary>
+    /// Whether a texture can be <see cref="VkFormat.Bc1RgbUnormBlock"/> (<see cref="VkTexture.CreateDeferred"/>):
+    /// four bits a pixel, an eighth of RGBA, decoded by the GPU as it samples. True when the device has the
+    /// <c>textureCompressionBC</c> feature, which this device enables whenever it is offered
+    /// (<see cref="EnabledFeatures"/>), and samples the format with linear filtering. Every desktop GPU does;
+    /// a mobile one often does not, and a caller then keeps RGBA.
+    /// </summary>
+    public bool SupportsBc1Textures { get; }
+
+    // The optional features this device turns on where the physical device offers them. Only the BC texture
+    // formats so far: nothing else is enabled, as before, so a device without them is created as it always was.
+    private static VkPhysicalDeviceFeatures EnabledFeatures(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice)
+    {
+        instanceApi.vkGetPhysicalDeviceFeatures(physicalDevice, out var offered);
+        return new VkPhysicalDeviceFeatures { textureCompressionBC = offered.textureCompressionBC };
+    }
+
+    private static bool QueryBc1Textures(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice)
+    {
+        instanceApi.vkGetPhysicalDeviceFeatures(physicalDevice, out var offered);
+        if (!offered.textureCompressionBC) return false;
+        instanceApi.vkGetPhysicalDeviceFormatProperties(physicalDevice, VkFormat.Bc1RgbUnormBlock, out var props);
+        const VkFormatFeatureFlags needed = VkFormatFeatureFlags.SampledImage | VkFormatFeatureFlags.SampledImageFilterLinear
+            | VkFormatFeatureFlags.TransferDst;
+        return (props.optimalTilingFeatures & needed) == needed;
+    }
+
     private static VkFormat ChooseDepthFormat(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice)
     {
         ReadOnlySpan<VkFormat> candidates =
