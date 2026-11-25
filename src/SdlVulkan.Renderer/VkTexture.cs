@@ -35,6 +35,16 @@ public sealed unsafe partial class VkTexture : IDisposable
     public int Width { get; }
     public int Height { get; }
 
+    /// <summary>The bytes of the image's pixels in its own format, what a memory budget should count: four a
+    /// pixel for an 8-bit RGBA texture, half a pixel for BC1. Set by <see cref="CreateDeferred"/>; a texture made
+    /// another way (Y'CbCr planes) reports four a pixel.</summary>
+    public long ImageBytes
+    {
+        get => _imageBytes > 0 ? _imageBytes : (long)Width * Height * 4;
+        private init => _imageBytes = value;
+    }
+    private readonly long _imageBytes;
+
     /// <summary>True once the upload commands have been recorded and the staging buffer can be freed after submit.
     /// False again if the frame that carried the upload never reached the queue: the upload is then recorded
     /// into the next frame on its own, as long as the staging buffer is still held.</summary>
@@ -88,6 +98,16 @@ public sealed unsafe partial class VkTexture : IDisposable
     /// <para>Adding a format here is one line. Being wrong about one is a throw on the wide side and
     /// wasted memory on the narrow, so it fails loudly in the direction that matters.</para>
     /// </remarks>
+    private static bool IsBc1(VkFormat format) => format is VkFormat.Bc1RgbUnormBlock or VkFormat.Bc1RgbaUnormBlock;
+
+    /// <summary>The bytes of a <paramref name="width"/> × <paramref name="height"/> image of
+    /// <paramref name="format"/>, tightly packed: what its staging buffer holds and its upload copies. A BC1
+    /// image is 8 bytes for every 4×4 block, the last column and row of blocks covering a partial edge
+    /// (the copy's extent stops at the image's edge, as Vulkan allows for a block format).</summary>
+    internal static long StagingBytes(VkFormat format, int width, int height) => IsBc1(format)
+        ? (long)((width + 3) / 4) * ((height + 3) / 4) * 8
+        : (long)width * height * BytesPerPixel(format);
+
     private static int BytesPerPixel(VkFormat format) => format switch
     {
         VkFormat.R8Unorm or VkFormat.R8Snorm or VkFormat.R8Uint or VkFormat.R8Sint or VkFormat.R8Srgb => 1,
@@ -111,12 +131,18 @@ public sealed unsafe partial class VkTexture : IDisposable
     /// <see cref="VkFormat.B8G8R8A8Unorm"/> for historical reasons; callers with RGBA byte
     /// layout (the common CPU-renderer output) should pass <see cref="VkFormat.R8G8B8A8Unorm"/>
     /// and skip any CPU-side swizzle — letting the driver read the bytes directly is cheaper
-    /// than a per-pixel swap loop.</param>
+    /// than a per-pixel swap loop. <see cref="VkFormat.Bc1RgbUnormBlock"/> takes BC1 blocks, 8 bytes for
+    /// every 4×4 pixels in rows of blocks, a partial block at the right and bottom edges where the size is
+    /// not a multiple of 4: an eighth of the RGBA in memory and in the upload. Only on a device whose
+    /// <see cref="VulkanDevice.SupportsBc1Textures"/> is true; elsewhere it throws.</param>
     public static VkTexture CreateDeferred(VulkanContext ctx, ReadOnlySpan<byte> pixelData, int width, int height,
         VkFormat format = VkFormat.B8G8R8A8Unorm)
     {
         var api = ctx.DeviceApi;
-        var bufferSize = (ulong)((long)width * height * BytesPerPixel(format));
+        var bufferSize = (ulong)StagingBytes(format, width, height);
+        if (IsBc1(format) && !ctx.GraphicsDevice.SupportsBc1Textures)
+            throw new NotSupportedException(
+                $"{format} needs the device's textureCompressionBC feature; check VulkanDevice.SupportsBc1Textures first.");
 
         // Create and fill staging buffer
         VkBufferCreateInfo bufCI = new()
@@ -186,7 +212,10 @@ public sealed unsafe partial class VkTexture : IDisposable
         ctx.UpdateDescriptorSet(descriptorSet, imageView, sampler);
 
         return new VkTexture(ctx, image, imageMemory, imageView, sampler, descriptorSet,
-            width, height, stagingBuffer, stagingMemory, uploaded: false);
+            width, height, stagingBuffer, stagingMemory, uploaded: false)
+        {
+            ImageBytes = (long)bufferSize,
+        };
     }
 
     /// <summary>

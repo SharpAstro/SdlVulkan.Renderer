@@ -7,6 +7,19 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.112
+
+**BC1 textures: a texture at four bits a pixel, an eighth of RGBA.** `VkTexture.CreateDeferred` takes
+`VkFormat.Bc1RgbUnormBlock`: BC1 blocks, 8 bytes for every 4×4 pixels, a partial block at an edge whose size is not
+a multiple of 4. The staging buffer and the upload are the blocks, so a 3164×4096 page scan is 6.2 MB on the GPU and
+in the copy where its RGBA is 49.4 MB. The device enables the `textureCompressionBC` feature wherever it is offered
+(no feature was enabled before, and none other is now), and `VulkanDevice.SupportsBc1Textures` says whether the
+format can be sampled with linear filtering; every desktop GPU and lavapipe can, many mobile GPUs cannot, and
+`CreateDeferred` refuses BC1 on such a device rather than create an image it cannot use. Encoding is the caller's.
+`VkTexture.ImageBytes` is a texture's pixels in its own format (four bytes a pixel for RGBA, half for BC1), for a
+memory budget that would otherwise count every texture as RGBA.
+`Bc1TextureRenderTests` draws a texture of solid-colour blocks and reads each block's colour back. Additive.
+
 ## 7.111
 
 **Many textured quads off one texture in one draw.** `VkRenderer.DrawTexturedQuadRegions(textureSet, quads)` takes a
