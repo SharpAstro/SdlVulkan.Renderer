@@ -50,16 +50,25 @@ public abstract class SdlVulkanActivity : SDLActivity
     protected SdlVulkanWindow SdlWindow { get; private set; } = null!;
 
     /// <summary>
+    /// The logcat tag the renderer's diagnostics (<see cref="SdlEventLoop.DiagnosticLog"/>) go under, so
+    /// <c>adb logcat -s &lt;tag&gt;</c> shows the app's lines. Default "SdlVulkan"; an app gives its own. Keep it
+    /// to 23 characters, the limit Android enforced before 8.0. Used by the default sink only: an app that
+    /// sets <see cref="SdlEventLoop.DiagnosticLog"/> keeps its own.
+    /// </summary>
+    protected virtual string LogTag => "SdlVulkan";
+
+    /// <summary>
     /// Runs on SDL's native thread. Mirrors the desktop entry point: create the window + Vulkan
     /// surface, build the context + renderer, let the consumer wire callbacks, then pump the loop.
     /// </summary>
     protected override void Main()
     {
         // Default the diagnostic sink to logcat before bring-up: a failure in
-        // MobileHost's surface bring-up happens BEFORE OnRendererReady — where a consumer would
-        // normally install its own sink — and would otherwise leave no trace. ??= so a sink the
+        // MobileHost's surface bring-up happens BEFORE OnRendererReady, where a consumer would
+        // normally install its own sink, and would otherwise leave no trace. ??= so a sink the
         // consumer set earlier wins (and one set in OnRendererReady simply replaces this).
-        SdlEventLoop.DiagnosticLog ??= static m => global::Android.Util.Log.Info("SdlVulkan", m);
+        var tag = LogTag;
+        SdlEventLoop.DiagnosticLog ??= m => global::Android.Util.Log.Info(tag, m);
 
         // Fullscreen (immersive) by default: the system bars would otherwise draw over the edge-to-edge
         // SDL surface, cropping the top of the scene and covering bottom chrome. Override Fullscreen to

@@ -101,6 +101,23 @@ jobs:
     # stamped one without the +sha build metadata, which NuGet ignores when matching.
     - name: Check SdlVulkan.Renderer.Debug twin
       run: dotnet build tools/debug-twin-check/DebugTwinCheck.csproj -c Debug -p:SdlVulkanRendererDebugVersion=${VERSION_PREFIX}${VERSION_REV}${VERSION_SUFFIX}
+    # An iOS app gets SDL3 and MoltenVK only through the package's buildTransitive targets, which NuGet imports only
+    # under the package's own id. Nothing else here would notice them missing: the build and the tests pass without
+    # them, and the first pack of 7.109 left them out (the multi-targeting outer build that packs has no default items).
+    - name: Check the iOS build files are packed
+      run: |
+        set -euo pipefail
+        check() { # nupkg entry...
+          local pkg="$1"; shift
+          local listing; listing="$(unzip -Z1 "$pkg")"
+          for entry in "$@"; do
+            grep -qxF "$entry" <<< "$listing" || { echo "::error::$(basename "$pkg") has no $entry"; echo "$listing"; exit 1; }
+          done
+        }
+        check "$(ls src/SdlVulkan.Renderer/bin/$BUILD_CONF/SdlVulkan.Renderer.[0-9]*.nupkg)" \
+          buildTransitive/SdlVulkan.Renderer.targets buildTransitive/fetch-ios-frameworks.sh
+        check "$(ls artifacts/debug-twin/SdlVulkan.Renderer.Debug.[0-9]*.nupkg)" \
+          buildTransitive/SdlVulkan.Renderer.Debug.targets buildTransitive/fetch-ios-frameworks.sh
     - name: Upload NuGet package
       uses: actions/upload-artifact@v7
       with:

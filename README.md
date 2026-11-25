@@ -139,7 +139,9 @@ the Android SDK, which `dotnet build -t:InstallAndroidDependencies -p:AcceptAndr
 will provision. The tooling needs a JDK it can parse — **JDK 17**; JDK 25 is too new and throws inside
 `GetJdkRevision`.
 
-### iOS (untested on a device)
+### iOS
+
+Runs on a device: sebgod/chess's iPad build (iPadOS 26) is the reference app.
 
 The iOS host is `SdlVulkanIosApp`, the counterpart of `SdlVulkanActivity` with the same members
 (`WindowTitle`, `DesignSize`, `BackgroundColor`, `Fullscreen`, `SdlWindow`, `OnRendererReady`); both run one
@@ -150,15 +152,34 @@ asset (whose workload the Linux packing runner does not have), and a `net10.0-io
 
 The head calls `new MyApp().Run()` from `Main` **instead of** `UIApplication.Main`: SDL owns the UIKit
 application (`SDL_RunApp`) and calls the bring-up back once it has launched. iOS has no Vulkan loader and
-SDL3-CS ships no iOS natives, so the head bundles both as **dynamic** xcframeworks (`NativeReference`):
+SDL3-CS ships no iOS natives, so the app bundles both as **dynamic** xcframeworks, and **the package adds
+them itself** (`buildTransitive/SdlVulkan.Renderer.targets`, 7.109): a `net10.0-ios` project that references
+it gets two `NativeReference` items, and its first build fetches the pinned releases, checks their SHA-256 and
+keeps them in `obj/`:
 
-- `SDL3.xcframework`, from the SDL release matching the SDL3-CS version the head pins (the `.dmg` carries it);
-- `MoltenVK.xcframework`, the dynamic one from a KhronosGroup/MoltenVK release.
+- `SDL3.xcframework`, SDL 3.4.16, the version the renderer's Android build binds (the targets file says why
+  the 3.5 preview bindings of the `net10.0` asset are safe with it);
+- `MoltenVK.xcframework`, the dynamic one from KhronosGroup/MoltenVK 1.4.2.
+
+Fetching needs macOS, as an iOS build does. `SdlVulkanIosFrameworksDir` moves the folder (several apps can
+share one, or it can be filled by hand for an offline build); `SdlVulkanBundleIosFrameworks=false` bundles
+nothing, for an app that brings its own. A head built against the renderer's source (a sibling
+`ProjectReference`) gets no package targets and imports that file itself.
 
 The library finds them by absolute path inside the bundle (`Frameworks/SDL3.framework/SDL3`,
 `Frameworks/MoltenVK.framework/MoltenVK`) and hands SDL and Vortice the SAME MoltenVK. On every Apple platform
 the instance asks for `VK_KHR_portability_enumeration`, and a device that advertises `VK_KHR_portability_subset`
 (MoltenVK does) gets it enabled, as the spec requires; neither changes anything on Windows, Linux or Android.
+
+### The mobile hosts' log
+
+Both hosts give `SdlEventLoop.DiagnosticLog` a default before the bring-up, so a failure there is not lost.
+On Android it is logcat under `LogTag` ("SdlVulkan" unless the app overrides it; `adb logcat -s <tag>`).
+On iOS it is stderr, which only a Mac reads, plus a file in the app's Documents folder named by `LogFileName`
+(the title in lower case: "Chess" writes `chess.log`; null for none). The file is replaced on each launch,
+its first line names the app's version, the device model and the OS version, and the Files app shows it
+once the app's `Info.plist` sets `UIFileSharingEnabled`, so a tester can send it. An app that sets
+`DiagnosticLog` itself before the host starts keeps its own.
 
 ### CI setup
 
