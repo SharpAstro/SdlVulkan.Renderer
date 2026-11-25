@@ -81,7 +81,7 @@ public static class ShutdownDrain
         loop.OnRender = null;
         loop.CheckNeedsRedraw = () =>
         {
-            // Polled once per loop iteration, on this thread, so the loop stops itself rather than
+            // Polled about once a refresh (RedrawCheckPacing), on this thread, so the loop stops itself rather than
             // having another thread reach in and write its running flag.
             if (drain.IsCompleted)
             {

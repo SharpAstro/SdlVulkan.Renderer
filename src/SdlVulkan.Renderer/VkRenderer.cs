@@ -1238,7 +1238,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
                 var y0 = (float)r.UpperLeft.Y;
                 var x1 = (float)r.LowerRight.X;
                 var y1 = (float)r.LowerRight.Y;
-                _rectScratch.AddRange([x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1]);
+                // Float by float: a collection expression handed to AddRange is an array made for every rectangle.
+                _rectScratch.Add(x0); _rectScratch.Add(y0);
+                _rectScratch.Add(x1); _rectScratch.Add(y0);
+                _rectScratch.Add(x1); _rectScratch.Add(y1);
+                _rectScratch.Add(x0); _rectScratch.Add(y0);
+                _rectScratch.Add(x1); _rectScratch.Add(y1);
+                _rectScratch.Add(x0); _rectScratch.Add(y1);
             }
 
             SetColor(color);
@@ -3112,10 +3118,22 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var cx = (x0 + x1) * 0.5f; var cy = (y0 + y1) * 0.5f;
         var ex = halfLen + 1f;
         var ey = hw + 1f;
-        void Vertex(List<float> d, float along, float across) => d.AddRange(
-            [cx + ux * along + vx * across, cy + uy * along + vy * across, along, across, halfLen, hw, 0f]);
+        // Each vertex added float by float: a collection expression handed to AddRange is an array (and a wrapper
+        // around it) made for every vertex, twelve objects for every line drawn (traced 2026-11-25: 8 MB in 18 s of
+        // an atlas with an object's panel open, its night curve alone).
         Vertex(dst, -ex, -ey); Vertex(dst, ex, -ey); Vertex(dst, ex, ey);
         Vertex(dst, -ex, -ey); Vertex(dst, ex, ey); Vertex(dst, -ex, ey);
+
+        void Vertex(List<float> d, float along, float across)
+        {
+            d.Add(cx + ux * along + vx * across);
+            d.Add(cy + uy * along + vy * across);
+            d.Add(along);
+            d.Add(across);
+            d.Add(halfLen);
+            d.Add(hw);
+            d.Add(0f);
+        }
     }
 
     // One draw of the line boxes AppendLineBox accumulated.
@@ -3455,6 +3473,18 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         var layoutY = (float)layout.UpperLeft.Y;
         var layoutW = (float)layout.Width;
         var layoutH = (float)layout.Height;
+
+        // What the scissor would discard is not shaped at all (TextCulling). A pass paints inside _damageRegion and
+        // nowhere else, whichever target is bound: the whole surface on a full frame, a strip on one that repaints a
+        // clock, the layer's own area in a cached layer. Under a content transform the layout is not in the pass's
+        // pixels, and the text is drawn as it always was.
+        if (_contentTransform.IsIdentity
+            && !TextCulling.MayReach(text.Length, lineCount, fontSize, lineHeight, horizAlignment,
+                layoutX, layoutY, layoutW, layoutH,
+                _damageRegion.X, _damageRegion.Y, _damageRegion.W, _damageRegion.H))
+        {
+            return;
+        }
 
         var startY = vertAlignment switch
         {

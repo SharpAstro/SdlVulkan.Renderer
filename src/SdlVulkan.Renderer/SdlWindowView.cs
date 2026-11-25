@@ -270,9 +270,14 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     public Action<MediaButton>? OnMediaButton { get; set; }
 
     /// <summary>
-    /// Called each loop iteration before checking redraw for this window. Return true to force a
-    /// redraw (external state changes: background task completions, etc.). A text caret no longer needs it: set <see cref="Ui"/> and the loop blinks it.
+    /// Asked by the loop after it dispatched a pass's events: return true to force a redraw (external state changes:
+    /// background task completions, etc.). A text caret no longer needs it: set <see cref="Ui"/> and the loop blinks it.
     /// </summary>
+    /// <remarks>
+    /// Asked right before every frame drawn of this window, and otherwise at most once a display refresh
+    /// (<see cref="RedrawCheckPacing"/>): NOT on every pass, since a burst of input wakes the loop far more often than a
+    /// frame can be drawn. A host using it as a periodic hook gets it about once a refresh, idle or busy.
+    /// </remarks>
     public Func<bool>? CheckNeedsRedraw { get; set; }
 
     /// <summary>
@@ -317,9 +322,9 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// True once this window's GPU has been declared wedged (the moment <see cref="OnGpuWedged"/> fires),
     /// and never cleared, since the same device does not come back. From then on the loop treats the
     /// window as INERT: it never renders it, never resizes its swapchain and never polls a recovery for it.
-    /// Its events are still dispatched and its <see cref="CheckNeedsRedraw"/> is still asked every
-    /// iteration (a redraw it asks for is simply never drawn), so a host that calls
-    /// <see cref="SdlEventLoop.Run"/> again gets a window it can still close, keeps its once-per-iteration
+    /// Its events are still dispatched and its <see cref="CheckNeedsRedraw"/> is still asked, about once a
+    /// refresh (a redraw it asks for is simply never drawn), so a host that calls
+    /// <see cref="SdlEventLoop.Run"/> again gets a window it can still close, keeps its periodic
     /// hook, and can title the window with <see cref="SdlVulkanWindow.SetTitle"/>, which needs no GPU.
     /// </summary>
     public bool IsGpuWedged { get; internal set; }
@@ -333,6 +338,9 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     // the safe answer is the default, and a new arming site written as "NeedsRedraw = true" gets it without knowing.
     private bool _needsRedraw = true;
     private bool _pendingForPointerMoveAlone;
+    // Whether the frame owed has a cause the loop raised itself (an expose, a resize, input, a request): everything
+    // but ArmForCheck and ArmForPointerMove. A new window's first frame is one.
+    private bool _pendingForTheLoopsOwnCause = true;
     internal bool NeedsRedraw
     {
         get => _needsRedraw;
@@ -340,6 +348,7 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
         {
             _needsRedraw = value;
             _pendingForPointerMoveAlone = false;
+            _pendingForTheLoopsOwnCause = value;
         }
     }
 
@@ -367,7 +376,6 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     internal bool Paused;
     internal bool NeedsSurfaceRebuild;
     internal float MouseX, MouseY;
-    internal ulong LastMouseRedrawCounter;
     internal readonly Dictionary<long, (float X, float Y)> ActiveFingers = new();
 
     // The finger separation the NEXT pinch scale is measured against. It is the separation at pinch
@@ -405,6 +413,14 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     // like the fields above, because TickCount64 moves in ~15.6 ms steps on Windows, which is a whole
     // frame of jitter at 60 Hz and would pace some frames to 30.
     internal long NextFrameDueTimestamp;
+    // When CheckNeedsRedraw may be asked again on a pass that does not draw this window (RedrawCheckPacing): a refresh
+    // after the last ask. 0 until it was first asked, so the first pass asks it.
+    internal long NextCheckDueTimestamp;
+    // When the check was last asked, by either place in Run: what an event's pull-in is measured from.
+    internal long LastCheckTimestamp;
+    // Whether this pass of the loop has asked CheckNeedsRedraw yet: the render pass asks it before a frame when the paced
+    // ask did not, so no frame is drawn without one.
+    internal bool CheckedThisPass;
     // One display refresh in Stopwatch ticks, read from the window's display; 0 until first measured.
     internal long FrameIntervalTicks;
     // Pacing by cost (FrameCostPacing), on a software rasteriser: the timestamp the display's interval alone allows
@@ -440,6 +456,16 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     public void RequestRedraw() => NeedsRedraw = true;
 
     /// <summary>
+    /// How long the loop may leave <see cref="CheckNeedsRedraw"/> unasked while this window owes no frame and nothing
+    /// wakes the loop: no event, no <see cref="SdlEventLoop.Wake"/>. Zero, the default, is one display refresh, as it
+    /// always was. A host sets it from inside the check, to the time until the next thing it could owe a frame for (its
+    /// clock's next tick, a poll's next turn), and raises what changes on another thread with
+    /// <see cref="SdlEventLoop.Wake"/>. The loop bounds it: a second at most, and the refresh's pace for a second after
+    /// input (<see cref="RedrawCheckPacing"/>).
+    /// </summary>
+    public TimeSpan IdleCheckInterval { get; set; }
+
+    /// <summary>
     /// Whether a frame is already owed to this window: armed by an event the loop dispatched (input a handler took, an
     /// expose, a resize, a restore), by <see cref="RequestRedraw"/>, by an earlier <see cref="CheckNeedsRedraw"/> whose
     /// frame has not been drawn yet (paced, minimised, in a recovery backoff), or by the loop itself (a frame that ran
@@ -460,4 +486,14 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     /// request, is not one it can narrow, and this is false for it.
     /// </summary>
     public bool RedrawPendingForPointerMoveAlone => _needsRedraw && _pendingForPointerMoveAlone;
+
+    /// <summary>
+    /// Whether the frame owed (<see cref="RedrawPending"/>) is owed to nothing but the app's own
+    /// <see cref="CheckNeedsRedraw"/> answers and pointer moves a handler took: no expose, resize, key, press or request
+    /// is behind it. An app that keeps what its check asked a frame FOR then knows the whole of what that frame owes, and
+    /// may narrow it accordingly. Without this a frame the check armed and pacing held past the next check read as owed
+    /// to "a cause of the loop's" by nothing but the check's own yes, and an app that narrows had to draw it in full: a
+    /// clock's tick under a moving pointer, where a frame is rarely due the moment it is asked for.
+    /// </summary>
+    public bool RedrawPendingForCheckAndPointerMovesAlone => _needsRedraw && !_pendingForTheLoopsOwnCause;
 }
