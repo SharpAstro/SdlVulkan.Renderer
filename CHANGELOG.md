@@ -7,6 +7,14 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.113
+
+**Dependencies to their latest releases.** DIR.Lib 11.101 (was 11.99: 11.100 keeps a `TabBar` strip's tree between
+frames and lets `FontFallbackResolver` measure a span without allocating, 11.101 takes Svg 3.42), SharpAstro.AppShell
+1.5 (was 1.4: `AppIdentity.Claim` does nothing inside an app package, and `AppIdentity.IsPackaged` asks) and, for the
+inspector, SharpAstro.Png 3.42 (was 3.41, the Codecs release that adds `JpegDecoder.DecodeGrayTo`). Nothing in the
+renderer's own source changes. A consumer that pins AppShell itself moves with it. Additive only.
+
 ## 7.112
 
 **BC1 textures: a texture at four bits a pixel, an eighth of RGBA.** `VkTexture.CreateDeferred` takes
