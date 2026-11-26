@@ -30,13 +30,13 @@ public sealed unsafe partial class VulkanContext
 
     // Whether the swapchain was made with the identity transform, the one in which a present rectangle is simply the
     // rectangle that was drawn (VulkanContext.cs, CreateSwapchain: identity wherever the surface supports it).
-    private bool _swapchainTransformIsIdentity;
+    internal bool _swapchainTransformIsIdentity;
 
     /// <summary>
     /// The rectangle the last present named as changed, in swapchain pixels; null when it presented the whole image
     /// (incremental present unavailable, or nothing narrower could be said).
     /// </summary>
-    public VkRect2D? LastPresentRegion { get; private set; }
+    public VkRect2D? LastPresentRegion { get; internal set; }
 
     private static SwapchainDamage ChangedSincePresentWhole()
     {
@@ -71,12 +71,23 @@ public sealed unsafe partial class VulkanContext
         return true;
     }
 
+    // The wiring the present uses, with the device's offer passed in so a test on an offscreen device can drive it.
+    internal bool TakePresentRegion(bool deviceOffersIt, out VkRectLayerKHR rect)
+        => TakeChangedRegion(_changedSincePresent, deviceOffersIt && _swapchainTransformIsIdentity && !_hdrActive,
+            SwapchainWidth, SwapchainHeight, out rect);
+
+    // A present that failed (anything but success or suboptimal) may not have shown what it was given, so the rectangle
+    // it took is owed again: the next present is whole.
+    internal void NotePresentResult(VkResult presentResult)
+    {
+        if (presentResult != VkResult.Success && presentResult != VkResult.SuboptimalKHR) _changedSincePresent.MarkFull();
+    }
+
     // Chained onto the present it names. The three structs live on the caller's stack, so they outlive the call.
     private void NamePresentRegion(ref VkPresentInfoKHR presentInfo, VkRectLayerKHR* rect, VkPresentRegionKHR* region,
         VkPresentRegionsKHR* regions)
     {
-        var allowed = _dev.IncrementalPresentAvailable && _swapchainTransformIsIdentity && !_hdrActive;
-        if (!TakeChangedRegion(_changedSincePresent, allowed, SwapchainWidth, SwapchainHeight, out *rect))
+        if (!TakePresentRegion(_dev.IncrementalPresentAvailable, out *rect))
         {
             LastPresentRegion = null;
             return;

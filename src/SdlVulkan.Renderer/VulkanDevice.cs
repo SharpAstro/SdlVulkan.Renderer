@@ -994,6 +994,14 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
 
     /// <summary>
+    /// Whether to enable incremental present: only on a device that presents and offers it; by default on a software
+    /// rasteriser only (the one place it is expected to matter, and the one measured), <paramref name="setting"/> "1"
+    /// asking for it elsewhere and "0" refusing it everywhere.
+    /// </summary>
+    internal static bool ChooseIncrementalPresent(bool presents, bool softwareRasterizer, bool offered, string? setting)
+        => presents && offered && setting != "0" && (softwareRasterizer || setting == "1");
+
+    /// <summary>
     /// The device extensions to enable: the swapchain when the device presents, and incremental present beside it
     /// when offered; the memory budget when offered, and the portability subset when the device is a portability
     /// implementation (see <see cref="PortabilitySubsetExtensionName"/>). One list for the on-screen and the offscreen
@@ -1003,10 +1011,12 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         bool presents, out bool wantsBudget, out bool wantsIncrementalPresent)
     {
         wantsBudget = SupportsMemoryBudget(instanceApi, physicalDevice);
-        // SDLVK_INCREMENTAL_PRESENT=0 refuses it, as SDLVK_RETAINED_FRAME=0 refuses the retained frame: what a measurement
-        // compares it against, and the way back on a presentation engine that mishandles a rectangle.
-        wantsIncrementalPresent = presents && Environment.GetEnvironmentVariable("SDLVK_INCREMENTAL_PRESENT") != "0"
-            && DeviceExtensionAvailable(instanceApi, physicalDevice, IncrementalPresentExtensionName);
+        // As ChooseRetainedFrame: on a software rasteriser by default (where Mesa's X11 present sends the whole image
+        // without rectangles), SDLVK_INCREMENTAL_PRESENT=1 asks for it on any other device that offers it, =0 refuses it.
+        instanceApi.vkGetPhysicalDeviceProperties(physicalDevice, out var deviceProps);
+        wantsIncrementalPresent = ChooseIncrementalPresent(presents, deviceProps.deviceType == VkPhysicalDeviceType.Cpu,
+            DeviceExtensionAvailable(instanceApi, physicalDevice, IncrementalPresentExtensionName),
+            Environment.GetEnvironmentVariable("SDLVK_INCREMENTAL_PRESENT"));
         var names = new List<string>(4);
         if (presents) names.Add(SwapchainExtensionName);
         if (wantsIncrementalPresent) names.Add(IncrementalPresentExtensionName);

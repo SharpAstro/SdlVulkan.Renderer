@@ -159,6 +159,102 @@ public sealed class PresentRegionTests
             .ShouldBe((5, 5, 1u, 1u), "the whole present showed the earlier rectangle, so only what came after is owed");
     }
 
+    [Theory]
+    [InlineData(true, true, true, null, true)]     // software rasteriser that offers it: on by default
+    [InlineData(true, false, true, null, false)]   // a hardware device: off by default
+    [InlineData(true, false, true, "1", true)]     // ... asked for
+    [InlineData(true, true, true, "0", false)]     // refused everywhere
+    [InlineData(true, false, false, "1", false)]   // not offered
+    [InlineData(false, true, true, "1", false)]    // an offscreen device never presents
+    public void IncrementalPresentIsOnForASoftwareRasteriserAndAskedForElsewhere(bool presents, bool software, bool offered,
+        string? setting, bool expected)
+        => VulkanDevice.ChooseIncrementalPresent(presents, software, offered, setting).ShouldBe(expected);
+
+    // The wiring, on the offscreen device (which never presents): what AddFrameDamage, MarkFullFrameDamage and a failed
+    // present do to the record a present takes, and the conditions the present's rectangle is allowed under.
+    private static void WithContext(OffscreenGpuFixture gpu, Action<VulkanContext> body)
+    {
+        if (gpu.Context is not { } ctx)
+        {
+            Assert.Skip("Vulkan runtime not available on this host");
+            return;
+        }
+
+        var (w, h, identity) = (ctx.SwapchainWidth, ctx.SwapchainHeight, ctx._swapchainTransformIsIdentity);
+        ctx.SwapchainWidth = 64;
+        ctx.SwapchainHeight = 64;
+        ctx._swapchainTransformIsIdentity = true;
+        try
+        {
+            ctx.MarkFullFrameDamage();
+            ctx.TakePresentRegion(true, out _);   // the swapchain's first present, whole: from here the record is steady
+            body(ctx);
+        }
+        finally
+        {
+            ctx.MarkFullFrameDamage();
+            ctx.TakePresentRegion(true, out _);
+            ctx.SwapchainWidth = w;
+            ctx.SwapchainHeight = h;
+            ctx._swapchainTransformIsIdentity = identity;
+        }
+    }
+
+    [Collection("OffscreenGpu")]
+    public sealed class Wiring(OffscreenGpuFixture gpu)
+    {
+        [Fact]
+        public void AddFrameDamageFeedsThePresentRegion() => WithContext(gpu, ctx =>
+        {
+            ctx.AddFrameDamage(10f, 8f, 4f, 3f);
+            ctx.TakePresentRegion(true, out var rect).ShouldBeTrue();
+            (rect.offset.x, rect.offset.y, rect.extent.width, rect.extent.height).ShouldBe((10, 8, 4u, 3u));
+        });
+
+        [Fact]
+        public void MarkFullFrameDamageMakesThePresentWhole() => WithContext(gpu, ctx =>
+        {
+            ctx.AddFrameDamage(10f, 8f, 4f, 3f);
+            ctx.MarkFullFrameDamage();
+            ctx.TakePresentRegion(true, out _).ShouldBeFalse();
+        });
+
+        [Fact]
+        public void ADeviceWithoutTheExtensionOrANonIdentityTransformIsWhole() => WithContext(gpu, ctx =>
+        {
+            ctx.AddFrameDamage(1f, 1f, 2f, 2f);
+            ctx.TakePresentRegion(false, out _).ShouldBeFalse("the device does not offer it");
+
+            ctx._swapchainTransformIsIdentity = false;
+            ctx.AddFrameDamage(1f, 1f, 2f, 2f);
+            ctx.TakePresentRegion(true, out _).ShouldBeFalse("a rotated swapchain's rectangle is not the drawn one");
+        });
+
+        [Fact]
+        public void AFailedPresentOwesTheNextOneInFull() => WithContext(gpu, ctx =>
+        {
+            ctx.AddFrameDamage(1f, 1f, 2f, 2f);
+            ctx.TakePresentRegion(true, out _).ShouldBeTrue();   // the present that then failed took it
+            ctx.NotePresentResult(VkResult.ErrorSurfaceLostKHR);
+
+            ctx.AddFrameDamage(20f, 20f, 2f, 2f);
+            ctx.TakePresentRegion(true, out _).ShouldBeFalse("what the failed present owed may not have been shown");
+        });
+
+        [Theory]
+        [InlineData(VkResult.Success)]
+        [InlineData(VkResult.SuboptimalKHR)]
+        public void ASuccessfulPresentKeepsTheNextNarrow(VkResult result) => WithContext(gpu, ctx =>
+        {
+            ctx.AddFrameDamage(1f, 1f, 2f, 2f);
+            ctx.TakePresentRegion(true, out _).ShouldBeTrue();
+            ctx.NotePresentResult(result);
+
+            ctx.AddFrameDamage(20f, 20f, 2f, 2f);
+            ctx.TakePresentRegion(true, out _).ShouldBeTrue();
+        });
+    }
+
     private static void Paint(int[,] cells, int value, int x0, int y0, int w, int h)
     {
         for (var y = y0; y < y0 + h; y++)

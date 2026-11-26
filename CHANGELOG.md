@@ -10,7 +10,7 @@ this file disagrees with. Bump it there and add the entry here, in the same comm
 ## 7.119
 
 **Incremental present.** Each present names the rectangle of the image that changed since the last present
-(`VK_KHR_incremental_present`, enabled wherever the device offers it; `VulkanDevice.IncrementalPresentAvailable`), so a
+(`VK_KHR_incremental_present`, enabled by default on a software rasteriser that offers it, `SDLVK_INCREMENTAL_PRESENT=1` asking for it on any other device; `VulkanDevice.IncrementalPresentAvailable`), so a
 presentation engine can move that and keep the rest. A frame owed to a clock's tick names the clock's rectangle.
 
 What it names is everything declared since the last present that was made, not the frame's own region: a swapchain image
@@ -18,7 +18,7 @@ holds the frame of two or three presents ago, and a frame that never reached a p
 So a third record, of one slot, takes the same `AddFrameDamage` and `MarkFullFrameDamage` calls as the per-image ones,
 and only a present takes it (`VulkanContext.PresentRegion.cs`). The present is whole, naming nothing, before a
 swapchain's first present, after a frame declared full or declared nothing, on an HDR frame, and on a swapchain whose
-transform is not the identity. `SDLVK_INCREMENTAL_PRESENT=0` refuses it. `SDLVK_FRAME_LOG`'s line for each frame says
+transform is not the identity. `SDLVK_INCREMENTAL_PRESENT=0` refuses it everywhere. A present that fails with anything but success or suboptimal declares the next present whole. `SDLVK_FRAME_LOG`'s line for each frame says
 what its present named (`present 2663,0 201x32`, or `present whole`), and `VulkanContext.LastPresentRegion` holds it.
 
 Why: without rectangles, Mesa's X11 present for a software rasteriser with no MIT-SHM sends the whole image down the X

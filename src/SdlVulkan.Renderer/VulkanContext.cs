@@ -148,8 +148,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
     // Swapchain state
     public VkSwapchainKHR Swapchain { get; private set; }
     public VkFormat SwapchainFormat { get; private set; }
-    public uint SwapchainWidth { get; private set; }
-    public uint SwapchainHeight { get; private set; }
+    public uint SwapchainWidth { get; internal set; }
+    public uint SwapchainHeight { get; internal set; }
 
     private VkImage[] _swapchainImages = [];
     private VkImageView[] _swapchainImageViews = [];
@@ -1029,6 +1029,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     private void SubmitFrame(VkCommandBuffer cmd, bool endRenderPass)
     {
+        // A frame that makes no present (rejected submit, layered window) must not report the last one's rectangle.
+        LastPresentRegion = null;
         AssertFrameThread(nameof(SubmitFrame));
         var layeredReadback = false;
         if (endRenderPass)
@@ -1208,6 +1210,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         presentResult = DeviceApi.vkQueuePresentKHR(GraphicsQueue, &presentInfo);
         RenderDiag.Vk("present", presentResult, $"frame={_currentFrame} img={_currentImageIndex}");
         NoteDeviceLost(presentResult, "vkQueuePresentKHR");
+        NotePresentResult(presentResult);
 
         _frameBegun = false;
         _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
