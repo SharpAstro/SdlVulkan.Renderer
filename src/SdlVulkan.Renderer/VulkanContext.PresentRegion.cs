@@ -72,7 +72,7 @@ public sealed unsafe partial class VulkanContext
     }
 
     // The wiring the present uses, with the device's offer passed in so a test on an offscreen device can drive it.
-    internal bool TakePresentRegion(bool deviceOffersIt, out VkRectLayerKHR rect)
+    internal bool TakeChangedRegionForPresent(bool deviceOffersIt, out VkRectLayerKHR rect)
         => TakeChangedRegion(_changedSincePresent, deviceOffersIt && _swapchainTransformIsIdentity && !_hdrActive,
             SwapchainWidth, SwapchainHeight, out rect);
 
@@ -84,10 +84,10 @@ public sealed unsafe partial class VulkanContext
     }
 
     // Chained onto the present it names. The three structs live on the caller's stack, so they outlive the call.
-    private void NamePresentRegion(ref VkPresentInfoKHR presentInfo, VkRectLayerKHR* rect, VkPresentRegionKHR* region,
+    internal void NamePresentRegion(ref VkPresentInfoKHR presentInfo, VkRectLayerKHR* rect, VkPresentRegionKHR* region,
         VkPresentRegionsKHR* regions)
     {
-        if (!TakePresentRegion(_dev.IncrementalPresentAvailable, out *rect))
+        if (!TakeChangedRegionForPresent(_dev.IncrementalPresentAvailable, out *rect))
         {
             LastPresentRegion = null;
             return;

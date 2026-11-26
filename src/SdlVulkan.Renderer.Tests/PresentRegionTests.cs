@@ -187,13 +187,13 @@ public sealed class PresentRegionTests
         try
         {
             ctx.MarkFullFrameDamage();
-            ctx.TakePresentRegion(true, out _);   // the swapchain's first present, whole: from here the record is steady
+            ctx.TakeChangedRegionForPresent(true, out _);   // the swapchain's first present, whole: from here the record is steady
             body(ctx);
         }
         finally
         {
             ctx.MarkFullFrameDamage();
-            ctx.TakePresentRegion(true, out _);
+            ctx.TakeChangedRegionForPresent(true, out _);
             ctx.SwapchainWidth = w;
             ctx.SwapchainHeight = h;
             ctx._swapchainTransformIsIdentity = identity;
@@ -207,7 +207,7 @@ public sealed class PresentRegionTests
         public void AddFrameDamageFeedsThePresentRegion() => WithContext(gpu, ctx =>
         {
             ctx.AddFrameDamage(10f, 8f, 4f, 3f);
-            ctx.TakePresentRegion(true, out var rect).ShouldBeTrue();
+            ctx.TakeChangedRegionForPresent(true, out var rect).ShouldBeTrue();
             (rect.offset.x, rect.offset.y, rect.extent.width, rect.extent.height).ShouldBe((10, 8, 4u, 3u));
         });
 
@@ -216,29 +216,57 @@ public sealed class PresentRegionTests
         {
             ctx.AddFrameDamage(10f, 8f, 4f, 3f);
             ctx.MarkFullFrameDamage();
-            ctx.TakePresentRegion(true, out _).ShouldBeFalse();
+            ctx.TakeChangedRegionForPresent(true, out _).ShouldBeFalse();
         });
 
         [Fact]
         public void ADeviceWithoutTheExtensionOrANonIdentityTransformIsWhole() => WithContext(gpu, ctx =>
         {
             ctx.AddFrameDamage(1f, 1f, 2f, 2f);
-            ctx.TakePresentRegion(false, out _).ShouldBeFalse("the device does not offer it");
+            ctx.TakeChangedRegionForPresent(false, out _).ShouldBeFalse("the device does not offer it");
 
             ctx._swapchainTransformIsIdentity = false;
             ctx.AddFrameDamage(1f, 1f, 2f, 2f);
-            ctx.TakePresentRegion(true, out _).ShouldBeFalse("a rotated swapchain's rectangle is not the drawn one");
+            ctx.TakeChangedRegionForPresent(true, out _).ShouldBeFalse("a rotated swapchain's rectangle is not the drawn one");
+        });
+
+        [Fact]
+        public void AnHdrSwapchainIsWhole() => WithContext(gpu, ctx =>
+        {
+            ctx.AddFrameDamage(1f, 1f, 2f, 2f);
+            ctx._hdrActive = true;
+            try { ctx.TakeChangedRegionForPresent(true, out _).ShouldBeFalse("the composite repaints in full"); }
+            finally { ctx._hdrActive = false; }
+        });
+
+        [Fact]
+        public unsafe void NamingThePresentSetsAndClearsLastPresentRegion() => WithContext(gpu, ctx =>
+        {
+            VkRectLayerKHR rect = default;
+            VkPresentRegionKHR region = default;
+            VkPresentRegionsKHR regions = default;
+            var info = new VkPresentInfoKHR();
+
+            ctx.AddFrameDamage(10f, 8f, 4f, 3f);
+            ctx.NamePresentRegion(ref info, &rect, &region, &regions);
+            // The offscreen device does not offer the extension, so the present is whole and the record is null.
+            ctx.LastPresentRegion.ShouldBeNull();
+
+            ctx.LastPresentRegion = new VkRect2D(0, 0, 1, 1);
+            ctx.AddFrameDamage(10f, 8f, 4f, 3f);
+            ctx.NamePresentRegion(ref info, &rect, &region, &regions);
+            ctx.LastPresentRegion.ShouldBeNull("a present that names nothing leaves nothing recorded");
         });
 
         [Fact]
         public void AFailedPresentOwesTheNextOneInFull() => WithContext(gpu, ctx =>
         {
             ctx.AddFrameDamage(1f, 1f, 2f, 2f);
-            ctx.TakePresentRegion(true, out _).ShouldBeTrue();   // the present that then failed took it
+            ctx.TakeChangedRegionForPresent(true, out _).ShouldBeTrue();   // the present that then failed took it
             ctx.NotePresentResult(VkResult.ErrorSurfaceLostKHR);
 
             ctx.AddFrameDamage(20f, 20f, 2f, 2f);
-            ctx.TakePresentRegion(true, out _).ShouldBeFalse("what the failed present owed may not have been shown");
+            ctx.TakeChangedRegionForPresent(true, out _).ShouldBeFalse("what the failed present owed may not have been shown");
         });
 
         [Theory]
@@ -247,11 +275,11 @@ public sealed class PresentRegionTests
         public void ASuccessfulPresentKeepsTheNextNarrow(VkResult result) => WithContext(gpu, ctx =>
         {
             ctx.AddFrameDamage(1f, 1f, 2f, 2f);
-            ctx.TakePresentRegion(true, out _).ShouldBeTrue();
+            ctx.TakeChangedRegionForPresent(true, out _).ShouldBeTrue();
             ctx.NotePresentResult(result);
 
             ctx.AddFrameDamage(20f, 20f, 2f, 2f);
-            ctx.TakePresentRegion(true, out _).ShouldBeTrue();
+            ctx.TakeChangedRegionForPresent(true, out _).ShouldBeTrue();
         });
     }
 

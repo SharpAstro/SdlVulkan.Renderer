@@ -35,7 +35,7 @@ public sealed unsafe partial class VulkanContext
     private readonly bool _wantsHdr;
 
     // The composite is configured: the swapchain (or the offscreen target) is scRGB and the arrays below exist.
-    private bool _hdrActive;
+    internal bool _hdrActive;
 
     // The actual swapchain images and views (float), while _swapchainImages / _swapchainImageViews hold the SDR layers.
     private VkImage[] _hdrPresentImages = [];
