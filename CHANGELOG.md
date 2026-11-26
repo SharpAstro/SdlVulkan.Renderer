@@ -7,6 +7,17 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.118
+
+**The pipeline cache is saved as pipeline sets are built, not only on dispose.** 7.117 wrote it when the device was
+disposed, so a run that did not end that way (killed, crashed, ended from outside) kept nothing: the PDF viewer's
+start-up timing, which ends every run with a kill, measured no cache at all. Each pipeline set now asks for a
+background save once it is built (`VulkanDevice.NotePipelinesBuilt`, internal): on a pool thread, skipped when a save
+is already under way, written only when the cache has grown. The caller never waits (the main set is built on the
+render thread before a window's first frame). Dispose still saves last and waits out a running save before it destroys
+the cache. Measured, launches that kill themselves without disposing: the first set 86 ms with 356 KB saved before the
+kill, then 6 and 7 ms.
+
 ## 7.117
 
 **A pipeline cache per device, saved where the app says.** The shaders ship as SPIR-V, but compiling SPIR-V to the
