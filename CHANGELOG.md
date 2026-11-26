@@ -7,8 +7,7 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
-<<<<<<< HEAD
-## 7.119
+## 7.121
 
 **Incremental present.** Each present names the rectangle of the image that changed since the last present
 (`VK_KHR_incremental_present`, enabled by default on a software rasteriser that offers it, `SDLVK_INCREMENTAL_PRESENT=1` asking for it on any other device; `VulkanDevice.IncrementalPresentAvailable`), so a
@@ -30,7 +29,7 @@ together took 5.66 % of a core with it and 5.78 % without, which is no differenc
 X server and compositor already move only what changed. It is unmeasured on a native X server without a compositor (a
 Raspberry Pi on X11), which is where it is expected to matter. Under the Khronos layer with synchronisation validation,
 presents naming a rectangle and frames repainting a clock alone: no messages.
-=======
+
 ## 7.120
 
 **The saved pipeline cache carries a checksum.** 7.117 checked a saved cache's header (vendor, device, cache UUID)
@@ -41,7 +40,6 @@ data (`PipelineCacheFile`); on load the checksum is checked first, then the head
 cache and is logged with which it was. A file written by 7.117 or 7.118 has no magic number, so the first launch on
 7.120 rebuilds it once. Measured with one body byte flipped: refused, rebuilt (106 ms for the first set), then 8 ms
 from the next launch. (7.119 is the incremental present, #216.)
->>>>>>> origin/main
 
 ## 7.118
 
