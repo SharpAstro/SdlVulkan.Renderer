@@ -7,6 +7,22 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.116
+
+**`BetweenFramesCollector` learns its threshold**, and **DIR.Lib 11.103** (was 11.102).
+
+The runtime's gen-0 budget is not one number: TianWen's runtime collected after about 6 MB, the PDF viewer's after 3.2
+to 4.1 MB on the same machine and runtime, so 7.115's fixed 4 MB never fired there (0 of 13 collections between
+frames; the runtime always got there first). Each collection the runtime starts itself now says how much it let the
+process allocate first (shared out over every collection since the last look, since an idle app presents no frames),
+and the threshold is three quarters of a running average of that, between `MinimumThresholdBytes` (1 MB, which is also
+the least an interval must be to count, so an induced collection teaches nothing) and the constructor's threshold, now
+a ceiling. `ThresholdBytes` reports the one in use. Measured in the PDF viewer, 25 s phases of pan and zoom alternating
+off and on in one window: off, 19 gen-0 collections, all started by the runtime; on, 22, of which 20 between frames.
+
+DIR.Lib 11.103 stops a trimmed run (a tab title) allocating every frame, keeps `PaintLayout`'s depth stacks between
+paints and adds `IPixelWidget.CollectRegisteredTextInputs`.
+
 ## 7.115
 
 **`BetweenFramesCollector`, moved here from TianWen, and `SdlEventLoop.BetweenFrames` to run it.** A generation-0
