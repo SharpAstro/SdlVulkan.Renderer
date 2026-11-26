@@ -45,7 +45,8 @@ public sealed class BetweenFramesCollectorTests
         }
         collector.Collections.ShouldBe(1);
         GC.CollectionCount(0).ShouldBeGreaterThan(gen0);
-        collector.AllocatedSinceCollection.ShouldBeLessThan(256 * 1024);
+        // Not asserted: AllocatedSinceCollection right after. It counts the whole process, and tests running in
+        // parallel allocate past any bound between the collection and the read (seen on the Windows runner).
     }
 
     [Fact]
