@@ -174,8 +174,8 @@ internal static partial class LogEvents
 
     // VulkanDevice.PipelineCache: a saved cache that was not this device's, or one that could not be read or written.
     // Either way the device builds without it, as it did before there was a cache; the launch is only slower.
-    [LoggerMessage(507, LogLevel.Information, "[VulkanDevice] pipeline cache {File} ({Bytes} bytes) is not this device's; starting an empty one.")]
-    public static partial void PipelineCacheRejected(this ILogger logger, string file, int bytes);
+    [LoggerMessage(507, LogLevel.Information, "[VulkanDevice] pipeline cache {File} ({Bytes} bytes) not used: {Reason}; starting an empty one.")]
+    public static partial void PipelineCacheRejected(this ILogger logger, string file, int bytes, string reason);
 
     [LoggerMessage(508, LogLevel.Warning, "[VulkanDevice] pipeline cache {File} could not be {Action}: {Message}")]
     public static partial void PipelineCacheIoFailed(this ILogger logger, string action, string file, string message);

@@ -1,5 +1,7 @@
 using System;
+using System.Buffers.Binary;
 using System.IO;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Vortice.Vulkan;
@@ -21,7 +23,8 @@ namespace SdlVulkan.Renderer;
 /// <para>
 /// One cache per device, created without <c>VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT</c>, so the driver
 /// synchronises it and pipeline sets may still be built on pool threads at once (see <see cref="VkRenderer"/>).
-/// What is on disk is checked against this device before the driver sees it (<see cref="PipelineCacheHeader"/>), and
+/// What is on disk is checked twice before the driver sees it: its checksum (<see cref="PipelineCacheFile"/>), so a body
+/// damaged behind an intact header is not used, and its header against this device (<see cref="PipelineCacheHeader"/>); and
 /// the file is named after the device and its driver version, so a driver update starts a new file rather than
 /// offering the old one; a file that does not match is not used. It is written to a temporary file and renamed, so a
 /// second process or a crash mid-write leaves the old file or the new one, never half of one.
@@ -64,13 +67,19 @@ public sealed unsafe partial class VulkanDevice
                 if (File.Exists(_pipelineCacheFile))
                 {
                     var data = File.ReadAllBytes(_pipelineCacheFile);
-                    if (PipelineCacheHeader.Matches(data, props.vendorID, props.deviceID, uuid))
+                    // The checksum first (a body damaged behind an intact header), then whether this device made it.
+                    if (!PipelineCacheFile.TryUnwrap(data, out var payload))
                     {
-                        seed = data;
+                        SdlVulkanLog.Logger.PipelineCacheRejected(_pipelineCacheFile, data.Length,
+                            "its checksum does not hold, or it predates the checksum");
+                    }
+                    else if (!PipelineCacheHeader.Matches(payload.Span, props.vendorID, props.deviceID, uuid))
+                    {
+                        SdlVulkanLog.Logger.PipelineCacheRejected(_pipelineCacheFile, data.Length, "another device or driver made it");
                     }
                     else
                     {
-                        SdlVulkanLog.Logger.PipelineCacheRejected(_pipelineCacheFile, data.Length);
+                        seed = payload.ToArray();
                     }
                 }
             }
@@ -159,7 +168,7 @@ public sealed unsafe partial class VulkanDevice
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-            File.WriteAllBytes(temp, data.AsSpan(0, (int)size));
+            File.WriteAllBytes(temp, PipelineCacheFile.Wrap(data.AsSpan(0, (int)size)));
             File.Move(temp, file, overwrite: true);
             _pipelineCacheLoadedBytes = (int)size;
         }
@@ -201,6 +210,55 @@ public sealed unsafe partial class VulkanDevice
             DeviceApi.vkDestroyPipelineCache(PipelineCache);
             PipelineCache = VkPipelineCache.Null;
         }
+    }
+}
+
+/// <summary>
+/// The file a pipeline cache is saved in: a magic number, a format version and a SHA-256 of the cache data, then the
+/// data. The header check (<see cref="PipelineCacheHeader"/>) says whether this device made the data; this says whether
+/// the data is what was written. A body damaged behind an intact header (a disk error, a sync tool, an edit) passes the
+/// first and fails this, and is then not handed to a driver, which the spec requires to cope with bad data and which is
+/// not trusted to. A file from before the checksum (7.117, 7.118) has no magic number, and is rebuilt.
+/// </summary>
+internal static class PipelineCacheFile
+{
+    /// <summary>"SVPC", read as a little-endian 32-bit word.</summary>
+    internal const uint Magic = 0x43505653;
+
+    internal const uint FormatVersion = 1;
+
+    /// <summary>Magic, version, and the 32-byte SHA-256.</summary>
+    internal const int EnvelopeLength = 4 + 4 + 32;
+
+    /// <summary>The bytes to write for <paramref name="data"/>.</summary>
+    internal static byte[] Wrap(ReadOnlySpan<byte> data)
+    {
+        var file = new byte[EnvelopeLength + data.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(file.AsSpan(0, 4), Magic);
+        BinaryPrimitives.WriteUInt32LittleEndian(file.AsSpan(4, 4), FormatVersion);
+        SHA256.HashData(data, file.AsSpan(8, 32));
+        data.CopyTo(file.AsSpan(EnvelopeLength));
+        return file;
+    }
+
+    /// <summary>The cache data in <paramref name="file"/>, when its envelope is this format's and its checksum
+    /// holds.</summary>
+    internal static bool TryUnwrap(byte[] file, out ReadOnlyMemory<byte> data)
+    {
+        data = ReadOnlyMemory<byte>.Empty;
+        if (file.Length < EnvelopeLength
+            || BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(0, 4)) != Magic
+            || BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(4, 4)) != FormatVersion)
+        {
+            return false;
+        }
+
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(file.AsSpan(EnvelopeLength), hash);
+        if (!hash.SequenceEqual(file.AsSpan(8, 32))) return false;
+
+        data = file.AsMemory(EnvelopeLength);
+        return true;
     }
 }
 
