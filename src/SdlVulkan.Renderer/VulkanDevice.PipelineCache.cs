@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using Vortice.Vulkan;
 
 namespace SdlVulkan.Renderer;
@@ -30,7 +32,8 @@ public sealed unsafe partial class VulkanDevice
     /// <summary>
     /// Where devices load their pipeline cache from when created and save it to when disposed (or on
     /// <see cref="SavePipelineCache"/>). Null, the default, keeps the cache in memory for the device's life only. Set
-    /// it before the first device is created.
+    /// it before the first device is created. The cache is also saved in the background as pipeline sets are built, so
+    /// a run that does not end by disposing the device keeps what it built.
     /// </summary>
     public static string? PipelineCacheDirectory { get; set; }
 
@@ -41,6 +44,10 @@ public sealed unsafe partial class VulkanDevice
     // so a run that built nothing new does not rewrite the file.
     private string? _pipelineCacheFile;
     private int _pipelineCacheLoadedBytes;
+
+    // Held by a save while it reads the cache and writes the file, and by the destroy, so the cache is never destroyed
+    // under a save. A save that finds it taken skips: the one holding it is saving already.
+    private readonly Lock _pipelineCacheSave = new();
 
     private void CreatePipelineCache()
     {
@@ -98,11 +105,43 @@ public sealed unsafe partial class VulkanDevice
     }
 
     /// <summary>
+    /// Saves the cache in the background after new pipelines went into it (a pipeline set built). Saving only on
+    /// dispose lost everything a run built whenever the process did not end by disposing its device: killed, crashed,
+    /// or ended from outside, which is how the PDF viewer's start-up timing ends every run, so it measured no cache at
+    /// all (2026-11-26). Never blocks the caller (a set is built on the render thread before a window's first frame):
+    /// the write is on a pool thread, and a save already under way means this one is not needed.
+    /// </summary>
+    internal void NotePipelinesBuilt()
+    {
+        if (_pipelineCacheFile is null) return;
+        _ = Task.Run(() =>
+        {
+            if (!_pipelineCacheSave.TryEnter()) return;
+            try
+            {
+                SavePipelineCacheCore();
+            }
+            finally
+            {
+                _pipelineCacheSave.Exit();
+            }
+        });
+    }
+
+    /// <summary>
     /// Writes the cache to <see cref="PipelineCacheDirectory"/>, when one is set and the cache has grown since it was
-    /// loaded. Called on dispose; an app may call it earlier, once its windows have built their pipelines, so a crash
-    /// later does not lose them. Thread-safe against pipeline builds (the driver synchronises the cache).
+    /// loaded or last saved. Done on dispose and in the background after each pipeline set is built; an app may call
+    /// it as well. Thread-safe against pipeline builds (the driver synchronises the cache) and against other saves.
     /// </summary>
     public void SavePipelineCache()
+    {
+        lock (_pipelineCacheSave)
+        {
+            SavePipelineCacheCore();
+        }
+    }
+
+    private void SavePipelineCacheCore()
     {
         if (_pipelineCacheFile is not { } file || PipelineCache == VkPipelineCache.Null) return;
 
@@ -154,10 +193,14 @@ public sealed unsafe partial class VulkanDevice
 
     private void DestroyPipelineCache()
     {
-        if (PipelineCache == VkPipelineCache.Null) return;
-        if (!IsGpuStuck) SavePipelineCache();
-        DeviceApi.vkDestroyPipelineCache(PipelineCache);
-        PipelineCache = VkPipelineCache.Null;
+        // Waits out a background save, which reads the cache; it is file I/O of a few hundred KB, bounded.
+        lock (_pipelineCacheSave)
+        {
+            if (PipelineCache == VkPipelineCache.Null) return;
+            if (!IsGpuStuck) SavePipelineCacheCore();
+            DeviceApi.vkDestroyPipelineCache(PipelineCache);
+            PipelineCache = VkPipelineCache.Null;
+        }
     }
 }
 

@@ -395,6 +395,9 @@ public sealed unsafe class VkPipelineSet : IDisposable
             // its own layout and so its own class. Not on a pass without depth, which has nothing to test.
             var mesh = withDepth ? VkMeshPipeline.Create(deviceApi, renderPass, msaa, cache) : null;
 
+            // The set's pipelines are in the cache now: kept on disk in the background, not only when the device goes.
+            ctx.GraphicsDevice.NotePipelinesBuilt();
+
             return new VkPipelineSet(deviceApi, flat, textured, ellipse, page, stroke, sdf, sdfLarge, roundRect,
                 flatMultiply, flatScreen, flatDarken, flatLighten, masked, mesh, ellipseInstanced, sdfInstanced, slug,
                 slugInstanced)
