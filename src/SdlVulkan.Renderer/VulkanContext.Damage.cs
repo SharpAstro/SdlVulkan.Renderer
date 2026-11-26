@@ -47,6 +47,8 @@ public sealed unsafe partial class VulkanContext
     private void ResetDamageState(int imageCount)
     {
         _damage.Reset(imageCount);
+        // A new swapchain has shown nothing yet: its first present is the whole image (VulkanContext.PresentRegion.cs).
+        _changedSincePresent.Reset(1);
         // A retained frame is one image whatever the swapchain holds (VulkanContext.Retained.cs); what each swapchain
         // image is missing of it is kept beside, and starts as all of it.
         if (_retainedActive) _presentDamage.Reset(imageCount);
@@ -60,6 +62,7 @@ public sealed unsafe partial class VulkanContext
     {
         _damage.Add(x, y, width, height);
         if (_retainedActive) _presentDamage.Add(x, y, width, height);
+        _changedSincePresent.Add(x, y, width, height);
     }
 
     /// <summary>
@@ -71,6 +74,7 @@ public sealed unsafe partial class VulkanContext
     {
         _damage.MarkFull();
         if (_retainedActive) _presentDamage.MarkFull();
+        _changedSincePresent.MarkFull();
     }
 
     // The image whose damage this frame took, and the rollback that re-marks it if the frame is dropped.
@@ -156,6 +160,10 @@ public sealed unsafe partial class VulkanContext
     }
 
     private VkRect2D ClampToSwapchain(float rx, float ry, float rw, float rh)
+        => RoundOutClamped(rx, ry, rw, rh, SwapchainWidth, SwapchainHeight);
+
+    // The whole pixels a damage rectangle reaches, inside an image of this size: the origin down, the far edge up.
+    internal static VkRect2D RoundOutClamped(float rx, float ry, float rw, float rh, uint swapchainWidth, uint swapchainHeight)
     {
         var x0 = rx < 0f ? 0 : (int)rx;
         var y0 = ry < 0f ? 0 : (int)ry;
@@ -163,8 +171,8 @@ public sealed unsafe partial class VulkanContext
         // Ceiling on the far edge: a damaged region that ends mid-pixel still needs that pixel.
         var x1 = (int)MathF.Ceiling(rx + rw);
         var y1 = (int)MathF.Ceiling(ry + rh);
-        if (x1 > (int)SwapchainWidth) { x1 = (int)SwapchainWidth; }
-        if (y1 > (int)SwapchainHeight) { y1 = (int)SwapchainHeight; }
+        if (x1 > (int)swapchainWidth) { x1 = (int)swapchainWidth; }
+        if (y1 > (int)swapchainHeight) { y1 = (int)swapchainHeight; }
 
         var w = x1 - x0;
         var h = y1 - y0;

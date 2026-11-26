@@ -7,6 +7,29 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.119
+
+**Incremental present.** Each present names the rectangle of the image that changed since the last present
+(`VK_KHR_incremental_present`, enabled wherever the device offers it; `VulkanDevice.IncrementalPresentAvailable`), so a
+presentation engine can move that and keep the rest. A frame owed to a clock's tick names the clock's rectangle.
+
+What it names is everything declared since the last present that was made, not the frame's own region: a swapchain image
+holds the frame of two or three presents ago, and a frame that never reached a present leaves its damage to the next.
+So a third record, of one slot, takes the same `AddFrameDamage` and `MarkFullFrameDamage` calls as the per-image ones,
+and only a present takes it (`VulkanContext.PresentRegion.cs`). The present is whole, naming nothing, before a
+swapchain's first present, after a frame declared full or declared nothing, on an HDR frame, and on a swapchain whose
+transform is not the identity. `SDLVK_INCREMENTAL_PRESENT=0` refuses it. `SDLVK_FRAME_LOG`'s line for each frame says
+what its present named (`present 2663,0 201x32`, or `present whole`), and `VulkanContext.LastPresentRegion` holds it.
+
+Why: without rectangles, Mesa's X11 present for a software rasteriser with no MIT-SHM sends the whole image down the X
+socket with `XPutImage` on every present, a clock's tick included (Mesa 25.2, `wsi_common_x11.c`). With MIT-SHM it hands
+the X server a shared pixmap and the update region; a Wayland compositor is handed the rectangle as surface damage.
+Measured on lavapipe in WSL (TianWen's idle Sky Map, 120 s each, MIT-SHM present): the app, Xwayland and WSLg's weston
+together took 5.66 % of a core with it and 5.78 % without, which is no difference that can be told from noise there: that
+X server and compositor already move only what changed. It is unmeasured on a native X server without a compositor (a
+Raspberry Pi on X11), which is where it is expected to matter. Under the Khronos layer with synchronisation validation,
+presents naming a rectangle and frames repainting a clock alone: no messages.
+
 ## 7.118
 
 **The pipeline cache is saved as pipeline sets are built, not only on dispose.** 7.117 wrote it when the device was

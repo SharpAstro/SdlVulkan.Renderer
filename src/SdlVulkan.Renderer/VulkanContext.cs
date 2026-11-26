@@ -1195,6 +1195,13 @@ public sealed unsafe partial class VulkanContext : IDisposable
             return;
         }
 
+        // What changed since the last present, named for the presentation engine (VulkanContext.PresentRegion.cs):
+        // taken here, where the present is certain, so a frame that never got this far leaves its damage to the next.
+        VkRectLayerKHR changedRect = default;
+        VkPresentRegionKHR changedRegion = default;
+        VkPresentRegionsKHR changedRegions = default;
+        NamePresentRegion(ref presentInfo, &changedRect, &changedRegion, &changedRegions);
+
         // Present is intentionally not CheckResult'd — ErrorOutOfDateKHR/SuboptimalKHR on resize are
         // handled by the next BeginFrame's acquire. Log it (DEBUG only) so we can confirm present is
         // actually succeeding now that submit no longer throws on the benign Adreno quirk above.
@@ -1707,6 +1714,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
         DeviceApi.vkCreateSwapchainKHR(&swapCI, null, out var swapchain).CheckResult();
         Swapchain = swapchain;
+        _swapchainTransformIsIdentity = swapCI.preTransform == VkSurfaceTransformFlagsKHR.Identity;
 
         // Get swapchain images
         DeviceApi.vkGetSwapchainImagesKHR(Swapchain, out uint imgCount).CheckResult();

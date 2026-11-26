@@ -43,9 +43,9 @@ internal static partial class LogEvents
     [LoggerMessage(107, LogLevel.Warning, "[SdlEventLoop] GPU fence stuck for {StuckMs}ms (window {WindowId}); escalating to full recovery.")]
     public static partial void GpuFenceStuckEscalating(this ILogger logger, long stuckMs, uint windowId);
 
-    [LoggerMessage(119, LogLevel.Information, "[SdlEventLoop] frame {Frame} (window {WindowId}): {FrameMs:F2}ms = begin {BeginMs:F2} + hooks {HooksMs:F2} + render {RenderMs:F2} + end {EndMs:F2}; GPU frame {GpuFrame}: {GpuMs:F2}ms ({GpuSections})")]
+    [LoggerMessage(119, LogLevel.Information, "[SdlEventLoop] frame {Frame} (window {WindowId}): {FrameMs:F2}ms = begin {BeginMs:F2} + hooks {HooksMs:F2} + render {RenderMs:F2} + end {EndMs:F2}; GPU frame {GpuFrame}: {GpuMs:F2}ms ({GpuSections}); present {PresentRegion}")]
     public static partial void FrameTiming(this ILogger logger, uint windowId, long frame, double frameMs, double beginMs,
-        double hooksMs, double renderMs, double endMs, long gpuFrame, double gpuMs, string gpuSections);
+        double hooksMs, double renderMs, double endMs, long gpuFrame, double gpuMs, string gpuSections, string presentRegion);
 
     [LoggerMessage(121, LogLevel.Information, "[SdlEventLoop] input in {Seconds:F1}s: mouse {Mouse}, touch-as-mouse {TouchMouse}, pen-as-mouse {PenMouse}, finger {Finger}, wheel {Wheel}, key {Key}; queued {AgeAvgMs:F1}ms avg, {AgeMaxMs:F1}ms max")]
     public static partial void InputTraced(this ILogger logger, double seconds, int mouse, int touchMouse, int penMouse, int finger,
