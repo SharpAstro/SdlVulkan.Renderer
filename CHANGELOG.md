@@ -7,6 +7,21 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.117
+
+**A pipeline cache per device, saved where the app says.** The shaders ship as SPIR-V, but compiling SPIR-V to the
+GPU's own code is the driver's work, and every pipeline was built without a `VkPipelineCache`, so it was done again for
+every set: on the Adreno X1-85 the first set in a fresh process took 82 to 99 ms, and each one after it in the same
+process still 71 to 88 ms. Now `VulkanDevice.PipelineCache` is made with the device and every pipeline (the sets, the
+mesh pipeline, the HDR composite and image pipelines, the YCbCr compute pipeline) is built through it. Set
+`VulkanDevice.PipelineCacheDirectory` before the first device and the cache is loaded from there and saved on dispose
+(or on `SavePipelineCache()`), as `pipelines-<vendor>-<device>-<driver>-<uuid>.bin`, written to a temporary file and
+renamed. Saved data is checked against the device's header (vendor, device, cache UUID) before the driver sees it, and
+a file that does not match is not used. Measured, a launch as an app sees it: the first set 69 ms and 356 KB saved,
+every launch after that 4 ms, and a set rebuilt in the same process 1 ms. Created without
+`VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`, so sets may still be built on pool threads at once. With no
+directory the cache lives as long as the device. `VkMeshPipeline.Create` gains an overload taking the cache.
+
 ## 7.116
 
 **`BetweenFramesCollector` learns its threshold**, and **DIR.Lib 11.103** (was 11.102).

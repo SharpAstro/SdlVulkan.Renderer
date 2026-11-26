@@ -351,6 +351,8 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         };
         deviceApi.vkCreateSampler(&samplerCI, null, out var sharedSampler).CheckResult();
         LinearClampSampler = sharedSampler;
+
+        CreatePipelineCache();
     }
 
     /// <summary>
@@ -1363,6 +1365,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         if (_hdrImagePipelineLayout != VkPipelineLayout.Null)
             DeviceApi.vkDestroyPipelineLayout(_hdrImagePipelineLayout);
         _ycbcrConverter?.Dispose();
+        DestroyPipelineCache();
         DeviceApi.vkDestroyDescriptorSetLayout(SlugDescriptorSetLayout);
         foreach (var pool in _descriptorPools)
             DeviceApi.vkDestroyDescriptorPool(pool);
