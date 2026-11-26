@@ -75,7 +75,9 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
         var ctx = v.Renderer.Context;
         var gpuMs = ctx.LastGpuFrameMs;
         SdlVulkanLog.Logger.FrameTiming(v.Window.WindowId, ctx.FramesBegun, frameMs, beginMs, hooksMs, renderMs, endMs,
-            ctx.LastGpuFrameOrdinal, double.IsFinite(gpuMs) ? gpuMs : 0, ctx.DescribeLastGpuSections());
+            ctx.LastGpuFrameOrdinal, double.IsFinite(gpuMs) ? gpuMs : 0, ctx.DescribeLastGpuSections(),
+            // What the present named as changed (VulkanContext.PresentRegion.cs): the rectangle, or the whole image.
+            ctx.LastPresentRegion is { } r ? $"{r.offset.x},{r.offset.y} {r.extent.width}x{r.extent.height}" : "whole");
     }
 
     // A rolling average of real frame time (BeginFrame->EndFrame), kept in every build for the inspector's

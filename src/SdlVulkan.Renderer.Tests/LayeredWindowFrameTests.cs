@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using DIR.Lib;
+using Vortice.Vulkan;
 using Shouldly;
 using Xunit;
 
@@ -51,6 +52,24 @@ public sealed class LayeredWindowFrameTests(OffscreenGpuFixture gpu)
     {
         var at = (y * (int)frame.Width + x) * 4;
         return (frame.Bgra[at], frame.Bgra[at + 1], frame.Bgra[at + 2], frame.Bgra[at + 3]);
+    }
+
+    [Fact]
+    public void AFrameThatMakesNoPresent_DoesNotReportTheLastPresentsRectangle()
+    {
+        if (gpu.Context is not { } shared)
+        {
+            Assert.Skip("Vulkan runtime not available on this host");
+            return;
+        }
+
+        var window = new StandInWindow(64, 48);
+        using var ctx = VulkanContext.CreateLayeredForSharedDevice(shared.GraphicsDevice, window);
+        using var renderer = new VkRenderer(ctx, 64, 48);
+        renderer.BeginFrame(Transparent).ShouldBeTrue();
+        ctx.LastPresentRegion = new VkRect2D(1, 1, 2, 2);
+        renderer.EndFrame();   // returns at the layered branch, before any present names a region
+        ctx.LastPresentRegion.ShouldBeNull();
     }
 
     [Fact]

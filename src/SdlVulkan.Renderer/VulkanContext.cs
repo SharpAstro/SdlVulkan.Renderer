@@ -148,8 +148,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
     // Swapchain state
     public VkSwapchainKHR Swapchain { get; private set; }
     public VkFormat SwapchainFormat { get; private set; }
-    public uint SwapchainWidth { get; private set; }
-    public uint SwapchainHeight { get; private set; }
+    public uint SwapchainWidth { get; internal set; }
+    public uint SwapchainHeight { get; internal set; }
 
     private VkImage[] _swapchainImages = [];
     private VkImageView[] _swapchainImageViews = [];
@@ -1029,6 +1029,8 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
     private void SubmitFrame(VkCommandBuffer cmd, bool endRenderPass)
     {
+        // A frame that makes no present (rejected submit, layered window) must not report the last one's rectangle.
+        LastPresentRegion = null;
         AssertFrameThread(nameof(SubmitFrame));
         var layeredReadback = false;
         if (endRenderPass)
@@ -1195,12 +1197,20 @@ public sealed unsafe partial class VulkanContext : IDisposable
             return;
         }
 
+        // What changed since the last present, named for the presentation engine (VulkanContext.PresentRegion.cs):
+        // taken here, where the present is certain, so a frame that never got this far leaves its damage to the next.
+        VkRectLayerKHR changedRect = default;
+        VkPresentRegionKHR changedRegion = default;
+        VkPresentRegionsKHR changedRegions = default;
+        NamePresentRegion(ref presentInfo, &changedRect, &changedRegion, &changedRegions, _dev.IncrementalPresentAvailable);
+
         // Present is intentionally not CheckResult'd — ErrorOutOfDateKHR/SuboptimalKHR on resize are
         // handled by the next BeginFrame's acquire. Log it (DEBUG only) so we can confirm present is
         // actually succeeding now that submit no longer throws on the benign Adreno quirk above.
         presentResult = DeviceApi.vkQueuePresentKHR(GraphicsQueue, &presentInfo);
         RenderDiag.Vk("present", presentResult, $"frame={_currentFrame} img={_currentImageIndex}");
         NoteDeviceLost(presentResult, "vkQueuePresentKHR");
+        NotePresentResult(presentResult);
 
         _frameBegun = false;
         _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
@@ -1707,6 +1717,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
         DeviceApi.vkCreateSwapchainKHR(&swapCI, null, out var swapchain).CheckResult();
         Swapchain = swapchain;
+        _swapchainTransformIsIdentity = swapCI.preTransform == VkSurfaceTransformFlagsKHR.Identity;
 
         // Get swapchain images
         DeviceApi.vkGetSwapchainImagesKHR(Swapchain, out uint imgCount).CheckResult();

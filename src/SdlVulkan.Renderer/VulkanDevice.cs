@@ -385,7 +385,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
 
         // Spelled out rather than built from VK_KHR_SWAPCHAIN_EXTENSION_NAME: that constant is a
         // UTF-8 span, and a mixed array of it and a string has no common element type.
-        using var extensionNames = new VkStringArray(DeviceExtensions(instanceApi, physicalDevice, presents: true, out var wantsBudget));
+        using var extensionNames = new VkStringArray(DeviceExtensions(instanceApi, physicalDevice, presents: true, out var wantsBudget, out var wantsIncrementalPresent));
         var features = EnabledFeatures(instanceApi, physicalDevice);
         VkDeviceCreateInfo deviceCI = new()
         {
@@ -420,6 +420,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
             graphicsQueue, queueFamily, renderPass, singleSamplePass, renderPassNoDepth, singleSamplePassNoDepth,
             colorFormat, depthFormat, msaaSamples, ownsInstance);
         created.MemoryBudgetAvailable = wantsBudget;
+        created.IncrementalPresentAvailable = wantsIncrementalPresent;
         return created;
     }
 
@@ -446,7 +447,7 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         // device. Important for headless environments (Linux CI with Mesa lavapipe / llvmpipe
         // software rasterizer, containers without a display server) where the instance has no
         // surface extensions enabled.
-        var offscreenExtensions = DeviceExtensions(instanceApi, physicalDevice, presents: false, out var wantsBudget);
+        var offscreenExtensions = DeviceExtensions(instanceApi, physicalDevice, presents: false, out var wantsBudget, out _);
         using var extensionNames = new VkStringArray(offscreenExtensions);
         var features = EnabledFeatures(instanceApi, physicalDevice);
         VkDeviceCreateInfo deviceCI = new()
@@ -969,6 +970,16 @@ public sealed unsafe partial class VulkanDevice : IDisposable
         return budgetBytes > 0;
     }
 
+    private const string IncrementalPresentExtensionName = "VK_KHR_incremental_present";
+
+    /// <summary>
+    /// Whether this device was created with <c>VK_KHR_incremental_present</c>, so a present can say which rectangle of
+    /// the image changed since the last one (<c>VulkanContext.PresentRegion.cs</c>). Offered by Mesa's drivers, where it
+    /// matters most: without it, a software rasteriser's present on X11 sends the whole image to the X server, every
+    /// frame, a clock's tick included.
+    /// </summary>
+    public bool IncrementalPresentAvailable { get; private set; }
+
     /// <summary>Whether the physical device offers <c>VK_EXT_memory_budget</c>. Asked before device
     /// creation, because chaining the budget struct onto a device that did not enable the extension
     /// is undefined rather than merely unanswered.</summary>
@@ -983,17 +994,32 @@ public sealed unsafe partial class VulkanDevice : IDisposable
     private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
 
     /// <summary>
-    /// The device extensions to enable: the swapchain when the device presents, the memory budget when
-    /// offered, and the portability subset when the device is a portability implementation (see
-    /// <see cref="PortabilitySubsetExtensionName"/>). One list for the on-screen and the offscreen device, so
-    /// neither can forget one.
+    /// Whether to enable incremental present: only on a device that presents and offers it; by default on a software
+    /// rasteriser only (the one place it is expected to matter, and the one measured), <paramref name="setting"/> "1"
+    /// asking for it elsewhere and "0" refusing it everywhere.
+    /// </summary>
+    internal static bool ChooseIncrementalPresent(bool presents, bool softwareRasterizer, bool offered, string? setting)
+        => presents && offered && setting != "0" && (softwareRasterizer || setting == "1");
+
+    /// <summary>
+    /// The device extensions to enable: the swapchain when the device presents, and incremental present beside it
+    /// when offered; the memory budget when offered, and the portability subset when the device is a portability
+    /// implementation (see <see cref="PortabilitySubsetExtensionName"/>). One list for the on-screen and the offscreen
+    /// device, so neither can forget one.
     /// </summary>
     private static string[] DeviceExtensions(VkInstanceApi instanceApi, VkPhysicalDevice physicalDevice,
-        bool presents, out bool wantsBudget)
+        bool presents, out bool wantsBudget, out bool wantsIncrementalPresent)
     {
         wantsBudget = SupportsMemoryBudget(instanceApi, physicalDevice);
-        var names = new List<string>(3);
+        // As ChooseRetainedFrame: on a software rasteriser by default (where Mesa's X11 present sends the whole image
+        // without rectangles), SDLVK_INCREMENTAL_PRESENT=1 asks for it on any other device that offers it, =0 refuses it.
+        instanceApi.vkGetPhysicalDeviceProperties(physicalDevice, out var deviceProps);
+        wantsIncrementalPresent = ChooseIncrementalPresent(presents, deviceProps.deviceType == VkPhysicalDeviceType.Cpu,
+            DeviceExtensionAvailable(instanceApi, physicalDevice, IncrementalPresentExtensionName),
+            Environment.GetEnvironmentVariable("SDLVK_INCREMENTAL_PRESENT"));
+        var names = new List<string>(4);
         if (presents) names.Add(SwapchainExtensionName);
+        if (wantsIncrementalPresent) names.Add(IncrementalPresentExtensionName);
         if (wantsBudget) names.Add(MemoryBudgetExtensionName);
         if (DeviceExtensionAvailable(instanceApi, physicalDevice, PortabilitySubsetExtensionName))
             names.Add(PortabilitySubsetExtensionName);

@@ -7,6 +7,29 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.121
+
+**Incremental present.** Each present names the rectangle of the image that changed since the last present
+(`VK_KHR_incremental_present`, enabled by default on a software rasteriser that offers it, `SDLVK_INCREMENTAL_PRESENT=1` asking for it on any other device; `VulkanDevice.IncrementalPresentAvailable`), so a
+presentation engine can move that and keep the rest. A frame owed to a clock's tick names the clock's rectangle.
+
+What it names is everything declared since the last present that was made, not the frame's own region: a swapchain image
+holds the frame of two or three presents ago, and a frame that never reached a present leaves its damage to the next.
+So a third record, of one slot, takes the same `AddFrameDamage` and `MarkFullFrameDamage` calls as the per-image ones,
+and only a present takes it (`VulkanContext.PresentRegion.cs`). The present is whole, naming nothing, before a
+swapchain's first present, after a frame declared full or declared nothing, on an HDR frame, and on a swapchain whose
+transform is not the identity. `SDLVK_INCREMENTAL_PRESENT=0` refuses it everywhere. A present that fails with anything but success or suboptimal declares the next present whole. `SDLVK_FRAME_LOG`'s line for each frame says
+what its present named (`present 2663,0 201x32`, or `present whole`), and `VulkanContext.LastPresentRegion` holds it.
+
+Why: without rectangles, Mesa's X11 present for a software rasteriser with no MIT-SHM sends the whole image down the X
+socket with `XPutImage` on every present, a clock's tick included (Mesa 25.2, `wsi_common_x11.c`). With MIT-SHM it hands
+the X server a shared pixmap and the update region; a Wayland compositor is handed the rectangle as surface damage.
+Measured on lavapipe in WSL (TianWen's idle Sky Map, 120 s each, MIT-SHM present): the app, Xwayland and WSLg's weston
+together took 5.66 % of a core with it and 5.78 % without, which is no difference that can be told from noise there: that
+X server and compositor already move only what changed. It is unmeasured on a native X server without a compositor (a
+Raspberry Pi on X11), which is where it is expected to matter. Under the Khronos layer with synchronisation validation,
+presents naming a rectangle and frames repainting a clock alone: no messages.
+
 ## 7.120
 
 **The saved pipeline cache carries a checksum.** 7.117 checked a saved cache's header (vendor, device, cache UUID)
@@ -16,7 +39,7 @@ and which is not trusted to. The file is now a magic number, a format version an
 data (`PipelineCacheFile`); on load the checksum is checked first, then the header, and either failing starts an empty
 cache and is logged with which it was. A file written by 7.117 or 7.118 has no magic number, so the first launch on
 7.120 rebuilds it once. Measured with one body byte flipped: refused, rebuilt (106 ms for the first set), then 8 ms
-from the next launch. (7.119 is the incremental present, #216.)
+from the next launch. (7.121 is the incremental present, #216.)
 
 ## 7.118
 
