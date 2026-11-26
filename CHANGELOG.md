@@ -39,7 +39,7 @@ and which is not trusted to. The file is now a magic number, a format version an
 data (`PipelineCacheFile`); on load the checksum is checked first, then the header, and either failing starts an empty
 cache and is logged with which it was. A file written by 7.117 or 7.118 has no magic number, so the first launch on
 7.120 rebuilds it once. Measured with one body byte flipped: refused, rebuilt (106 ms for the first set), then 8 ms
-from the next launch. (7.119 is the incremental present, #216.)
+from the next launch. (7.121 is the incremental present, #216.)
 
 ## 7.118
 

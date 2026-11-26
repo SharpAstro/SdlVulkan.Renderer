@@ -1202,7 +1202,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         VkRectLayerKHR changedRect = default;
         VkPresentRegionKHR changedRegion = default;
         VkPresentRegionsKHR changedRegions = default;
-        NamePresentRegion(ref presentInfo, &changedRect, &changedRegion, &changedRegions);
+        NamePresentRegion(ref presentInfo, &changedRect, &changedRegion, &changedRegions, _dev.IncrementalPresentAvailable);
 
         // Present is intentionally not CheckResult'd — ErrorOutOfDateKHR/SuboptimalKHR on resize are
         // handled by the next BeginFrame's acquire. Log it (DEBUG only) so we can confirm present is

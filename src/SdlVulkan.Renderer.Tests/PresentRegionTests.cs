@@ -240,7 +240,7 @@ public sealed class PresentRegionTests
         });
 
         [Fact]
-        public unsafe void NamingThePresentSetsAndClearsLastPresentRegion() => WithContext(gpu, ctx =>
+        public unsafe void NamingThePresentChainsANarrowRectangleThenClearsItForAWholeOne() => WithContext(gpu, ctx =>
         {
             VkRectLayerKHR rect = default;
             VkPresentRegionKHR region = default;
@@ -248,13 +248,19 @@ public sealed class PresentRegionTests
             var info = new VkPresentInfoKHR();
 
             ctx.AddFrameDamage(10f, 8f, 4f, 3f);
-            ctx.NamePresentRegion(ref info, &rect, &region, &regions);
-            // The offscreen device does not offer the extension, so the present is whole and the record is null.
-            ctx.LastPresentRegion.ShouldBeNull();
+            ctx.NamePresentRegion(ref info, &rect, &region, &regions, deviceOffersIt: true);
+            ((nint)info.pNext).ShouldBe((nint)(&regions));
+            regions.swapchainCount.ShouldBe(1u);
+            ((nint)regions.pRegions).ShouldBe((nint)(&region));
+            region.rectangleCount.ShouldBe(1u);
+            ((nint)region.pRectangles).ShouldBe((nint)(&rect));
+            (rect.offset.x, rect.offset.y, rect.extent.width, rect.extent.height).ShouldBe((10, 8, 4u, 3u));
+            ctx.LastPresentRegion.ShouldBe(new VkRect2D(10, 8, 4, 3));
 
-            ctx.LastPresentRegion = new VkRect2D(0, 0, 1, 1);
-            ctx.AddFrameDamage(10f, 8f, 4f, 3f);
-            ctx.NamePresentRegion(ref info, &rect, &region, &regions);
+            info = new VkPresentInfoKHR();
+            ctx.MarkFullFrameDamage();
+            ctx.NamePresentRegion(ref info, &rect, &region, &regions, deviceOffersIt: true);
+            ((nint)info.pNext).ShouldBe(0);
             ctx.LastPresentRegion.ShouldBeNull("a present that names nothing leaves nothing recorded");
         });
 

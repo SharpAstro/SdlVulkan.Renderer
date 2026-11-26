@@ -85,9 +85,9 @@ public sealed unsafe partial class VulkanContext
 
     // Chained onto the present it names. The three structs live on the caller's stack, so they outlive the call.
     internal void NamePresentRegion(ref VkPresentInfoKHR presentInfo, VkRectLayerKHR* rect, VkPresentRegionKHR* region,
-        VkPresentRegionsKHR* regions)
+        VkPresentRegionsKHR* regions, bool deviceOffersIt)
     {
-        if (!TakeChangedRegionForPresent(_dev.IncrementalPresentAvailable, out *rect))
+        if (!TakeChangedRegionForPresent(deviceOffersIt, out *rect))
         {
             LastPresentRegion = null;
             return;
