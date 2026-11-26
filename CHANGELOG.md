@@ -7,6 +7,16 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.115
+
+**`BetweenFramesCollector`, moved here from TianWen, and `SdlEventLoop.BetweenFrames` to run it.** A generation-0
+collection starts at the allocation that uses up the runtime's budget, and a GUI's render thread does most of its
+allocating while it paints, so the pause lands inside a paint (TianWen: 511 of 1,489 paints over 8 ms in one traced
+session). Set `loop.BetweenFrames = new BetweenFramesCollector()` and the loop asks it after every iteration that
+presented a frame, right after `OnPostFrame`: once 4 MB (two thirds of the runtime's ~6 MB gen-0 budget) has been
+allocated since the last collection it collects generation 0 there, between frames; when the runtime collected on its
+own in between it starts its count again and does nothing. Null (the default) changes nothing. Additive only.
+
 ## 7.114
 
 **DIR.Lib 11.102** (was 11.101), which adds `KeptLayout<TKey>`: a widget's arranged tree kept from one frame to the

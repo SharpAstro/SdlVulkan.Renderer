@@ -190,6 +190,14 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
     public Action? OnPostFrame { get; set; }
 
     /// <summary>
+    /// When set, asked after every iteration that presented a frame (right after <see cref="OnPostFrame"/>) whether a
+    /// generation-0 collection that is nearly due should run now, between frames, rather than at an allocation inside
+    /// the next paint. Null (the default) leaves collections where the runtime puts them. See
+    /// <see cref="BetweenFramesCollector"/>.
+    /// </summary>
+    public BetweenFramesCollector? BetweenFrames { get; set; }
+
+    /// <summary>
     /// Invoked once every loop iteration, AFTER the render pass, whether or not a frame was drawn: about every 16 ms
     /// while the loop idles (its event wait is bounded), and never while the loop is stuck. That makes it the loop's
     /// proof of life. A host that tells another process it is still there (a presence beat to a node, so a prompt
@@ -518,7 +526,12 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
             }
 
             if (renderedAny)
+            {
                 OnPostFrame?.Invoke();
+                // The frame is on its way to the screen and the next is most of an interval off: where a collection
+                // that is nearly due costs no frame anything.
+                BetweenFrames?.AfterFrame();
+            }
 
             if (FrameLog && _inputTrace.TryTakeSummary(Stopwatch.GetTimestamp(), Stopwatch.Frequency, out var input))
                 SdlVulkanLog.Logger.InputTraced(input.Seconds, input.Mouse, input.TouchMouse, input.PenMouse, input.Finger,
