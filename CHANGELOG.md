@@ -7,6 +7,13 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.114
+
+**DIR.Lib 11.102** (was 11.101), which adds `KeptLayout<TKey>`: a widget's arranged tree kept from one frame to the
+next while everything its build reads stands, still painted every frame so its regions and hover stay live. A consumer
+keeping its chrome with it (the PDF viewer's hint bar and tool palette, TianWen's panels) builds against this release.
+Nothing in the renderer's own source changes. Additive only.
+
 ## 7.113
 
 **Dependencies to their latest releases.** DIR.Lib 11.101 (was 11.99: 11.100 keeps a `TabBar` strip's tree between
