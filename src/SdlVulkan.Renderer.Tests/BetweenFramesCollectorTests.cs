@@ -30,8 +30,9 @@ public sealed class BetweenFramesCollectorTests
     public void PastTheThresholdAFrameCollectsAndCounts()
     {
         // A threshold far under the runtime's own budget, so the runtime does not collect first.
-        var collector = new BetweenFramesCollector(thresholdBytes: 256 * 1024);
+        // Read before the collector is made, so a collection between the two still counts as the runtime's own.
         var beforeAllocating = GC.CollectionCount(0);
+        var collector = new BetweenFramesCollector(thresholdBytes: 256 * 1024);
         Allocate(512 * 1024);
         var gen0 = GC.CollectionCount(0);
         var collected = collector.AfterFrame();
