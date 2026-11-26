@@ -47,6 +47,12 @@ public sealed unsafe class VkMeshPipeline : IDisposable
     /// that shape: a mesh tests depth, so there is no such pipeline for a pass without the attachment.
     /// </summary>
     public static VkMeshPipeline Create(VkDeviceApi deviceApi, VkRenderPass renderPass, VkSampleCountFlags msaaSamples)
+        => Create(deviceApi, renderPass, msaaSamples, VkPipelineCache.Null);
+
+    /// <summary>As <see cref="Create(VkDeviceApi, VkRenderPass, VkSampleCountFlags)"/>, built through
+    /// <paramref name="cache"/> (the device's <see cref="VulkanDevice.PipelineCache"/>).</summary>
+    public static VkMeshPipeline Create(VkDeviceApi deviceApi, VkRenderPass renderPass, VkSampleCountFlags msaaSamples,
+        VkPipelineCache cache)
     {
         VkPushConstantRange pushRange = new()
         {
@@ -159,7 +165,8 @@ public sealed unsafe class VkMeshPipeline : IDisposable
                 subpass = 0
             };
 
-            deviceApi.vkCreateGraphicsPipeline(pipelineCI, out var pipeline).CheckResult();
+            VkPipeline pipeline;
+            deviceApi.vkCreateGraphicsPipelines(cache, 1, &pipelineCI, null, &pipeline).CheckResult();
             return new VkMeshPipeline(deviceApi, pipeline, layout);
         }
         finally

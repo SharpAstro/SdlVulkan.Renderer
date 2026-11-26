@@ -30,9 +30,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     private VkPipelineSet? _savedThumbnailPipelines;
 
     // One set of the four, with the build that may be producing it. A set other than the first one wanted
-    // is built off the render thread: a pipeline set is about 50 ms of driver compile (Adreno X1-85, warm
-    // driver cache), which a window's creation should not pay for a feature its first frames rarely use.
-    // vkCreateGraphicsPipelines needs no external synchronisation without a pipeline cache. Until a
+    // is built off the render thread: a pipeline set is 70 to 100 ms of driver compile without a pipeline cache
+    // (Adreno X1-85), about 10 ms from a saved one (VulkanDevice.PipelineCache), which a window's creation should
+    // not pay for a feature its first frames rarely use. vkCreateGraphicsPipelines needs no external
+    // synchronisation: the device's cache is created without VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT,
+    // so the driver synchronises it and two sets may be built at once. Until a
     // single-sample set is in, a frame that asks for a single-sample main pass gets the multisampled one,
     // which is correct, merely slower; a main set a pass needs is waited for (Require), since a pass cannot
     // be recorded without one.

@@ -102,7 +102,7 @@ internal sealed unsafe class VkYCbCrConverter : IDisposable
                 layout = pipelineLayout,
             };
             VkPipeline pipeline;
-            api.vkCreateComputePipelines(VkPipelineCache.Null, 1, &pipelineCI, null, &pipeline).CheckResult();
+            api.vkCreateComputePipelines(device.PipelineCache, 1, &pipelineCI, null, &pipeline).CheckResult();
             Pipeline = pipeline;
         }
         finally
