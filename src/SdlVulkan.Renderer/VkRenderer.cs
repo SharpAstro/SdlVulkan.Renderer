@@ -2586,6 +2586,36 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         ? new SlugStoreInfo(s.GlyphCount, s.UsedWords, s.CapacityWords, s.GrowCount, s.FailedGlyphs, s.HasPending)
         : default;
 
+    /// <summary>GPU memory this library has allocated for a renderer's atlases, vertex ring and swapchain, as
+    /// <see cref="MemoryStats"/> reads it. It is what this library asked for, not the driver's total (no padding, no
+    /// driver-internal allocations). An atlas not yet created reports 0.</summary>
+    /// <param name="BitmapAtlasBytes">The bitmap glyph atlas image (width x height x 4).</param>
+    /// <param name="SdfBasePages">Pages of the base MTSDF atlas tier.</param>
+    /// <param name="SdfBasePageDimension">Side of a base-tier page in texels.</param>
+    /// <param name="SdfBaseBytes">Bytes of the base-tier pages (pages x side squared x 4).</param>
+    /// <param name="SdfLargePages">Pages of the large MTSDF tier (0 when there is none).</param>
+    /// <param name="SdfLargePageDimension">Side of a large-tier page in texels.</param>
+    /// <param name="SdfLargeBytes">Bytes of the large-tier pages.</param>
+    /// <param name="SlugStoreBytes">The Slug glyph buffer at its current capacity.</param>
+    /// <param name="VertexRingBytes">The vertex ring over both in-flight slots.</param>
+    /// <param name="SwapchainImageCount">Images the frame loop cycles (0 offscreen).</param>
+    public readonly record struct GpuMemoryStats(long BitmapAtlasBytes, int SdfBasePages, int SdfBasePageDimension,
+        long SdfBaseBytes, int SdfLargePages, int SdfLargePageDimension, long SdfLargeBytes, long SlugStoreBytes,
+        long VertexRingBytes, int SwapchainImageCount)
+    {
+        /// <summary>The sum of the byte counters (the swapchain images are the presentation engine's, not counted).</summary>
+        public long TotalBytes => BitmapAtlasBytes + SdfBaseBytes + SdfLargeBytes + SlugStoreBytes + VertexRingBytes;
+    }
+
+    /// <summary>A snapshot of the GPU memory this renderer's atlases, Slug store and vertex ring hold, and the
+    /// swapchain image count. Does not create anything.</summary>
+    public GpuMemoryStats MemoryStats => new(
+        _fontAtlas?.Bytes ?? 0,
+        _sdfFontAtlas?.PageCount ?? 0, _sdfFontAtlas?.PageDimension ?? 0, _sdfFontAtlas?.Bytes ?? 0,
+        _sdfFontAtlasLarge?.PageCount ?? 0, _sdfFontAtlasLarge?.PageDimension ?? 0, _sdfFontAtlasLarge?.Bytes ?? 0,
+        _slugGlyphStore?.CapacityBytes ?? 0,
+        Surface.VertexRingTotalBytes, Surface.SwapchainImageCount);
+
     /// <summary>Floats in one Slug glyph INSTANCE as <see cref="WriteSlugGlyphInstance"/> writes it and
     /// <see cref="DrawPersistentSlugGlyphs"/> draws it (sluginst.vert): the quad's top-left corner and its two edge
     /// vectors in the caller's space (2 + 2 + 2), the glyph's tight em box as left, top, right, bottom with y up (4), and

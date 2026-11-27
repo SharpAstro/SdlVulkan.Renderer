@@ -74,6 +74,13 @@ internal sealed unsafe class VkSdfFontAtlas : IDisposable, ISdfAtlasBackend
     internal ManagedFontRasterizer Rasterizer => _core.Rasterizer;
 
     public int PageCount => _core.PageCount;
+
+    /// <summary>Side of one square page, in texels (forwarded from the core).</summary>
+    public int PageDimension => _core.PageDimension;
+
+    /// <summary>GPU bytes the pages hold: pages x side squared x 4 (R8G8B8A8Unorm).</summary>
+    public long Bytes => (long)PageCount * PageDimension * PageDimension * 4;
+
     public string FrameStats => _core.FrameStats;
     public bool IsDirty => _core.IsDirty;
 

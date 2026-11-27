@@ -186,6 +186,9 @@ internal sealed unsafe class VkSlugGlyphStore : IDisposable
     public VkDescriptorSet DescriptorSet => _set;
 
     public int CapacityWords => _capacityWords;
+
+    /// <summary>GPU bytes of the glyph buffer at its current capacity.</summary>
+    public long CapacityBytes => (long)_capacityWords * 4;
     public int UsedWords => _usedWords;
 
     /// <summary>The most words the buffer can hold on this device: <c>maxStorageBufferRange</c> / 4.</summary>
