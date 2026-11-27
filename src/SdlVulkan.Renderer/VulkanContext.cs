@@ -391,6 +391,36 @@ public sealed unsafe partial class VulkanContext : IDisposable
     public uint VertexRingPeakBytes => _vertexRingPeakBytes;
     /// <summary>The current frame's slot capacity, in bytes.</summary>
     public uint VertexRingCapacityBytes => _vertexBufferSizes[_currentFrame];
+
+    /// <summary>GPU bytes the vertex ring holds over both in-flight slots (this library's allocation, not the driver's total).</summary>
+    public long VertexRingTotalBytes
+    {
+        get
+        {
+            long total = 0;
+            foreach (var s in _vertexBufferSizes) total += s;
+            return total;
+        }
+    }
+
+    /// <summary>Images the frame loop cycles: the swapchain's (the HDR layers, the retained or layered image when one
+    /// stands in for it). 0 for an offscreen context, which has no swapchain.</summary>
+    public int SwapchainImageCount => _swapchainImages.Length;
+
+    /// <summary>When true the next swapchain build asks for the surface's <c>minImageCount</c> images instead of
+    /// <c>minImageCount + 1</c>. One image fewer saves its memory but is one frame less of latency headroom, and Mailbox
+    /// needs 3 to be useful. Applied at the next build: set it, then call <see cref="RecreateSwapchain"/> or let the next
+    /// resize take it.</summary>
+    public bool PreferFewestSwapchainImages { get; set; }
+
+    /// <summary>The swapchain image count for a surface's limits: <c>min + 1</c>, or <c>min</c> when
+    /// <paramref name="fewest"/>, clamped to <paramref name="max"/> when that is not 0 (no limit).</summary>
+    internal static uint ChooseSwapchainImageCount(uint min, uint max, bool fewest)
+    {
+        var count = fewest ? min : min + 1;
+        if (max > 0 && count > max) count = max;
+        return count;
+    }
     /// <summary>Frames that dropped at least one write because the ring was full, which since the ring
     /// grows mid-frame takes a frame needing more than <see cref="VertexRingMaxBytes"/>.</summary>
     public int VertexRingOverflowFrames => _vertexRingOverflowFrames;
@@ -1517,9 +1547,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
 
             extent = ChooseSwapchainExtent(caps, width, height);
 
-            var imageCount = caps.minImageCount + 1;
-            if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
-                imageCount = caps.maxImageCount;
+            var imageCount = ChooseSwapchainImageCount(caps.minImageCount, caps.maxImageCount, PreferFewestSwapchainImages);
             // HDR asked for: take scRGB when the surface offers it. Asked of the surface itself, each time the swapchain is
             // built, because the formats are per surface (a window on another display). Not asked at all otherwise.
             SurfaceFormatChoice? scRgb = null;

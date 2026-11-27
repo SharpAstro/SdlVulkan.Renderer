@@ -214,6 +214,9 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     /// <summary>The atlas image's current width, in pixels (tests: a grow happened).</summary>
     internal int AtlasWidth => _atlasWidth;
 
+    /// <summary>GPU bytes of the atlas image: width x height x 4 (R8G8B8A8Unorm).</summary>
+    internal long Bytes => (long)_atlasWidth * _atlasHeight * 4;
+
     /// <summary>How many times a full atlas at its cap was wiped (tests: eviction happened).</summary>
     internal int EvictionCount { get; private set; }
 
