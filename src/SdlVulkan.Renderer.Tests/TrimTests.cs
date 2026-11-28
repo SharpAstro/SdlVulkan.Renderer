@@ -275,9 +275,39 @@ public sealed class TrimTests
             r.DestroyBuffer(slugBuf.Buffer, slugBuf.Memory);
         }
 
-        // (g) The same pixels as the first draw.
+        // (g) The same pixels as the first draw. As in Run, a second fresh renderer is the reference: the SDF atlas lays
+        // cells out in the order the async encodes land, so a glyph sampled from another cell can move an edge byte by a
+        // level. When the fresh renderer reproduces the first draw exactly, so must the one after the trim; otherwise
+        // the trim may differ by no more than the fresh renderer does.
+        byte[] fresh;
+        using (var r2 = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128))
+        {
+            var sdf2 = new float[sdf.Length];
+            var slug2 = new float[slug.Length];
+            var (page2, _) = LayOutPersistent(r2, ctx, sdfGids, slugGids, sdf2, slug2);
+            var sdfBuf2 = r2.CreatePersistentVertexBuffer(sdf2);
+            var slugBuf2 = r2.CreatePersistentVertexBuffer(slug2);
+            try
+            {
+                fresh = DrawPersistent(r2, ctx, sdfBuf2.Buffer, sdfGids.Length, page2, slugBuf2.Buffer, slugGids.Length);
+            }
+            finally
+            {
+                r2.DestroyBuffer(sdfBuf2.Buffer, sdfBuf2.Memory);
+                r2.DestroyBuffer(slugBuf2.Buffer, slugBuf2.Memory);
+            }
+        }
+        var (refDiff, refMax) = Diff(first, fresh);
         var (differing, maxDelta) = Diff(first, again);
-        differing.ShouldBe(0, $"the persistent glyphs drew the same pixels after the trim (max delta {maxDelta})");
+        if (refDiff == 0)
+        {
+            differing.ShouldBe(0, $"a fresh renderer draws the persistent glyphs exactly, so must the trimmed one (max delta {maxDelta})");
+        }
+        else
+        {
+            maxDelta.ShouldBeLessThanOrEqualTo(Math.Max(refMax, 1), "the persistent glyphs drew the pixels of the first draw after the trim");
+            differing.ShouldBeLessThan(first.Length / 100, "only edge bytes of the SDF glyphs may differ");
+        }
     }
 
     private static void RunInFrame(VulkanContext ctx)
