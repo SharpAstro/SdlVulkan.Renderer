@@ -109,6 +109,9 @@ public sealed class TrimTests
         back.VertexRingBytes.ShouldBeGreaterThan(0);
     }
 
+    private static IEnumerable<string> ChangedAt(float[] a, float[] b) =>
+        Enumerable.Range(0, a.Length).Where(i => a[i] != b[i]).Select(i => $"{i}:{a[i]}->{b[i]}");
+
     private static (int Differing, int MaxDelta) Diff(byte[] a, byte[] b)
     {
         var differing = 0;
@@ -257,6 +260,8 @@ public sealed class TrimTests
         r.SdfPageStamp(page, false).ShouldNotBe(stampBefore, "a trim changes the stamp an SDF instance was laid out with");
 
         // (f) Lay out and write again, in the rebuilt atlas and store, and draw.
+        var sdfFirst = sdf.ToArray();
+        var slugFirst = slug.ToArray();
         Array.Clear(sdf);
         Array.Clear(slug);
         var (pageAfter, stampAfter) = LayOutPersistent(r, ctx, sdfGids, slugGids, sdf, slug);
@@ -301,7 +306,9 @@ public sealed class TrimTests
         var (differing, maxDelta) = Diff(first, again);
         if (refDiff == 0)
         {
-            differing.ShouldBe(0, $"a fresh renderer draws the persistent glyphs exactly, so must the trimmed one (max delta {maxDelta})");
+            differing.ShouldBe(0, $"a fresh renderer draws the persistent glyphs exactly, so must the trimmed one (max delta {maxDelta}); "
+                + $"SDF instance floats changed at [{string.Join(",", ChangedAt(sdfFirst, sdf))}], Slug at [{string.Join(",", ChangedAt(slugFirst, slug))}], "
+                + $"bytes differ at [{string.Join(",", Enumerable.Range(0, first.Length).Where(i => first[i] != again[i]).Select(i => $"({i / 4 % Width},{i / 4 / Width}).{i % 4}"))}]");
         }
         else
         {
