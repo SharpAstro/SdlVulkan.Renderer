@@ -59,12 +59,17 @@ public sealed class TrimTests
         throw new Xunit.Sdk.XunitException("the scene never settled");
     }
 
-    private static void Run(VulkanContext ctx)
+    // displace: after the trim, other SDF glyphs are drawn and settled first, so they take cells before the scene's own
+    // glyphs ask again and the scene's glyphs land in other cells; that makes the moved-cell tolerance below run.
+    private static void Run(VulkanContext ctx, bool displace = false)
     {
         ctx.ResizeOffscreen(Width, Height);
         using var r = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128) { };
         var before = Settle(r, ctx);
-        InkPixels(before).ShouldBeGreaterThan(0, "the scene drew something");
+        // The red rectangle (rows 30 to 33) alone would satisfy an ink count over the whole frame, so count the text's own
+        // rows: the bitmap text above the rectangle, the SDF and Slug text below it.
+        InkPixels(before, 0, 30).ShouldBeGreaterThan(0, "the bitmap text drew");
+        InkPixels(before, 34, (int)Height).ShouldBeGreaterThan(0, "the SDF and Slug text drew");
         var cellsBefore = SdfCells(r, ctx);
         var full = r.MemoryStats;
         full.BitmapAtlasBytes.ShouldBeGreaterThan(0);
@@ -85,8 +90,10 @@ public sealed class TrimTests
         r.Trim().ShouldBeTrue();
         r.MemoryStats.TotalBytes.ShouldBe(0);
 
+        if (displace) Displace(r, ctx);
         var after = Settle(r, ctx);
         var cellsAfter = SdfCells(r, ctx);
+        if (displace) cellsAfter.AsSpan().SequenceEqual(cellsBefore).ShouldBeFalse("the displacing glyphs moved the scene's SDF cells");
         // The SDF atlas places a cell where the glyph's async encode happens to land, so the same glyphs may take other
         // cells after the trim, from one run to the next (a fresh renderer as the reference cannot tell: it rolls the
         // same dice). So the cells themselves decide: the same cells, the same pixels; another cell, edge bytes within
@@ -107,6 +114,23 @@ public sealed class TrimTests
         back.SdfBaseBytes.ShouldBeGreaterThan(0);
         back.SlugStoreBytes.ShouldBeGreaterThan(0);
         back.VertexRingBytes.ShouldBeGreaterThan(0);
+    }
+
+    // Draws four SDF glyphs the scene does not use until their encodes have landed, so they hold the first cells.
+    private static void Displace(VkRenderer r, VulkanContext ctx)
+    {
+        for (var i = 0; i < MaxFrames; i++)
+        {
+            r.BeginOffscreenFrame(Black).ShouldBeTrue();
+            r.BeginSdfGlyphBatch(White, 24f);
+            for (var g = 0; g < 4; g++) r.AddBatchedSdfGlyph(FontPath, new Rune('m' + g), -1, 4f + g * 16f, 40f);
+            r.EndGlyphBatch();
+            r.EndOffscreenFrame();
+            ctx.WaitOffscreenFrameComplete();
+            if (!r.FontAtlasDirty) return;
+            Thread.Sleep(2);
+        }
+        throw new Xunit.Sdk.XunitException("the displacing glyphs never landed");
     }
 
     // Where the scene's SDF glyphs sit in the atlas once settled: per glyph its page and its cell (instance floats 6 to
@@ -225,6 +249,11 @@ public sealed class TrimTests
             Thread.Sleep(2);
         }
         InkPixels(ctx.ReadbackOffscreenRgba()).ShouldBeGreaterThan(0, "text in the registered font drew after the trim");
+        // The rebuild path ran: the SDF atlas, the Slug store and the ring the trim released are back.
+        var rebuilt = r.MemoryStats;
+        rebuilt.SdfBaseBytes.ShouldBeGreaterThan(0, "the SDF atlas was rebuilt");
+        rebuilt.SlugStoreBytes.ShouldBeGreaterThan(0, "the Slug store was rebuilt");
+        rebuilt.VertexRingBytes.ShouldBeGreaterThan(0, "the vertex ring was rebuilt");
         var stampAfter = r.SdfPageStamp(0, false);
         stampAfter.ShouldNotBe(stampBefore, "a stamp saved before a trim never matches one taken after it");
 
@@ -396,6 +425,27 @@ public sealed class TrimTests
         try
         {
             Run(ctx!);
+            var errors = ValidatedOffscreen.Messages.Where(ValidatedOffscreen.IsError).ToArray();
+            Assert.True(errors.Length == 0, $"the validation layer reported {errors.Length} error(s):\n{string.Join("\n\n", errors)}");
+        }
+        finally
+        {
+            ValidatedOffscreen.Destroy(ctx, messenger, api);
+        }
+    }
+
+    [Fact]
+    public void A_frame_after_a_trim_with_moved_sdf_cells_stays_within_one_level_of_the_edges()
+    {
+        if (!ValidatedOffscreen.TryCreate(Width, Height, out var ctx, out var messenger, out var api, out var skip))
+        {
+            Assert.Skip(skip);
+            return;
+        }
+        ValidatedOffscreen.Messages.Clear();
+        try
+        {
+            Run(ctx!, displace: true);
             var errors = ValidatedOffscreen.Messages.Where(ValidatedOffscreen.IsError).ToArray();
             Assert.True(errors.Length == 0, $"the validation layer reported {errors.Length} error(s):\n{string.Join("\n\n", errors)}");
         }
