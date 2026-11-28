@@ -9,14 +9,14 @@ public class LoopTrimDecisionTests
     [Theory]
     [InlineData(Kind.Hidden)]
     [InlineData(Kind.Minimized)]
-    public void HiddenOrMinimized_WithOptIn_Trims(Kind kind) =>
-        Decide(kind, android: false, optIn: true, alreadyTrimmed: false).ShouldBe(LoopTrimAction.Trim);
+    public void HiddenOrMinimized_WithOptIn_Trims(object boxed) =>
+        Decide((Kind)boxed, android: false, optIn: true, alreadyTrimmed: false).ShouldBe(LoopTrimAction.Trim);
 
     [Theory]
     [InlineData(Kind.Hidden)]
     [InlineData(Kind.Minimized)]
-    public void HiddenOrMinimized_WithoutOptIn_DoesNothing(Kind kind) =>
-        Decide(kind, android: false, optIn: false, alreadyTrimmed: false).ShouldBe(LoopTrimAction.None);
+    public void HiddenOrMinimized_WithoutOptIn_DoesNothing(object boxed) =>
+        Decide((Kind)boxed, android: false, optIn: false, alreadyTrimmed: false).ShouldBe(LoopTrimAction.None);
 
     [Fact]
     public void AlreadyTrimmed_IsNotTrimmedTwice() =>
@@ -25,10 +25,10 @@ public class LoopTrimDecisionTests
     [Theory]
     [InlineData(Kind.Shown)]
     [InlineData(Kind.Restored)]
-    public void ShownOrRestored_WhenTrimmed_Resumes_EvenIfOptInTurnedOff(Kind kind)
+    public void ShownOrRestored_WhenTrimmed_Resumes_EvenIfOptInTurnedOff(object boxed)
     {
-        Decide(kind, false, true, true).ShouldBe(LoopTrimAction.Resume);
-        Decide(kind, false, false, true).ShouldBe(LoopTrimAction.Resume);
+        Decide((Kind)boxed, false, true, true).ShouldBe(LoopTrimAction.Resume);
+        Decide((Kind)boxed, false, false, true).ShouldBe(LoopTrimAction.Resume);
     }
 
     [Fact]
@@ -40,8 +40,8 @@ public class LoopTrimDecisionTests
     [InlineData(Kind.Minimized)]
     [InlineData(Kind.Shown)]
     [InlineData(Kind.Restored)]
-    public void Android_NeverTrimsOrResumes(Kind kind) =>
-        Decide(kind, android: true, optIn: true, alreadyTrimmed: true).ShouldBe(LoopTrimAction.None);
+    public void Android_NeverTrimsOrResumes(object boxed) =>
+        Decide((Kind)boxed, android: true, optIn: true, alreadyTrimmed: true).ShouldBe(LoopTrimAction.None);
 
     [Fact]
     public void OtherEvents_DoNothing() =>
