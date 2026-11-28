@@ -243,10 +243,7 @@ public sealed class TrimTests
         {
             RunKept(ctx!);
             var errors = ValidatedOffscreen.Messages.Where(ValidatedOffscreen.IsError).ToArray();
-            Assert.True(errors.Length == 0, $"the validation layer reported {errors.Length} error(s):
-{string.Join("
-
-", errors)}");
+            Assert.True(errors.Length == 0, $"the validation layer reported {errors.Length} error(s):\n{string.Join("\n\n", errors)}");
         }
         finally
         {
