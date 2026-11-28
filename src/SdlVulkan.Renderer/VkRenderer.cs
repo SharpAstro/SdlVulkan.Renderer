@@ -125,8 +125,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     private readonly int _atlasSdfInitialDim;
     private readonly SdfLargeTierOptions? _atlasLargeTier;
     private bool _trimmed;
-    // Only an injected rasterizer (the caller's) is kept across a trim; an atlas-made one goes with its atlas.
+    private bool _rendererDisposed;
+    // The rasterizer is kept across a trim (it holds the fonts and encodings registered on it); while trimmed it is
+    // held here. _heldRasterizerOwned: the renderer's own atlas made it, so renderer Dispose must dispose it.
     private ManagedFontRasterizer? _heldRasterizer;
+    private bool _heldRasterizerOwned;
+    // Bumped by every Trim; see TrimEpoch.
+    private int _trimEpoch;
     // The SDF atlas the CURRENT batch draws from (small or large tier); set in BeginSdfGlyphBatch and
     // used by every batched-glyph op + the flush for that batch.
     private VkSdfFontAtlas? _activeSdfAtlas;
@@ -359,7 +364,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <see cref="FontAtlasDirty"/> (which includes this).
     /// </summary>
     internal bool SlugGlyphsPending => _slugGlyphStore?.HasPending == true;
-    public ManagedFontRasterizer? GlyphRasterizer => _fontAtlas?.Rasterizer;
+    public ManagedFontRasterizer? GlyphRasterizer => _fontAtlas?.Rasterizer ?? _heldRasterizer;
     public bool FontAtlasDirty => _fontAtlas?.IsDirty == true || _sdfFontAtlas?.IsDirty == true
         || _sdfFontAtlasLarge?.IsDirty == true || _slugGlyphStore?.HasPending == true;
 
@@ -417,8 +422,17 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// </summary>
     public override (float Width, float Height) MeasureText(ReadOnlySpan<char> text, string fontFamily, float fontSize)
     {
-        if (_sdfFontAtlas is null || text.IsEmpty)
-            return (0f, 0f);
+        if (text.IsEmpty) return (0f, 0f);
+        // Between Trim and the next frame the atlases are gone. A text already measured is answered from the cache;
+        // a new one builds the atlases again (outside any frame, so safe), as layout while hidden must not read zeros.
+        if (_sdfFontAtlas is null)
+        {
+            if (!_trimmed) return (0f, 0f);
+            if (MeasureCacheHas(text, fontFamily, fontSize)
+                && _measureCache[(fontFamily, fontSize)].GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(text, out var known0))
+                return known0;
+            RebuildAtlasesAfterTrim();
+        }
 
         if (!ReferenceEquals(TextShaper, _measureCacheShaper) || _measureCacheCount >= MeasureCacheLimit)
         {
@@ -487,6 +501,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         }
         return result;
     }
+
+    private bool MeasureCacheHas(ReadOnlySpan<char> text, string fontFamily, float fontSize)
+        => ReferenceEquals(TextShaper, _measureCacheShaper)
+           && _measureCache.TryGetValue((fontFamily, fontSize), out var byText)
+           && byText.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(text);
 
     /// <summary>
     /// Called after font atlas BeginFrame but before Flush.
@@ -2590,42 +2609,6 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <param name="GrowCount">How many times the buffer has been replaced by a bigger one.</param>
     /// <param name="FailedGlyphs">Glyphs the face could not draw or that did not fit.</param>
     /// <param name="Pending">True while a glyph asked for is not yet in the buffer (a frame is wanted).</param>
-    /// <summary>
-    /// Releases the GPU memory this renderer holds while nothing is drawn (a window hidden, the app asleep): the bitmap
-    /// atlas, both SDF tiers, the Slug store, and (through <see cref="VulkanContext.Trim"/>) the vertex ring and a
-    /// window's swapchain. The next <see cref="BeginFrame"/> or <see cref="BeginOffscreenFrame"/> builds them again, before
-    /// anything is recorded, so a frame after a trim draws the same pixels as one before it; glyphs are rasterised again
-    /// (cheap when an SDF disk cache was given). Only between frames. Returns false, having released nothing, when the
-    /// bounded device drain timed out. Throws when called inside a frame.
-    /// </summary>
-    public bool Trim()
-    {
-        if (!Surface.Trim()) return false;
-        // An injected rasterizer is the caller's and stays; one the atlas made is released with it, and the next atlas
-        // makes its own (a reused one drew SDF edges a level off a fresh one's).
-        ManagedFontRasterizer? ownedRasterizer = null;
-        if (_fontAtlas is not null)
-        {
-            var rasterizer = _fontAtlas.Rasterizer;
-            if (_fontAtlas.DetachRasterizer()) ownedRasterizer = rasterizer;
-            else _heldRasterizer = rasterizer;
-        }
-        // The device is idle (the context drained it), so the atlases are destroyed outright.
-        _slugGlyphStore?.Dispose();
-        _slugGlyphStore = null;
-        _sdfFontAtlas?.Dispose();
-        _sdfFontAtlas = null;
-        _sdfFontAtlasLarge?.Dispose();
-        _sdfFontAtlasLarge = null;
-        _fontAtlas?.Dispose();
-        _fontAtlas = null;
-        ownedRasterizer?.Dispose();
-        _activeSdfAtlas = null;
-        _trimmed = true;
-        Surface.RunDeferredDestroysNow();
-        return true;
-    }
-
     // At the head of each frame begin, before anything is recorded (the #193 rule: never in a draw path).
     private void RebuildAtlasesAfterTrim()
     {
@@ -2640,6 +2623,51 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
             _sdfFontAtlasLarge = new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, lt.DiskCache,
                 rasterSize: lt.RasterSize, maxPages: lt.MaxPages, refuseWhenSaturated: true);
     }
+
+    /// <summary>
+    /// Releases the GPU memory this renderer holds while nothing is drawn (a window hidden, the app asleep): the bitmap
+    /// atlas, both SDF tiers, the Slug store, and (through <see cref="VulkanContext.Trim"/>) the vertex ring and a
+    /// window's swapchain. The next <see cref="BeginFrame"/> or <see cref="BeginOffscreenFrame"/> builds them again, before
+    /// anything is recorded, so a frame after a trim draws the same pixels as one before it; glyphs are rasterised again
+    /// (cheap when an SDF disk cache was given). Only between frames. Returns false, having released nothing, when the
+    /// bounded device drain timed out. Throws when called inside a frame, or after Dispose.
+    /// <para>The font rasterizer (<see cref="GlyphRasterizer"/>) survives, with every font and encoding registered on it.
+    /// <see cref="MeasureText"/> keeps answering (it rebuilds the atlases when it meets a text it has not measured).</para>
+    /// <para><b>Persistent glyph instances do not survive.</b> The rebuilt Slug store and SDF atlases are new: a Slug
+    /// instance written by <see cref="WriteSlugGlyphInstance"/> holds word offsets into the old store, and an SDF
+    /// instance holds cells of the old pages. <see cref="TrimEpoch"/> changes on every trim (and is mixed into
+    /// <see cref="SdfPageStamp"/> and the stamp <see cref="LayoutSdfGlyph"/> returns, so a saved stamp no longer matches);
+    /// a caller that keeps instances compares it and lays all of them out again.</para>
+    /// </summary>
+    public bool Trim()
+    {
+        ObjectDisposedException.ThrowIf(_rendererDisposed, this);
+        if (!Surface.Trim()) return false;
+        // Keep the rasterizer: detach it from the atlas so disposing the atlas leaves it and its registered fonts.
+        if (_fontAtlas is not null)
+        {
+            _heldRasterizer = _fontAtlas.Rasterizer;
+            if (_fontAtlas.DetachRasterizer()) _heldRasterizerOwned = true;
+        }
+        // The device is idle (the context drained it), so the atlases are destroyed outright.
+        _slugGlyphStore?.Dispose();
+        _slugGlyphStore = null;
+        _sdfFontAtlas?.Dispose();
+        _sdfFontAtlas = null;
+        _sdfFontAtlasLarge?.Dispose();
+        _sdfFontAtlasLarge = null;
+        _fontAtlas?.Dispose();
+        _fontAtlas = null;
+        _activeSdfAtlas = null;
+        _trimmed = true;
+        _trimEpoch++;
+        Surface.RunDeferredDestroysNow();
+        return true;
+    }
+
+    /// <summary>Counts the trims this renderer has had. Persistent glyph instances (Slug, and SDF cells) are valid only
+    /// for the epoch they were laid out in; see <see cref="Trim"/>.</summary>
+    public int TrimEpoch => _trimEpoch;
 
     public readonly record struct SlugStoreInfo(int Glyphs, int UsedWords, int CapacityWords, int GrowCount,
         int FailedGlyphs, bool Pending);
@@ -2709,7 +2737,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// at <paramref name="fontSize"/> times the zoom: the instance holds no pixel size, and the quad's padding is made
     /// in the vertex shader from the zoom. A glyph the store does not have yet is queued and written as an empty
     /// instance (see <see cref="SlugGlyphLayout.Pending"/>); the blob's offset in the store never changes once it has
-    /// one, across the store's growth, so a written instance stays valid.
+    /// one, across the store's growth, so a written instance stays valid, but NOT across <see cref="Trim"/>, which
+    /// rebuilds the store: compare <see cref="TrimEpoch"/> and write the instances again when it changed.
     /// </summary>
     public SlugGlyphLayout WriteSlugGlyphInstance(string fontPath, uint gid, string? type1Name,
         float baselineX, float baselineY, float fontSize, float rotation, float xScale, Span<float> instance)
@@ -2852,7 +2881,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         // VkSdfFontAtlas.FieldUnitsPerPixel at this size, before its clamp: one unit of the caller's space
         // in field units. The shader divides by the zoom and clamps there.
         instance[11] = 1f / (glyphScale * 2f * SdfFontAtlas.SdfSpread);
-        pageStamp = atlas.PageStamp(atlasPage);
+        pageStamp = WithEpoch(atlas.PageStamp(atlasPage));
         return SdfGlyphLayout.Quad;
     }
 
@@ -2890,7 +2919,11 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// or -1 for a page that does not exist. A glyph laid out by <see cref="LayoutSdfGlyph"/> is valid
     /// while its page's stamp is the one it was laid out with.</summary>
     public long SdfPageStamp(int atlasPage, bool largeTier) =>
-        (largeTier ? _sdfFontAtlasLarge : _sdfFontAtlas)?.PageStamp(atlasPage) ?? -1;
+        WithEpoch((largeTier ? _sdfFontAtlasLarge : _sdfFontAtlas)?.PageStamp(atlasPage) ?? -1);
+
+    // A rebuilt atlas restarts its stamps, so the trim epoch goes in the high bits: a stamp saved before a trim never
+    // equals one taken after it.
+    private long WithEpoch(long stamp) => stamp < 0 ? stamp : stamp + ((long)_trimEpoch << 32);
 
     /// <summary>
     /// Draws glyphs laid out by <see cref="LayoutSdfGlyph"/> from a persistent buffer: the
@@ -3791,6 +3824,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
 
     public override void Dispose()
     {
+        _rendererDisposed = true;
         // The pipelines and atlases below may still be in use by a frame in flight: every host disposes the renderer
         // BEFORE its context, whose drain came too late for them (VUID-vkDestroyPipeline-pipeline-00765). Bounded, and
         // skipped on a GPU already known stuck; on a timeout they are destroyed anyway, since this is teardown with no
@@ -3808,6 +3842,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _sdfFontAtlasLarge = null;
         _fontAtlas?.Dispose();
         _fontAtlas = null;
+        if (_heldRasterizerOwned) _heldRasterizer?.Dispose();
         _heldRasterizer = null;
         _mainPipelines.Dispose(LogSingleSampleFailed);
         _mainPipelinesNoDepth.Dispose(LogSingleSampleFailed);
