@@ -109,7 +109,7 @@ public sealed class TrimTests
         back.VertexRingBytes.ShouldBeGreaterThan(0);
     }
 
-    private static IEnumerable<string> ChangedAt(float[] a, float[] b) =>
+    private static System.Collections.Generic.IEnumerable<string> ChangedAt(float[] a, float[] b) =>
         Enumerable.Range(0, a.Length).Where(i => a[i] != b[i]).Select(i => $"{i}:{a[i]}->{b[i]}");
 
     private static (int Differing, int MaxDelta) Diff(byte[] a, byte[] b)
