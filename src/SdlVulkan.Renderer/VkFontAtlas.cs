@@ -27,7 +27,7 @@ internal sealed unsafe class VkFontAtlas : IDisposable
     // here (see _ownsRasterizer). Dispose() on this rasterizer only clears its font cache, which would
     // otherwise pull every registered embedded font out from under a tab that outlived its origin window.
     internal readonly ManagedFontRasterizer Rasterizer;
-    private readonly bool _ownsRasterizer;
+    private bool _ownsRasterizer;
     private readonly Dictionary<GlyphKey, GlyphInfo> _glyphs = new();
     private readonly HashSet<GlyphKey> _unflushedGlyphs = new();
 
@@ -305,6 +305,15 @@ internal sealed unsafe class VkFontAtlas : IDisposable
         _dirtyX1 = Math.Min(Math.Max(_dirtyX1, x + w), _atlasWidth);
         _dirtyY1 = Math.Min(Math.Max(_dirtyY1, y + h), _atlasHeight);
         if (neededInitialTransition) _needsInitialTransition = true;
+    }
+
+    /// <summary>Stops this atlas owning its rasterizer, so disposing it leaves the rasterizer (and the fonts registered
+    /// on it) alive for a rebuilt atlas. Returns whether the atlas owned it, i.e. whether the caller now must dispose it.</summary>
+    internal bool DetachRasterizer()
+    {
+        var owned = _ownsRasterizer;
+        _ownsRasterizer = false;
+        return owned;
     }
 
     public void Dispose()
