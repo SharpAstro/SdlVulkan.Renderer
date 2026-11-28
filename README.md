@@ -293,6 +293,16 @@ dotnet run --project tools/SlugProbe -c Release
 
 Options `--frames`, `--size`, `--msaa`, `--burst` and `--cjk-font` (see `tools/SlugProbe/Program.cs`). The CJK block takes the distinct glyphs its face has and the report says how many; the committed Noto Sans JP subset has only three, so its block repeats them, and `--cjk-font PATH` with a full CJK face makes it a block of different glyphs, which is the load a store sees on a real CJK page. The numbers of one machine are in [CHANGELOG.md](CHANGELOG.md), "7.83".
 
+## Memory
+
+`VkRenderer.MemoryStats` is a snapshot of what the library holds on the GPU: bitmap atlas bytes, SDF page counts and bytes per tier, Slug store bytes, vertex ring bytes and the swapchain image count (`VulkanContext.SwapchainImageCount`). It counts what was asked for, not the driver's total.
+
+`VulkanContext.PreferFewestSwapchainImages = true` builds the swapchain with the surface's `minImageCount` instead of one more, for an app that would rather hold fewer images than pipeline one more frame.
+
+`VkRenderer.Trim()` releases the font atlases' pages, the Slug store, the vertex ring and the swapchain while nothing is drawn (between frames only); the next frame begin builds them again, so the frame after a trim draws the same pixels as before it. It returns false, releasing nothing, if the bounded device drain times out.
+
+`SdlEventLoop.TrimWhenHidden = true` (off by default, desktop only) does that on its own: a window event of Hidden or Minimized trims that window's view and the loop draws nothing for it; Shown or Restored re-arms a redraw and the next frame rebuilds it. No timer, no polling. Android keeps its own surface-loss path.
+
 ## HDR
 
 HDR output is an **opt-in per context**, and an app that does not opt in pays nothing for it: its swapchain, render passes, pipelines and frame code are the ones it always had, with no extra pass, target, conversion, shader branch or per-frame allocation (the SDR frame bench below measures that).
