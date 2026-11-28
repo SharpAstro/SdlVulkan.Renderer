@@ -2602,13 +2602,6 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// colour. Public so a probe outside this assembly can read it.</summary>
     public int SlugDrawCalls { get; private set; }
 
-    /// <summary>What the Slug glyph store holds, as <see cref="SlugStoreStats"/> reads it.</summary>
-    /// <param name="Glyphs">Glyphs with an answer (including empty ones).</param>
-    /// <param name="UsedWords">32-bit words of the buffer in use.</param>
-    /// <param name="CapacityWords">Words the buffer holds before it must grow.</param>
-    /// <param name="GrowCount">How many times the buffer has been replaced by a bigger one.</param>
-    /// <param name="FailedGlyphs">Glyphs the face could not draw or that did not fit.</param>
-    /// <param name="Pending">True while a glyph asked for is not yet in the buffer (a frame is wanted).</param>
     // At the head of each frame begin, before anything is recorded (the #193 rule: never in a draw path).
     private void RebuildAtlasesAfterTrim()
     {
@@ -2632,7 +2625,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// (cheap when an SDF disk cache was given). Only between frames. Returns false, having released nothing, when the
     /// bounded device drain timed out. Throws when called inside a frame, or after Dispose.
     /// <para>The font rasterizer (<see cref="GlyphRasterizer"/>) survives, with every font and encoding registered on it.
-    /// <see cref="MeasureText"/> keeps answering (it rebuilds the atlases when it meets a text it has not measured).</para>
+    /// <see cref="MeasureText"/> keeps answering: a text measured before comes from its cache, and a text it has not
+    /// measured rebuilds the atlases to measure it, so a hidden view that keeps laying text out holds that memory again
+    /// (<see cref="MemoryStats"/> shows it).</para>
     /// <para><b>Persistent glyph instances do not survive.</b> The rebuilt Slug store and SDF atlases are new: a Slug
     /// instance written by <see cref="WriteSlugGlyphInstance"/> holds word offsets into the old store, and an SDF
     /// instance holds cells of the old pages. <see cref="TrimEpoch"/> changes on every trim (and is mixed into
@@ -2669,6 +2664,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// for the epoch they were laid out in; see <see cref="Trim"/>.</summary>
     public int TrimEpoch => _trimEpoch;
 
+    /// <summary>What the Slug glyph store holds, as <see cref="SlugStoreStats"/> reads it.</summary>
+    /// <param name="Glyphs">Glyphs with an answer (including empty ones).</param>
+    /// <param name="UsedWords">32-bit words of the buffer in use.</param>
+    /// <param name="CapacityWords">Words the buffer holds before it must grow.</param>
+    /// <param name="GrowCount">How many times the buffer has been replaced by a bigger one.</param>
+    /// <param name="FailedGlyphs">Glyphs the face could not draw or that did not fit.</param>
+    /// <param name="Pending">True while a glyph asked for is not yet in the buffer (a frame is wanted).</param>
     public readonly record struct SlugStoreInfo(int Glyphs, int UsedWords, int CapacityWords, int GrowCount,
         int FailedGlyphs, bool Pending);
 
@@ -2783,6 +2785,9 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// pixel size results, and the padding follows the zoom). An empty instance (a glyph that was pending when it was
     /// written) costs a vertex shader run and nothing else. Draws with the store's current buffer, so the buffer a
     /// store has grown into is the one read.
+    /// <para>The caller must write the instances again after <see cref="TrimEpoch"/> changes: a trim rebuilds the store,
+    /// and an instance written before it holds word offsets the rebuilt store does not hold (this draw cannot tell an
+    /// old buffer from a new one, so nothing here guards it).</para>
     /// </summary>
     public void DrawPersistentSlugGlyphs(Vortice.Vulkan.VkBuffer buffer, uint byteOffset, uint glyphCount,
         DIR.Lib.RGBAColor32 color, float originX, float originY, float scale)
@@ -2933,7 +2938,8 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// places its triangles. One draw holds glyphs of any mix of sizes: each picks its coverage path and
     /// antialiasing band from its own size times the scale, as a batch of that size would (sdfinst.frag).
     /// The page is marked used, so the atlas's LRU, which sees no lookups for these glyphs, does not
-    /// recycle it while it is on screen. The caller checks <see cref="SdfPageStamp"/> first.
+    /// recycle it while it is on screen. The caller checks <see cref="SdfPageStamp"/> first; a stamp saved before a
+    /// <see cref="Trim"/> never matches one after it, so the same check lays the glyphs out again after a trim.
     /// </summary>
     public void DrawPersistentSdfGlyphs(Vortice.Vulkan.VkBuffer buffer, uint byteOffset, uint glyphCount,
         int atlasPage, bool largeTier, DIR.Lib.RGBAColor32 color, float originX, float originY, float scale)

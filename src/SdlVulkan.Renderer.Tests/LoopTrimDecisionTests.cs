@@ -46,4 +46,24 @@ public class LoopTrimDecisionTests
     [Fact]
     public void OtherEvents_DoNothing() =>
         Decide(Kind.Other, false, true, true).ShouldBe(LoopTrimAction.None);
+
+    [Fact]
+    public void VisibleSign_WhenTrimmedAndTheFlagsSayOnScreen_Resumes()
+    {
+        // A Shown / Restored that went missing: an Exposed, a resize or focus gained ends the trim.
+        Decide(Kind.VisibleSign, false, true, alreadyTrimmed: true, windowVisible: true).ShouldBe(LoopTrimAction.Resume);
+        Decide(Kind.VisibleSign, false, false, alreadyTrimmed: true, windowVisible: true).ShouldBe(LoopTrimAction.Resume);
+    }
+
+    [Fact]
+    public void VisibleSign_WhileTheFlagsSayHiddenOrMinimized_KeepsTheTrim() =>
+        Decide(Kind.VisibleSign, false, true, alreadyTrimmed: true, windowVisible: false).ShouldBe(LoopTrimAction.None);
+
+    [Fact]
+    public void VisibleSign_WhenNotTrimmed_DoesNothing() =>
+        Decide(Kind.VisibleSign, false, true, alreadyTrimmed: false, windowVisible: true).ShouldBe(LoopTrimAction.None);
+
+    [Fact]
+    public void VisibleSign_OnAndroid_DoesNothing() =>
+        Decide(Kind.VisibleSign, android: true, optIn: true, alreadyTrimmed: true, windowVisible: true).ShouldBe(LoopTrimAction.None);
 }

@@ -107,8 +107,10 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
     /// <summary>
     /// Opt-in, off by default, desktop only: when a window is hidden or minimized the loop calls
     /// <see cref="VkRenderer.Trim"/> for its view (atlas pages, Slug store, vertex ring, swapchain released) and draws
-    /// nothing for it; Shown / Restored re-arms a redraw and the next frame begin rebuilds what was released. The window
-    /// event itself is the trigger: no timer, no polling. Android keeps its own surface-loss path.
+    /// nothing for it; Shown / Restored re-arms a redraw and the next frame begin rebuilds what was released. An Exposed,
+    /// a resize or focus gained while the window's flags say it is on screen ends the trim too, so a show event that went
+    /// missing never leaves the view dark. The window event itself is the trigger: no timer, no polling. Android keeps
+    /// its own surface-loss path.
     /// </summary>
     public bool TrimWhenHidden { get; set; }
 
@@ -1067,8 +1069,14 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                         break;
                     // Trimmed while hidden: no swapchain to resize. The rebuild on show reads the surface's
                     // current extent through the usual out-of-date path.
+                    // A resize the window's flags say is on screen also ends the trim (a Shown / Restored that went
+                    // missing must not leave the view dark): the next frame begin rebuilds it, and the out-of-date
+                    // path takes the new size.
                     if (vr.TrimmedByLoop)
                     {
+                        if (LoopTrimDecision.Decide(LoopTrimDecision.Kind.VisibleSign, false, TrimWhenHidden,
+                                true, !vr.Window.IsMinimizedOrHidden) == LoopTrimAction.Resume)
+                            vr.TrimmedByLoop = false;
                         vr.NeedsRedraw = true;
                         break;
                     }
@@ -1122,10 +1130,12 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
 #endif
                     ve.NeedsRedraw = true;
 #if !ANDROID
-                    if (evt.Type != (uint)EventType.WindowExposed
-                        && LoopTrimDecision.Decide(evt.Type == (uint)EventType.WindowShown
-                            ? LoopTrimDecision.Kind.Shown : LoopTrimDecision.Kind.Restored,
-                            false, TrimWhenHidden, ve.TrimmedByLoop) == LoopTrimAction.Resume)
+                    // An Exposed is a sign, not a show: it ends a trim only when the flags say the window is on screen.
+                    var trimKind = evt.Type == (uint)EventType.WindowShown ? LoopTrimDecision.Kind.Shown
+                        : evt.Type == (uint)EventType.WindowRestored ? LoopTrimDecision.Kind.Restored
+                        : LoopTrimDecision.Kind.VisibleSign;
+                    if (LoopTrimDecision.Decide(trimKind, false, TrimWhenHidden, ve.TrimmedByLoop,
+                            !ve.Window.IsMinimizedOrHidden) == LoopTrimAction.Resume)
                         ve.TrimmedByLoop = false; // the next frame begin rebuilds what Trim released
 #endif
                     // Restoring a minimized window, SDL rebuilt its style, maximize box included: put back a
@@ -1142,6 +1152,17 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                 break;
 
 #if !ANDROID
+            case EventType.WindowFocusGained:
+                // Focus can come only to a window on screen: a sign that ends a trim whose show event went missing.
+                if (TryView(evt.Window.WindowID, out var vfg)
+                    && LoopTrimDecision.Decide(LoopTrimDecision.Kind.VisibleSign, false, TrimWhenHidden,
+                        vfg.TrimmedByLoop, !vfg.Window.IsMinimizedOrHidden) == LoopTrimAction.Resume)
+                {
+                    vfg.TrimmedByLoop = false;
+                    vfg.NeedsRedraw = true;
+                }
+                break;
+
             case EventType.WindowHidden:
             case EventType.WindowMinimized:
                 if (TryView(evt.Window.WindowID, out var vtr)
