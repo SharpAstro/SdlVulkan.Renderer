@@ -896,6 +896,7 @@ public sealed unsafe partial class VulkanContext : IDisposable
         AssertFrameThread(nameof(BeginFrame));
         resized = false;
         NoteUnendedFrameDropped();
+        RestoreAfterTrim();
         // A mesh asked for depth since the last frame (RequireMeshDepth, or a BeginMeshRegion that found
         // none): the swapchain's framebuffers change shape here, between frames, so this one records with it.
         if (_mainWantsDepth && !_mainHasDepth) AddSwapchainDepth();

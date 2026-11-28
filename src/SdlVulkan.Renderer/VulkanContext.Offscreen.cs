@@ -248,6 +248,7 @@ public sealed unsafe partial class VulkanContext
     {
         if (!_isOffscreen) throw new InvalidOperationException("BeginOffscreenFrame requires CreateOffscreen");
         NoteUnendedFrameDropped();
+        RestoreAfterTrim();
         // A mesh asked for depth since the last frame (RequireMeshDepth, or a BeginMeshRegion that found
         // none): the target changes shape here, between frames, so this one records with it.
         if (_mainWantsDepth && !_mainHasDepth) AddOffscreenDepth();

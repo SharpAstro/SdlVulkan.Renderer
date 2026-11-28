@@ -120,6 +120,13 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     // glyphs stop magnifying a 64px field. null = single-tier (unchanged behaviour).
     private VkSdfFontAtlas? _sdfFontAtlasLarge;
     private VkSlugGlyphStore? _slugGlyphStore;
+    // What a rebuild after Trim needs (see Trim).
+    private readonly SdfGlyphDiskCache? _atlasDiskCache;
+    private readonly int _atlasSdfInitialDim;
+    private readonly SdfLargeTierOptions? _atlasLargeTier;
+    private bool _trimmed;
+    // Only an injected rasterizer (the caller's) is kept across a trim; an atlas-made one goes with its atlas.
+    private ManagedFontRasterizer? _heldRasterizer;
     // The SDF atlas the CURRENT batch draws from (small or large tier); set in BeginSdfGlyphBatch and
     // used by every batched-glyph op + the flush for that batch.
     private VkSdfFontAtlas? _activeSdfAtlas;
@@ -208,6 +215,10 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _mainPassHasDepth = depth;
         _pipelines = MainPipelinesFor(depth);
         StartSingleSamplePipelines(depth);
+        // Kept so Trim can build the atlases again with the arguments the renderer was made with.
+        _atlasDiskCache = sdfDiskCache;
+        _atlasSdfInitialDim = sdfInitialAtlasDim;
+        _atlasLargeTier = sdfLargeTier;
         _fontAtlas = new VkFontAtlas(ctx, rasterizer);
         _sdfFontAtlas = sdfInitialAtlasDim > 0
             ? new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, sdfDiskCache, sdfInitialAtlasDim, sdfInitialAtlasDim)
@@ -513,6 +524,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         LastPreFlushMs = 0;
         LastPreRenderPassMs = 0;
+        RebuildAtlasesAfterTrim();
         _pipelines = MainPipelinesFor(Surface.MainPassWillHaveDepth);
         ForgetCachedLayer();
         _currentCmd = Surface.BeginFrame(out var resized);
@@ -992,6 +1004,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     {
         LastPreFlushMs = 0;
         LastPreRenderPassMs = 0;
+        RebuildAtlasesAfterTrim();
         ForgetCachedLayer();
         // The pre-render hook may record a cached layer or a thumbnail, which draw on the depth shape
         // themselves (BeginCachedLayer, BeginThumbnailCapture); the main pass's set is chosen below, once
@@ -2577,6 +2590,57 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
     /// <param name="GrowCount">How many times the buffer has been replaced by a bigger one.</param>
     /// <param name="FailedGlyphs">Glyphs the face could not draw or that did not fit.</param>
     /// <param name="Pending">True while a glyph asked for is not yet in the buffer (a frame is wanted).</param>
+    /// <summary>
+    /// Releases the GPU memory this renderer holds while nothing is drawn (a window hidden, the app asleep): the bitmap
+    /// atlas, both SDF tiers, the Slug store, and (through <see cref="VulkanContext.Trim"/>) the vertex ring and a
+    /// window's swapchain. The next <see cref="BeginFrame"/> or <see cref="BeginOffscreenFrame"/> builds them again, before
+    /// anything is recorded, so a frame after a trim draws the same pixels as one before it; glyphs are rasterised again
+    /// (cheap when an SDF disk cache was given). Only between frames. Returns false, having released nothing, when the
+    /// bounded device drain timed out. Throws when called inside a frame.
+    /// </summary>
+    public bool Trim()
+    {
+        if (!Surface.Trim()) return false;
+        // An injected rasterizer is the caller's and stays; one the atlas made is released with it, and the next atlas
+        // makes its own (a reused one drew SDF edges a level off a fresh one's).
+        ManagedFontRasterizer? ownedRasterizer = null;
+        if (_fontAtlas is not null)
+        {
+            var rasterizer = _fontAtlas.Rasterizer;
+            if (_fontAtlas.DetachRasterizer()) ownedRasterizer = rasterizer;
+            else _heldRasterizer = rasterizer;
+        }
+        // The device is idle (the context drained it), so the atlases are destroyed outright.
+        _slugGlyphStore?.Dispose();
+        _slugGlyphStore = null;
+        _sdfFontAtlas?.Dispose();
+        _sdfFontAtlas = null;
+        _sdfFontAtlasLarge?.Dispose();
+        _sdfFontAtlasLarge = null;
+        _fontAtlas?.Dispose();
+        _fontAtlas = null;
+        ownedRasterizer?.Dispose();
+        _activeSdfAtlas = null;
+        _trimmed = true;
+        Surface.RunDeferredDestroysNow();
+        return true;
+    }
+
+    // At the head of each frame begin, before anything is recorded (the #193 rule: never in a draw path).
+    private void RebuildAtlasesAfterTrim()
+    {
+        if (!_trimmed) return;
+        _trimmed = false;
+        var ctx = Surface;
+        _fontAtlas = new VkFontAtlas(ctx, _heldRasterizer);
+        _sdfFontAtlas = _atlasSdfInitialDim > 0
+            ? new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, _atlasDiskCache, _atlasSdfInitialDim, _atlasSdfInitialDim)
+            : new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, _atlasDiskCache);
+        if (_atlasLargeTier is { RasterSize: > 0f } lt)
+            _sdfFontAtlasLarge = new VkSdfFontAtlas(ctx, _fontAtlas.Rasterizer, lt.DiskCache,
+                rasterSize: lt.RasterSize, maxPages: lt.MaxPages, refuseWhenSaturated: true);
+    }
+
     public readonly record struct SlugStoreInfo(int Glyphs, int UsedWords, int CapacityWords, int GrowCount,
         int FailedGlyphs, bool Pending);
 
@@ -3744,6 +3808,7 @@ public sealed unsafe class VkRenderer : Renderer<VulkanContext>
         _sdfFontAtlasLarge = null;
         _fontAtlas?.Dispose();
         _fontAtlas = null;
+        _heldRasterizer = null;
         _mainPipelines.Dispose(LogSingleSampleFailed);
         _mainPipelinesNoDepth.Dispose(LogSingleSampleFailed);
         _singleSamplePipelines.Dispose(LogSingleSampleFailed);
