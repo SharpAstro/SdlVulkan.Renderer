@@ -1144,16 +1144,16 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
 #if !ANDROID
             case EventType.WindowHidden:
             case EventType.WindowMinimized:
-                if (TryView(evt.Window.WindowID, out var vt)
+                if (TryView(evt.Window.WindowID, out var vtr)
                     && LoopTrimDecision.Decide(evt.Type == (uint)EventType.WindowHidden
                         ? LoopTrimDecision.Kind.Hidden : LoopTrimDecision.Kind.Minimized,
-                        false, TrimWhenHidden, vt.TrimmedByLoop) == LoopTrimAction.Trim
-                    && !vt.IsGpuWedged && vt.GpuRecoveryTask is null)
+                        false, TrimWhenHidden, vtr.TrimmedByLoop) == LoopTrimAction.Trim
+                    && !vtr.IsGpuWedged && vtr.GpuRecoveryTask is null)
                 {
                     // Trim returns false (releasing nothing) when its bounded drain times out: stay live then.
                     // Dispatch runs between frames, so it is never inside one.
-                    if (vt.Renderer.Trim())
-                        vt.TrimmedByLoop = true;
+                    if (vtr.Renderer.Trim())
+                        vtr.TrimmedByLoop = true;
                 }
                 break;
 #endif
