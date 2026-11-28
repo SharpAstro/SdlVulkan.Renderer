@@ -280,40 +280,26 @@ public sealed class TrimTests
             r.DestroyBuffer(slugBuf.Buffer, slugBuf.Memory);
         }
 
-        // (g) The same pixels as the first draw. As in Run, a second fresh renderer is the reference: the SDF atlas lays
-        // cells out in the order the async encodes land, so a glyph sampled from another cell can move an edge byte by a
-        // level. When the fresh renderer reproduces the first draw exactly, so must the one after the trim; otherwise
-        // the trim may differ by no more than the fresh renderer does.
-        byte[] fresh;
-        using (var r2 = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128))
-        {
-            var sdf2 = new float[sdf.Length];
-            var slug2 = new float[slug.Length];
-            var (page2, _) = LayOutPersistent(r2, ctx, sdfGids, slugGids, sdf2, slug2);
-            var sdfBuf2 = r2.CreatePersistentVertexBuffer(sdf2);
-            var slugBuf2 = r2.CreatePersistentVertexBuffer(slug2);
-            try
-            {
-                fresh = DrawPersistent(r2, ctx, sdfBuf2.Buffer, sdfGids.Length, page2, slugBuf2.Buffer, slugGids.Length);
-            }
-            finally
-            {
-                r2.DestroyBuffer(sdfBuf2.Buffer, sdfBuf2.Memory);
-                r2.DestroyBuffer(slugBuf2.Buffer, slugBuf2.Memory);
-            }
-        }
-        var (refDiff, refMax) = Diff(first, fresh);
+        // (g) The same pixels as the first draw. Where each glyph lands is the same arithmetic before and after, so the
+        // quad (floats 0 to 5) and the size and field scale (10, 11) match exactly. The SDF atlas, though, places a cell
+        // where the glyph's async encode happens to land in the first layout, while after the trim the glyphs come back
+        // in request order, so a glyph may sample another cell (floats 6 to 9), and the filtering there can move an edge
+        // byte by a level. So: the same cells, the same pixels; another cell, edge bytes within one level.
+        var sdfDiff = ChangedAt(sdfFirst, sdf).ToArray();
+        var cellMoved = Enumerable.Range(0, sdfFirst.Length).Any(i => i % VkRenderer.SdfInstanceFloats is >= 6 and <= 9 && sdfFirst[i] != sdf[i]);
+        Enumerable.Range(0, sdfFirst.Length).Where(i => i % VkRenderer.SdfInstanceFloats is < 6 or > 9 && sdfFirst[i] != sdf[i])
+            .ShouldBeEmpty($"the SDF quads lie where they lay before the trim [{string.Join(",", sdfDiff)}]");
         var (differing, maxDelta) = Diff(first, again);
-        if (refDiff == 0)
+        var detail = $"SDF instance floats changed at [{string.Join(",", sdfDiff)}], Slug at [{string.Join(",", ChangedAt(slugFirst, slug))}], "
+            + $"bytes differ at [{string.Join(",", Enumerable.Range(0, first.Length).Where(i => first[i] != again[i]).Take(32).Select(i => $"({i / 4 % Width},{i / 4 / Width}).{i % 4}"))}]";
+        if (!cellMoved)
         {
-            differing.ShouldBe(0, $"a fresh renderer draws the persistent glyphs exactly, so must the trimmed one (max delta {maxDelta}); "
-                + $"SDF instance floats changed at [{string.Join(",", ChangedAt(sdfFirst, sdf))}], Slug at [{string.Join(",", ChangedAt(slugFirst, slug))}], "
-                + $"bytes differ at [{string.Join(",", Enumerable.Range(0, first.Length).Where(i => first[i] != again[i]).Select(i => $"({i / 4 % Width},{i / 4 / Width}).{i % 4}"))}]");
+            differing.ShouldBe(0, $"the same atlas cells draw the same pixels after the trim (max delta {maxDelta}); {detail}");
         }
         else
         {
-            maxDelta.ShouldBeLessThanOrEqualTo(Math.Max(refMax, 1), "the persistent glyphs drew the pixels of the first draw after the trim");
-            differing.ShouldBeLessThan(first.Length / 100, "only edge bytes of the SDF glyphs may differ");
+            maxDelta.ShouldBeLessThanOrEqualTo(1, $"a glyph sampled from another cell moves an edge by a level at most; {detail}");
+            differing.ShouldBeLessThan(first.Length / 100, $"only edge bytes of the SDF glyphs may differ; {detail}");
         }
     }
 
