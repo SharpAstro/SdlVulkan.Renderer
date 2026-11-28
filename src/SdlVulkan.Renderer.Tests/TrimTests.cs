@@ -177,6 +177,109 @@ public sealed class TrimTests
         layout.ShouldBe(VkRenderer.SlugGlyphLayout.Quad);
     }
 
+    // Lays out SDF glyphs and writes Slug instances, a frame each attempt (the first frame after a trim is the one that
+    // rebuilds the atlases), until every one is a quad. Returns the SDF page and its stamp.
+    private static (int Page, long Stamp) LayOutPersistent(VkRenderer r, VulkanContext ctx, uint[] sdfGids,
+        uint[] slugGids, float[] sdf, float[] slug)
+    {
+        for (var attempt = 0; attempt < MaxFrames; attempt++)
+        {
+            r.BeginOffscreenFrame(Black).ShouldBeTrue();
+            var page = -1;
+            long stamp = -1;
+            var done = true;
+            for (var i = 0; i < sdfGids.Length; i++)
+            {
+                var laid = r.LayoutSdfGlyph(FontPath, sdfGids[i], null, 6f + i * 18f, 30f, 24f, 0f, 1f, largeTier: false,
+                    sdf.AsSpan(i * VkRenderer.SdfInstanceFloats, VkRenderer.SdfInstanceFloats), out var p, out var st);
+                if (laid != VkRenderer.SdfGlyphLayout.Quad) { done = false; continue; }
+                if (page >= 0 && p != page) throw new Xunit.Sdk.XunitException("the SDF glyphs landed on two pages");
+                page = p;
+                stamp = st;
+            }
+            for (var i = 0; i < slugGids.Length; i++)
+                if (r.WriteSlugGlyphInstance(FontPath, slugGids[i], null, 6f + i * 16f, 70f, 20f, 0f, 1f,
+                        slug.AsSpan(i * VkRenderer.SlugInstanceFloats, VkRenderer.SlugInstanceFloats))
+                    != VkRenderer.SlugGlyphLayout.Quad)
+                    done = false;
+            r.EndOffscreenFrame();
+            ctx.WaitOffscreenFrameComplete();
+            if (done) return (page, stamp);
+            Thread.Sleep(2);
+        }
+        throw new Xunit.Sdk.XunitException("the persistent glyphs never laid out");
+    }
+
+    private static byte[] DrawPersistent(VkRenderer r, VulkanContext ctx, Vortice.Vulkan.VkBuffer sdfBuffer, int sdfCount,
+        int page, Vortice.Vulkan.VkBuffer slugBuffer, int slugCount)
+    {
+        r.BeginOffscreenFrame(Black).ShouldBeTrue();
+        r.DrawPersistentSdfGlyphs(sdfBuffer, 0, (uint)sdfCount, page, largeTier: false, White, 0f, 0f, 1f);
+        r.DrawPersistentSlugGlyphs(slugBuffer, 0, (uint)slugCount, White, 0f, 0f, 1f);
+        r.EndOffscreenFrame();
+        ctx.WaitOffscreenFrameComplete();
+        return ctx.ReadbackOffscreenRgba();
+    }
+
+    private static void RunPersistent(VulkanContext ctx)
+    {
+        ctx.ResizeOffscreen(Width, Height);
+        using var r = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128);
+        var rasterizer = r.GlyphRasterizer!;
+        var sdfGids = "Hab".Select(c => rasterizer.ResolveGlyphIdentity(FontPath, new Rune(c), -1, default).Gid).ToArray();
+        var slugGids = "wxy".Select(c => rasterizer.ResolveGlyphIdentity(FontPath, new Rune(c), -1, default).Gid).ToArray();
+        var sdf = new float[sdfGids.Length * VkRenderer.SdfInstanceFloats];
+        var slug = new float[slugGids.Length * VkRenderer.SlugInstanceFloats];
+
+        // (a, b) Lay out, and keep the SDF page stamp and the trim epoch the instances were written in.
+        var (page, stampBefore) = LayOutPersistent(r, ctx, sdfGids, slugGids, sdf, slug);
+        stampBefore.ShouldBe(r.SdfPageStamp(page, false));
+        var epochBefore = r.TrimEpoch;
+
+        // (c) Draw both from persistent buffers.
+        var sdfBuf = r.CreatePersistentVertexBuffer(sdf);
+        var slugBuf = r.CreatePersistentVertexBuffer(slug);
+        byte[] first;
+        try
+        {
+            first = DrawPersistent(r, ctx, sdfBuf.Buffer, sdfGids.Length, page, slugBuf.Buffer, slugGids.Length);
+            first.Any(b => b != 0).ShouldBeTrue("the persistent glyphs drew something");
+        }
+        finally
+        {
+            r.DestroyBuffer(sdfBuf.Buffer, sdfBuf.Memory);
+            r.DestroyBuffer(slugBuf.Buffer, slugBuf.Memory);
+        }
+
+        // (d, e) Trim: the saved stamp and epoch no longer match, so a caller holding them sees its instances are stale.
+        r.Trim().ShouldBeTrue();
+        r.TrimEpoch.ShouldNotBe(epochBefore, "a trim changes the epoch a Slug instance was written in");
+        r.SdfPageStamp(page, false).ShouldNotBe(stampBefore, "a trim changes the stamp an SDF instance was laid out with");
+
+        // (f) Lay out and write again, in the rebuilt atlas and store, and draw.
+        Array.Clear(sdf);
+        Array.Clear(slug);
+        var (pageAfter, stampAfter) = LayOutPersistent(r, ctx, sdfGids, slugGids, sdf, slug);
+        stampAfter.ShouldNotBe(stampBefore);
+        stampAfter.ShouldBe(r.SdfPageStamp(pageAfter, false));
+        sdfBuf = r.CreatePersistentVertexBuffer(sdf);
+        slugBuf = r.CreatePersistentVertexBuffer(slug);
+        byte[] again;
+        try
+        {
+            again = DrawPersistent(r, ctx, sdfBuf.Buffer, sdfGids.Length, pageAfter, slugBuf.Buffer, slugGids.Length);
+        }
+        finally
+        {
+            r.DestroyBuffer(sdfBuf.Buffer, sdfBuf.Memory);
+            r.DestroyBuffer(slugBuf.Buffer, slugBuf.Memory);
+        }
+
+        // (g) The same pixels as the first draw.
+        var (differing, maxDelta) = Diff(first, again);
+        differing.ShouldBe(0, $"the persistent glyphs drew the same pixels after the trim (max delta {maxDelta})");
+    }
+
     private static void RunInFrame(VulkanContext ctx)
     {
         ctx.ResizeOffscreen(Width, Height);
@@ -244,6 +347,30 @@ public sealed class TrimTests
             RunKept(ctx!);
             var errors = ValidatedOffscreen.Messages.Where(ValidatedOffscreen.IsError).ToArray();
             Assert.True(errors.Length == 0, $"the validation layer reported {errors.Length} error(s):\n{string.Join("\n\n", errors)}");
+        }
+        finally
+        {
+            ValidatedOffscreen.Destroy(ctx, messenger, api);
+        }
+    }
+
+    [Fact]
+    public void Persistent_glyphs_are_detectably_stale_after_a_trim_and_draw_the_same_once_laid_out_again()
+    {
+        if (!ValidatedOffscreen.TryCreate(Width, Height, out var ctx, out var messenger, out var api, out var skip))
+        {
+            Assert.Skip(skip);
+            return;
+        }
+        ValidatedOffscreen.Messages.Clear();
+        try
+        {
+            RunPersistent(ctx!);
+            var errors = ValidatedOffscreen.Messages.Where(ValidatedOffscreen.IsError).ToArray();
+            Assert.True(errors.Length == 0, $"the validation layer reported {errors.Length} error(s):
+{string.Join("
+
+", errors)}");
         }
         finally
         {
