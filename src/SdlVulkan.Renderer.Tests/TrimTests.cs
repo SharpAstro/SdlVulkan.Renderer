@@ -64,7 +64,7 @@ public sealed class TrimTests
         ctx.ResizeOffscreen(Width, Height);
         using var r = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128) { };
         var before = Settle(r, ctx);
-        before.Any(b => b != 0).ShouldBeTrue("the scene drew something");
+        InkPixels(before).ShouldBeGreaterThan(0, "the scene drew something");
         var full = r.MemoryStats;
         full.BitmapAtlasBytes.ShouldBeGreaterThan(0);
         full.SdfBaseBytes.ShouldBeGreaterThan(0);
@@ -109,6 +109,34 @@ public sealed class TrimTests
         back.VertexRingBytes.ShouldBeGreaterThan(0);
     }
 
+    // Pixels in rows [yFrom, yTo) whose colour differs from the black clear. The readback is R, G, B, A and the clear is
+    // opaque, so every pixel's alpha byte is 255 and says nothing: only R, G and B count as ink.
+    private static int InkPixels(byte[] rgba, int yFrom = 0, int yTo = (int)Height)
+    {
+        var ink = 0;
+        for (var y = Math.Max(0, yFrom); y < Math.Min((int)Height, yTo); y++)
+            for (var x = 0; x < (int)Width; x++)
+            {
+                var i = (y * (int)Width + x) * 4;
+                if (rgba[i] != 0 || rgba[i + 1] != 0 || rgba[i + 2] != 0) ink++;
+            }
+        return ink;
+    }
+
+    // The rows the laid-out quads cover, from each instance's corner y (float 1) and its down edge's y (float 5); the
+    // glyphs here are not rotated, so that is the quad's whole height.
+    private static (int Top, int Bottom) QuadRows(float[] instances, int stride)
+    {
+        var top = float.MaxValue;
+        var bottom = float.MinValue;
+        for (var i = 0; i < instances.Length; i += stride)
+        {
+            top = Math.Min(top, instances[i + 1]);
+            bottom = Math.Max(bottom, instances[i + 1] + instances[i + 5]);
+        }
+        return ((int)MathF.Floor(top), (int)MathF.Ceiling(bottom));
+    }
+
     private static System.Collections.Generic.IEnumerable<string> ChangedAt(float[] a, float[] b) =>
         Enumerable.Range(0, a.Length).Where(i => a[i] != b[i]).Select(i => $"{i}:{a[i]}->{b[i]}");
 
@@ -132,18 +160,33 @@ public sealed class TrimTests
         // A font registered from memory under an id of its own lives on the rasterizer.
         var rasterizer = r.GlyphRasterizer!;
         rasterizer.RegisterFontFromMemory("mem:kept", File.ReadAllBytes(FontPath)).ShouldBeTrue();
-        var widthBefore = r.MeasureText("Hello trim", "mem:kept", 18f).Width;
-        widthBefore.ShouldBeGreaterThan(0f);
+        var helloBefore = r.MeasureText("Hello trim", "mem:kept", 18f);
+        helloBefore.Width.ShouldBeGreaterThan(0f);
         var stampBefore = r.SdfPageStamp(0, false);
         var epochBefore = r.TrimEpoch;
 
+        // The reference for a text this renderer first measures while trimmed: a fresh renderer, never trimmed, with the
+        // same font registered on its own rasterizer.
+        (float Width, float Height) anotherFresh;
+        using (var fresh = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128))
+        {
+            fresh.GlyphRasterizer!.RegisterFontFromMemory("mem:kept", File.ReadAllBytes(FontPath)).ShouldBeTrue();
+            anotherFresh = fresh.MeasureText("another text", "mem:kept", 18f);
+        }
+        anotherFresh.Width.ShouldBeGreaterThan(0f);
+        anotherFresh.Height.ShouldBeGreaterThan(0f);
+
         r.Trim().ShouldBeTrue();
         r.TrimEpoch.ShouldBe(epochBefore + 1);
-        // The same rasterizer object, not disposed, with the registered font; and MeasureText answers while trimmed,
-        // for a cached text and for one never measured.
+        // The same rasterizer object, not disposed, with the registered font; and MeasureText answers while trimmed:
+        // a text already measured from the cache, rebuilding nothing, and one never measured by rebuilding the
+        // atlases, to the size a renderer that was never trimmed gives it.
         r.GlyphRasterizer.ShouldBeSameAs(rasterizer);
-        r.MeasureText("Hello trim", "mem:kept", 18f).Width.ShouldBe(widthBefore);
-        r.MeasureText("another text", "mem:kept", 18f).Width.ShouldBeGreaterThan(0f);
+        r.MeasureText("Hello trim", "mem:kept", 18f).ShouldBe(helloBefore);
+        r.MemoryStats.TotalBytes.ShouldBe(0, "a measured text is answered from the cache, with nothing rebuilt");
+        var another = r.MeasureText("another text", "mem:kept", 18f);
+        another.Width.ShouldBe(anotherFresh.Width, "the rebuilt atlases measure the width a fresh renderer does");
+        another.Height.ShouldBe(anotherFresh.Height, "the rebuilt atlases measure the height a fresh renderer does");
 
         // Drawing in the registered font after the trim, and a saved SDF page stamp no longer matches.
         for (var i = 0; i < MaxFrames; i++)
@@ -160,7 +203,7 @@ public sealed class TrimTests
             if (!r.FontAtlasDirty) break;
             Thread.Sleep(2);
         }
-        ctx.ReadbackOffscreenRgba().Any(b => b != 0).ShouldBeTrue("text in the registered font drew after the trim");
+        InkPixels(ctx.ReadbackOffscreenRgba()).ShouldBeGreaterThan(0, "text in the registered font drew after the trim");
         var stampAfter = r.SdfPageStamp(0, false);
         stampAfter.ShouldNotBe(stampBefore, "a stamp saved before a trim never matches one taken after it");
 
@@ -238,15 +281,21 @@ public sealed class TrimTests
         var (page, stampBefore) = LayOutPersistent(r, ctx, sdfGids, slugGids, sdf, slug);
         stampBefore.ShouldBe(r.SdfPageStamp(page, false));
         var epochBefore = r.TrimEpoch;
+        // The SDF row lies above the Slug row, so the ink of each is counted on its own.
+        var sdfRows = QuadRows(sdf, VkRenderer.SdfInstanceFloats);
+        var slugRows = QuadRows(slug, VkRenderer.SlugInstanceFloats);
+        sdfRows.Bottom.ShouldBeLessThanOrEqualTo(slugRows.Top, $"the SDF rows {sdfRows} lie above the Slug rows {slugRows}");
 
-        // (c) Draw both from persistent buffers.
+        // (c) Draw both from persistent buffers. Each kind must have drawn ink of its own, or the comparison after the
+        // trim would hold a blank row against a blank row.
         var sdfBuf = r.CreatePersistentVertexBuffer(sdf);
         var slugBuf = r.CreatePersistentVertexBuffer(slug);
         byte[] first;
         try
         {
             first = DrawPersistent(r, ctx, sdfBuf.Buffer, sdfGids.Length, page, slugBuf.Buffer, slugGids.Length);
-            first.Any(b => b != 0).ShouldBeTrue("the persistent glyphs drew something");
+            InkPixels(first, sdfRows.Top, sdfRows.Bottom).ShouldBeGreaterThan(0, $"the persistent SDF glyphs drew in rows {sdfRows}");
+            InkPixels(first, slugRows.Top, slugRows.Bottom).ShouldBeGreaterThan(0, $"the persistent Slug glyphs drew in rows {slugRows}");
         }
         finally
         {
