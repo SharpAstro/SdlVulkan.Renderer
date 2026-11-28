@@ -375,6 +375,9 @@ public sealed class SdlWindowView(SdlVulkanWindow window, VkRenderer renderer)
     // after returning rebuild the swapchain against the new surface, then resume.
     internal bool Paused;
     internal bool NeedsSurfaceRebuild;
+    // Desktop only, from SdlEventLoop.TrimWhenHidden: the loop trimmed this view's GPU memory on Hidden/Minimized and
+    // draws nothing (no present to a hidden window) until Shown/Restored, when the next frame begin rebuilds it.
+    internal bool TrimmedByLoop;
     internal float MouseX, MouseY;
     internal readonly Dictionary<long, (float X, float Y)> ActiveFingers = new();
 

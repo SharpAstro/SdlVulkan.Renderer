@@ -7,6 +7,15 @@ build job reads that property back rather than restating it, so a package can ne
 this file disagrees with. Bump it there and add the entry here, in the same commit.
 
 
+## 7.122
+
+**Memory counters, fewest swapchain images and Trim (#218).** `VkRenderer.MemoryStats` reports atlas pages and bytes, the Slug
+store, the vertex ring and the swapchain image count; `VulkanContext.PreferFewestSwapchainImages` asks for the surface's
+minimum image count instead of one more. `VkRenderer.Trim()` releases atlas pages, the Slug store, the vertex ring and the
+swapchain between frames and the next frame begin rebuilds them, drawing the same pixels. `SdlEventLoop.TrimWhenHidden`
+(off by default, desktop only) trims a view on WindowHidden / WindowMinimized, draws nothing for it, and Shown / Restored
+rebuilds it on the next frame. See the README, "Memory".
+
 ## 7.121
 
 **Incremental present.** Each present names the rectangle of the image that changed since the last present

@@ -104,6 +104,14 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
     /// <inheritdoc cref="SdlWindowView.Ui"/>
     public WindowUiSettings? Ui { get => Primary.Ui; set => Primary.Ui = value; }
 
+    /// <summary>
+    /// Opt-in, off by default, desktop only: when a window is hidden or minimized the loop calls
+    /// <see cref="VkRenderer.Trim"/> for its view (atlas pages, Slug store, vertex ring, swapchain released) and draws
+    /// nothing for it; Shown / Restored re-arms a redraw and the next frame begin rebuilds what was released. The window
+    /// event itself is the trigger: no timer, no polling. Android keeps its own surface-loss path.
+    /// </summary>
+    public bool TrimWhenHidden { get; set; }
+
     /// <summary>Multi-window constructor. Add windows with <see cref="AddWindow"/>.</summary>
     public SdlEventLoop() { }
 
@@ -616,6 +624,10 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
         if (v.Paused && v.GpuRecoveryTask is null)
             return false;
 
+        // Trimmed by TrimWhenHidden: hidden, nothing to present to. Shown / Restored clears this and re-arms.
+        if (v.TrimmedByLoop && v.GpuRecoveryTask is null)
+            return false;
+
         // A sacrificial recovery task owns this window's renderer while in flight (see the
         // stuck-fence escalation in the catch below). Poll it here — the render thread itself never
         // enters the possibly-blocking teardown: success resumes rendering, failure or a blown
@@ -1053,6 +1065,13 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                     // a resize against it would throw out of Dispatch, which runs uncaught.
                     if (vr.IsGpuWedged)
                         break;
+                    // Trimmed while hidden: no swapchain to resize. The rebuild on show reads the surface's
+                    // current extent through the usual out-of-date path.
+                    if (vr.TrimmedByLoop)
+                    {
+                        vr.NeedsRedraw = true;
+                        break;
+                    }
                     // Backgrounded or awaiting a surface rebuild (Android): the current surface is
                     // dead, so resizing the swapchain against it would throw SURFACE_LOST — and
                     // Dispatch runs uncaught. SDL can deliver Restored + Resized in one poll batch
@@ -1102,6 +1121,13 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                     ve.NeedsSurfaceRebuild = true;
 #endif
                     ve.NeedsRedraw = true;
+#if !ANDROID
+                    if (evt.Type != (uint)EventType.WindowExposed
+                        && LoopTrimDecision.Decide(evt.Type == (uint)EventType.WindowShown
+                            ? LoopTrimDecision.Kind.Shown : LoopTrimDecision.Kind.Restored,
+                            false, TrimWhenHidden, ve.TrimmedByLoop) == LoopTrimAction.Resume)
+                        ve.TrimmedByLoop = false; // the next frame begin rebuilds what Trim released
+#endif
                     // Restoring a minimized window, SDL rebuilt its style, maximize box included: put back a
                     // SetMaximizable(false). Shown, too, as a show can rebuild it (a window shown into fullscreen).
                     if (evt.Type != (uint)EventType.WindowExposed)
@@ -1114,6 +1140,23 @@ public sealed class SdlEventLoop : IShutdownDrainLoop
                 if (TryView(evt.Window.WindowID, out var vlf))
                     vlf.Window.ApplyMaximizable();
                 break;
+
+#if !ANDROID
+            case EventType.WindowHidden:
+            case EventType.WindowMinimized:
+                if (TryView(evt.Window.WindowID, out var vt)
+                    && LoopTrimDecision.Decide(evt.Type == (uint)EventType.WindowHidden
+                        ? LoopTrimDecision.Kind.Hidden : LoopTrimDecision.Kind.Minimized,
+                        false, TrimWhenHidden, vt.TrimmedByLoop) == LoopTrimAction.Trim
+                    && !vt.IsGpuWedged && vt.GpuRecoveryTask is null)
+                {
+                    // Trim returns false (releasing nothing) when its bounded drain times out: stay live then.
+                    // Dispatch runs between frames, so it is never inside one.
+                    if (vt.Renderer.Trim())
+                        vt.TrimmedByLoop = true;
+                }
+                break;
+#endif
 
 #if ANDROID
             case EventType.WindowHidden:
