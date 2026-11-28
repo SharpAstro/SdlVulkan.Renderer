@@ -85,24 +85,96 @@ public sealed class TrimTests
         r.MemoryStats.TotalBytes.ShouldBe(0);
 
         var after = Settle(r, ctx);
-        // The SDF atlas lays glyph cells out in the order the async encodes land, and a cell's neighbours change how an
-        // edge samples by at most one level (a second fresh renderer with no trim, same context, differs from the first
-        // in exactly these bytes). So "the same pixels" is: same coverage everywhere and no byte off by more than one.
-        var differing = 0;
-        var maxDelta = 0;
-        for (var i = 0; i < before.Length; i++)
+        // A second fresh renderer on the same context, no trim, is the reference: when it reproduces the first frame
+        // exactly, so must the frame after a trim; when it differs (the SDF atlas lays cells out in the order the async
+        // encodes land, which moves an edge by a level), the trim may differ by no more than that.
+        byte[] fresh;
+        using (var r2 = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128))
+            fresh = Settle(r2, ctx);
+        var (refDiff, refMax) = Diff(before, fresh);
+        var (differing, maxDelta) = Diff(before, after);
+        if (refDiff == 0)
         {
-            var d = Math.Abs(before[i] - after[i]);
-            if (d != 0) differing++;
-            maxDelta = Math.Max(maxDelta, d);
+            differing.ShouldBe(0, "a fresh renderer reproduces the frame exactly, so must the one after a trim");
         }
-        maxDelta.ShouldBeLessThanOrEqualTo(1, "the frame after a trim draws the pixels of the one before");
-        differing.ShouldBeLessThan(before.Length / 100, "only edge bytes of the SDF text may differ");
+        else
+        {
+            maxDelta.ShouldBeLessThanOrEqualTo(Math.Max(refMax, 1), "the frame after a trim draws the pixels of the one before");
+            differing.ShouldBeLessThan(before.Length / 100, "only edge bytes of the SDF text may differ");
+        }
         var back = r.MemoryStats;
         back.BitmapAtlasBytes.ShouldBeGreaterThan(0);
         back.SdfBaseBytes.ShouldBeGreaterThan(0);
         back.SlugStoreBytes.ShouldBeGreaterThan(0);
         back.VertexRingBytes.ShouldBeGreaterThan(0);
+    }
+
+    private static (int Differing, int MaxDelta) Diff(byte[] a, byte[] b)
+    {
+        var differing = 0;
+        var maxDelta = 0;
+        for (var i = 0; i < a.Length; i++)
+        {
+            var d = Math.Abs(a[i] - b[i]);
+            if (d != 0) differing++;
+            maxDelta = Math.Max(maxDelta, d);
+        }
+        return (differing, maxDelta);
+    }
+
+    private static void RunKept(VulkanContext ctx)
+    {
+        ctx.ResizeOffscreen(Width, Height);
+        using var r = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128);
+        // A font registered from memory under an id of its own lives on the rasterizer.
+        var rasterizer = r.GlyphRasterizer!;
+        rasterizer.RegisterFontFromMemory("mem:kept", File.ReadAllBytes(FontPath)).ShouldBeTrue();
+        var widthBefore = r.MeasureText("Hello trim", "mem:kept", 18f).Width;
+        widthBefore.ShouldBeGreaterThan(0f);
+        var stampBefore = r.SdfPageStamp(0, false);
+        var epochBefore = r.TrimEpoch;
+
+        r.Trim().ShouldBeTrue();
+        r.TrimEpoch.ShouldBe(epochBefore + 1);
+        // The same rasterizer object, not disposed, with the registered font; and MeasureText answers while trimmed,
+        // for a cached text and for one never measured.
+        r.GlyphRasterizer.ShouldBeSameAs(rasterizer);
+        r.MeasureText("Hello trim", "mem:kept", 18f).Width.ShouldBe(widthBefore);
+        r.MeasureText("another text", "mem:kept", 18f).Width.ShouldBeGreaterThan(0f);
+
+        // Drawing in the registered font after the trim, and a saved SDF page stamp no longer matches.
+        for (var i = 0; i < MaxFrames; i++)
+        {
+            r.BeginOffscreenFrame(Black).ShouldBeTrue();
+            r.BeginSdfGlyphBatch(White, 24f);
+            for (var g = 0; g < 4; g++) r.AddBatchedSdfGlyph("mem:kept", new Rune('a' + g), -1, 4f + g * 16f, 40f);
+            r.EndGlyphBatch();
+            r.BeginSlugGlyphBatch(White, 20f);
+            for (var g = 0; g < 4; g++) r.AddBatchedSlugGlyphAtBaseline("mem:kept", new Rune('w' + g), -1, 80f + g * 14f, 60f);
+            r.EndGlyphBatch();
+            r.EndOffscreenFrame();
+            ctx.WaitOffscreenFrameComplete();
+            if (!r.FontAtlasDirty) break;
+            Thread.Sleep(2);
+        }
+        ctx.ReadbackOffscreenRgba().Any(b => b != 0).ShouldBeTrue("text in the registered font drew after the trim");
+        var stampAfter = r.SdfPageStamp(0, false);
+        stampAfter.ShouldNotBe(stampBefore, "a stamp saved before a trim never matches one taken after it");
+
+        // A persistent Slug instance written after the trim is a real quad from the rebuilt store.
+        var instance = new float[VkRenderer.SlugInstanceFloats];
+        var layout = VkRenderer.SlugGlyphLayout.Pending;
+        var gid = rasterizer.ResolveGlyphIdentity("mem:kept", new Rune('A'), -1, default).Gid;
+        for (var i = 0; i < MaxFrames; i++)
+        {
+            layout = r.WriteSlugGlyphInstance("mem:kept", gid, null, 0f, 20f, 20f, 0f, 1f, instance);
+            if (layout != VkRenderer.SlugGlyphLayout.Pending) break;
+            r.BeginOffscreenFrame(Black).ShouldBeTrue();
+            r.EndOffscreenFrame();
+            ctx.WaitOffscreenFrameComplete();
+            Thread.Sleep(2);
+        }
+        layout.ShouldBe(VkRenderer.SlugGlyphLayout.Quad);
     }
 
     private static void RunInFrame(VulkanContext ctx)
@@ -151,6 +223,30 @@ public sealed class TrimTests
             RunInFrame(ctx!);
             var errors = ValidatedOffscreen.Messages.Where(ValidatedOffscreen.IsError).ToArray();
             Assert.True(errors.Length == 0, $"the validation layer reported {errors.Length} error(s):\n{string.Join("\n\n", errors)}");
+        }
+        finally
+        {
+            ValidatedOffscreen.Destroy(ctx, messenger, api);
+        }
+    }
+
+    [Fact]
+    public void The_rasterizer_and_its_fonts_survive_a_trim_and_measure_text_keeps_answering()
+    {
+        if (!ValidatedOffscreen.TryCreate(Width, Height, out var ctx, out var messenger, out var api, out var skip))
+        {
+            Assert.Skip(skip);
+            return;
+        }
+        ValidatedOffscreen.Messages.Clear();
+        try
+        {
+            RunKept(ctx!);
+            var errors = ValidatedOffscreen.Messages.Where(ValidatedOffscreen.IsError).ToArray();
+            Assert.True(errors.Length == 0, $"the validation layer reported {errors.Length} error(s):
+{string.Join("
+
+", errors)}");
         }
         finally
         {

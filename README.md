@@ -299,7 +299,7 @@ Options `--frames`, `--size`, `--msaa`, `--burst` and `--cjk-font` (see `tools/S
 
 `VulkanContext.PreferFewestSwapchainImages = true` builds the swapchain with the surface's `minImageCount` instead of one more, for an app that would rather hold fewer images than pipeline one more frame.
 
-`VkRenderer.Trim()` releases the font atlases' pages, the Slug store, the vertex ring and the swapchain while nothing is drawn (between frames only); the next frame begin builds them again, so the frame after a trim draws the same pixels as before it. It returns false, releasing nothing, if the bounded device drain times out.
+`VkRenderer.Trim()` releases the font atlases' pages, the Slug store, the vertex ring and the swapchain while nothing is drawn (between frames only); the next frame begin builds them again, so the frame after a trim draws the same pixels as before it. It returns false, releasing nothing, if the bounded device drain times out. The font rasterizer and the fonts registered on it survive, and `MeasureText` keeps answering. Persistent glyph instances (Slug, SDF cells) do not: `VkRenderer.TrimEpoch` changes on every trim and is mixed into `SdfPageStamp`, so a caller that keeps instances compares it and lays them out again.
 
 `SdlEventLoop.TrimWhenHidden = true` (off by default, desktop only) does that on its own: a window event of Hidden or Minimized trims that window's view and the loop draws nothing for it; Shown or Restored re-arms a redraw and the next frame rebuilds it. No timer, no polling. Android keeps its own surface-loss path.
 
