@@ -65,6 +65,7 @@ public sealed class TrimTests
         using var r = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128) { };
         var before = Settle(r, ctx);
         InkPixels(before).ShouldBeGreaterThan(0, "the scene drew something");
+        var cellsBefore = SdfCells(r, ctx);
         var full = r.MemoryStats;
         full.BitmapAtlasBytes.ShouldBeGreaterThan(0);
         full.SdfBaseBytes.ShouldBeGreaterThan(0);
@@ -85,28 +86,48 @@ public sealed class TrimTests
         r.MemoryStats.TotalBytes.ShouldBe(0);
 
         var after = Settle(r, ctx);
-        // A second fresh renderer on the same context, no trim, is the reference: when it reproduces the first frame
-        // exactly, so must the frame after a trim; when it differs (the SDF atlas lays cells out in the order the async
-        // encodes land, which moves an edge by a level), the trim may differ by no more than that.
-        byte[] fresh;
-        using (var r2 = new VkRenderer(ctx, Width, Height, sdfInitialAtlasDim: 128))
-            fresh = Settle(r2, ctx);
-        var (refDiff, refMax) = Diff(before, fresh);
+        var cellsAfter = SdfCells(r, ctx);
+        // The SDF atlas places a cell where the glyph's async encode happens to land, so the same glyphs may take other
+        // cells after the trim, from one run to the next (a fresh renderer as the reference cannot tell: it rolls the
+        // same dice). So the cells themselves decide: the same cells, the same pixels; another cell, edge bytes within
+        // one level, from the filtering there.
         var (differing, maxDelta) = Diff(before, after);
-        if (refDiff == 0)
+        var cells = $"SDF cells before [{string.Join(",", cellsBefore)}], after [{string.Join(",", cellsAfter)}]";
+        if (cellsBefore.AsSpan().SequenceEqual(cellsAfter))
         {
-            differing.ShouldBe(0, "a fresh renderer reproduces the frame exactly, so must the one after a trim");
+            differing.ShouldBe(0, $"the same atlas cells draw the same pixels after the trim (max delta {maxDelta}); {cells}");
         }
         else
         {
-            maxDelta.ShouldBeLessThanOrEqualTo(Math.Max(refMax, 1), "the frame after a trim draws the pixels of the one before");
-            differing.ShouldBeLessThan(before.Length / 100, "only edge bytes of the SDF text may differ");
+            maxDelta.ShouldBeLessThanOrEqualTo(1, $"a glyph sampled from another cell moves an edge by a level at most; {cells}");
+            differing.ShouldBeLessThan(before.Length / 100, $"only edge bytes of the SDF text may differ; {cells}");
         }
         var back = r.MemoryStats;
         back.BitmapAtlasBytes.ShouldBeGreaterThan(0);
         back.SdfBaseBytes.ShouldBeGreaterThan(0);
         back.SlugStoreBytes.ShouldBeGreaterThan(0);
         back.VertexRingBytes.ShouldBeGreaterThan(0);
+    }
+
+    // Where the scene's SDF glyphs sit in the atlas once settled: per glyph its page and its cell (instance floats 6 to
+    // 9), read through LayoutSdfGlyph, which never rasterizes, in an empty frame of its own.
+    private static float[] SdfCells(VkRenderer r, VulkanContext ctx)
+    {
+        var rasterizer = r.GlyphRasterizer!;
+        var cells = new float[4 * 5];
+        var instance = new float[VkRenderer.SdfInstanceFloats];
+        r.BeginOffscreenFrame(Black).ShouldBeTrue();
+        for (var i = 0; i < 4; i++)
+        {
+            var gid = rasterizer.ResolveGlyphIdentity(FontPath, new Rune('a' + i), -1, default).Gid;
+            r.LayoutSdfGlyph(FontPath, gid, null, 0f, 0f, 24f, 0f, 1f, largeTier: false, instance, out var page, out _)
+                .ShouldBe(VkRenderer.SdfGlyphLayout.Quad, "the settled scene's SDF glyphs are in the atlas");
+            cells[i * 5] = page;
+            instance.AsSpan(6, 4).CopyTo(cells.AsSpan(i * 5 + 1));
+        }
+        r.EndOffscreenFrame();
+        ctx.WaitOffscreenFrameComplete();
+        return cells;
     }
 
     // Pixels in rows [yFrom, yTo) whose colour differs from the black clear. The readback is R, G, B, A and the clear is
